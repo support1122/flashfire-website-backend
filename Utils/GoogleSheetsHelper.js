@@ -2,7 +2,8 @@ import { google } from 'googleapis';
 import path from 'path';
 
 const auth = new google.auth.GoogleAuth({
-  keyFile: path.join(process.cwd(), 'google-service-key.json'),
+  // keyFile: path.join(process.cwd(), 'google-service-key.json'),
+  credentials: JSON.parse(process.env.GOOGLE_SERVICE_KEY),
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
 
