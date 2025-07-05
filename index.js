@@ -45,6 +45,7 @@ import express from 'express';
 import Routes from './Routes.js';
 import Connection from './Utils/ConnectDB.js';
 import cors from 'cors';
+import 'dotenv/config';
 
 const app = express();
 
