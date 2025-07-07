@@ -3,6 +3,8 @@ import VerifyInterestedClient from "./Middlewares/VerifyInterestedClient.js";
 import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
 import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
+import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
+
 
 
   //these routes are defined and codes are written only requires minor modification to suit on a case by case basis..
@@ -36,6 +38,7 @@ export default function Routes(app){
    app.post("/calendly-webhook",GetMeetDetails);
    //the routes that handles contact us page..
    app.post('/api/contact', Contact)
+   app.post('/calendly-webhook',Calendly_Meet_Integration)
   
 
 }
