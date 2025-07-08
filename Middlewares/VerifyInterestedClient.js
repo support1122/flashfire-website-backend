@@ -119,6 +119,126 @@
 // }
 
 
+// import { InterestedClientsModel } from "../Schema_Models/InterestedClients.js";
+// import dotenv from 'dotenv';
+// import axios from 'axios';
+// import https from 'https';
+// import { DiscordConnect } from "../Utils/DiscordConnect.js";
+// import { appendToGoogleSheet } from "../Utils/GoogleSheetsHelper.js";
+// dotenv.config();
+
+// const isDev = process.env.NODE_ENV !== 'production';
+// const httpsAgent = new https.Agent({ rejectUnauthorized: !isDev });
+
+// export default async function VerifyInterestedClient(req, res, next){
+//     console.log("req.body:", req.body);
+//     try {
+//         await appendToGoogleSheet({
+//             name: req.body.name,
+//             email: req.body.email,
+//             mobile: req.body.mobile,
+//             timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+//         });
+
+//         const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body.email });
+//         const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
+
+//         const validateEmail = async (email) => {
+//     const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
+//         params: {
+//             api_key: process.env.ABSTRACT_API_EMAIL_VERIFICATION_API_KEY,
+//             email
+//         },
+//         httpsAgent,
+//         headers: {
+//             'User-Agent': 'FlashFire/1.0'
+//         }
+//     });
+//     return res.data;
+// };
+
+//         const validateMobile = async (phone) => {
+//     const res = await axios.get(`https://phonevalidation.abstractapi.com/v1/`, {
+//         params: {
+//             api_key: process.env.ABSTRACT_API_MOBILE_VERIFICATION_API_KEY,
+//             phone
+//         },
+//         httpsAgent,
+//         headers: {
+//             'User-Agent': 'FlashFire/1.0'
+//         }
+//     });
+//     return res.data;
+// };
+
+//         if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length === 0) {
+//             const responseCheckEmail = await validateEmail(req.body.email);
+//             const responseCheckMobile = await validateMobile(req.body.mobile);
+//             console.log(responseCheckEmail, responseCheckMobile);
+
+//             const isMobileValid = responseCheckMobile?.carrier !== '' && responseCheckMobile?.location !== '';
+//             const isEmailValid = responseCheckEmail?.is_smtp_valid?.value;
+
+//             req.body.carrier = responseCheckMobile?.carrier;
+//             req.body.location = responseCheckMobile?.location;
+//             req.body.is_smtp_valid = isEmailValid;
+
+//             if (isMobileValid && isEmailValid) return next();
+//             else if (!isMobileValid && isEmailValid) return next();
+//             else if (isMobileValid && !isEmailValid) return next();
+//             else return res.status(400).json({ message: 'Enter details correctly..!' });
+
+//         } else if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length > 0) {
+//             const responseCheckEmail = await validateEmail(req.body.email);
+//             const responseCheckMobile = await validateMobile(req.body.mobile);
+
+//             req.body.carrier = responseCheckMobile?.carrier;
+//             req.body.location = responseCheckMobile?.location;
+//             req.body.is_smtp_valid = responseCheckEmail?.is_smtp_valid?.value;
+//             return next();
+//         } else {
+//             if (checkingInDatabaseForEmail.length > 0 && checkingInDatabaseForMobile.length > 0) {
+//                 const duplicateMessage = {
+//                     Message: "Duplicate user detected..!",
+//                     "Duplicate Values": {
+//                         "Duplicate Client Name": req.body.name,
+//                         "Duplicate Client Email": req.body.email,
+//                         "Duplicate Client Mobile": req.body.mobile,
+//                     },
+//                     "Original/ Old Values": {
+//                         "Client Name": checkingInDatabaseForEmail?.[0].name,
+//                         "Client Email": checkingInDatabaseForEmail?.[0].email,
+//                         "Client Mobile": checkingInDatabaseForEmail?.[0].mobile
+//                     }
+//                 };
+//                 DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+//                 return res.status(400).json({ message: 'User already exists with this Email and Mobile No.' });
+//             } else if (checkingInDatabaseForEmail.length > 0 && checkingInDatabaseForMobile.length === 0) {
+//                 const duplicateMessage = {
+//                     Message: "Duplicate user detected..!",
+//                     "Duplicate Values": {
+//                         "Duplicate Client Name": req.body.name,
+//                         "Duplicate Client Email": req.body.email,
+//                     },
+//                     "Original/ Old Values": {
+//                         "Client Name": checkingInDatabaseForEmail?.[0].name,
+//                         "Client Email": checkingInDatabaseForEmail?.[0].email,
+//                     }
+//                 };
+//                 DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+//                 return res.status(400).json({ message: 'User already exists with this Email' });
+//             }
+//         }
+//     } catch (error) {
+//     console.error("❌ Error in VerifyInterestedClient:", error.message);
+//     if (error.response) {
+//         console.error("🚨 API Response Error:", error.response.data);
+//     }
+//     return res.status(500).json({ message: "Internal Server Error in verification." });
+// }
+// }
+
+
 import { InterestedClientsModel } from "../Schema_Models/InterestedClients.js";
 import dotenv from 'dotenv';
 import axios from 'axios';
@@ -129,6 +249,44 @@ dotenv.config();
 
 const isDev = process.env.NODE_ENV !== 'production';
 const httpsAgent = new https.Agent({ rejectUnauthorized: !isDev });
+
+        const validateEmail = async (email) => {
+            try {
+                const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
+                    params: {
+                        api_key: process.env.ABSTRACT_API_EMAIL_VERIFICATION_API_KEY,
+                        email
+                    },
+                    httpsAgent,
+                    headers: {
+                        'User-Agent': 'FlashFire/1.0'
+                    }});
+            return res.data;
+
+            } catch (error) {
+                console.log(error)
+            }
+    
+};
+
+        const validateMobile = async (phone) => {
+            try {
+                const res = await axios.get(`https://phonevalidation.abstractapi.com/v1/`, {
+                    params: {
+                        api_key: process.env.ABSTRACT_API_MOBILE_VERIFICATION_API_KEY,
+                        phone
+                    },
+                    httpsAgent,
+                    headers: {
+                        'User-Agent': 'FlashFire/1.0'
+                    }});
+            return res.data;
+                
+            } catch (error) {
+                console.log(error)
+            }
+    
+};
 
 export default async function VerifyInterestedClient(req, res, next){
     console.log("req.body:", req.body);
@@ -143,33 +301,6 @@ export default async function VerifyInterestedClient(req, res, next){
         const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body.email });
         const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
 
-        const validateEmail = async (email) => {
-    const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
-        params: {
-            api_key: process.env.ABSTRACT_API_EMAIL_VERIFICATION_API_KEY,
-            email
-        },
-        httpsAgent,
-        headers: {
-            'User-Agent': 'FlashFire/1.0'
-        }
-    });
-    return res.data;
-};
-
-        const validateMobile = async (phone) => {
-    const res = await axios.get(`https://phonevalidation.abstractapi.com/v1/`, {
-        params: {
-            api_key: process.env.ABSTRACT_API_MOBILE_VERIFICATION_API_KEY,
-            phone
-        },
-        httpsAgent,
-        headers: {
-            'User-Agent': 'FlashFire/1.0'
-        }
-    });
-    return res.data;
-};
 
         if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length === 0) {
             const responseCheckEmail = await validateEmail(req.body.email);
