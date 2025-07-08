@@ -144,31 +144,41 @@ export default async function VerifyInterestedClient(req, res, next){
         const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
 
         const validateEmail = async (email) => {
-    const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
-        params: {
-            api_key: process.env.ABSTRACT_API_EMAIL_VERIFICATION_API_KEY,
-            email
-        },
-        httpsAgent,
-        headers: {
-            'User-Agent': 'FlashFire/1.0'
-        }
-    });
-    return res.data;
+            try {
+                const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
+                    params: {
+                        api_key: process.env.ABSTRACT_API_EMAIL_VERIFICATION_API_KEY,
+                        email
+                    },
+                    httpsAgent,
+                    headers: {
+                        'User-Agent': 'FlashFire/1.0'
+                    }});
+            return res.data;
+
+            } catch (error) {
+                console.log(error)
+            }
+    
 };
 
         const validateMobile = async (phone) => {
-    const res = await axios.get(`https://phonevalidation.abstractapi.com/v1/`, {
-        params: {
-            api_key: process.env.ABSTRACT_API_MOBILE_VERIFICATION_API_KEY,
-            phone
-        },
-        httpsAgent,
-        headers: {
-            'User-Agent': 'FlashFire/1.0'
-        }
-    });
-    return res.data;
+            try {
+                const res = await axios.get(`https://phonevalidation.abstractapi.com/v1/`, {
+                    params: {
+                        api_key: process.env.ABSTRACT_API_MOBILE_VERIFICATION_API_KEY,
+                        phone
+                    },
+                    httpsAgent,
+                    headers: {
+                        'User-Agent': 'FlashFire/1.0'
+                    }});
+            return res.data;
+                
+            } catch (error) {
+                console.log(error)
+            }
+    
 };
 
         if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length === 0) {

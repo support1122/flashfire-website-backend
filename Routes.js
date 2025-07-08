@@ -2,7 +2,7 @@
 import VerifyInterestedClient from "./Middlewares/VerifyInterestedClient.js";
 import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
-import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
+// import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
 
@@ -35,7 +35,7 @@ export default function Routes(app){
    //this is the route when a new user clicks on the try now button..it verifies the details and adds details to the database..
    app.post('/', VerifyInterestedClient , Register_Sessions);
    //this is the route that calandly posts on for sending meeting details..from here meeting details or sessions can be added to DB for sales people..
-   app.post("/calendly-webhook",GetMeetDetails);
+  //  app.post("/calendly-webhook",GetMeetDetails);
    //the routes that handles contact us page..
    app.post('/api/contact', Contact)
    app.post('/calendly-webhook',Calendly_Meet_Integration)
