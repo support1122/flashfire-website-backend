@@ -130,19 +130,6 @@ dotenv.config();
 const isDev = process.env.NODE_ENV !== 'production';
 const httpsAgent = new https.Agent({ rejectUnauthorized: !isDev });
 
-export default async function VerifyInterestedClient(req, res, next){
-    console.log("req.body:", req.body);
-    try {
-        await appendToGoogleSheet({
-            name: req.body.name,
-            email: req.body.email,
-            mobile: req.body.mobile,
-            timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-        });
-
-        const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body.email });
-        const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
-
         const validateEmail = async (email) => {
             try {
                 const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
@@ -180,6 +167,20 @@ export default async function VerifyInterestedClient(req, res, next){
             }
     
 };
+
+export default async function VerifyInterestedClient(req, res, next){
+    console.log("req.body:", req.body);
+    try {
+        await appendToGoogleSheet({
+            name: req.body.name,
+            email: req.body.email,
+            mobile: req.body.mobile,
+            timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+        });
+
+        const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body.email });
+        const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
+
 
         if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length === 0) {
             const responseCheckEmail = await validateEmail(req.body.email);
