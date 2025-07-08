@@ -292,19 +292,19 @@ export default async function VerifyInterestedClient(req, res, next){
     console.log("req.body:", req.body);
     try {
         await appendToGoogleSheet({
-            name: req.body.name,
-            email: req.body.email,
-            mobile: req.body.mobile,
+            name: req.body?.name,
+            email: req.body?.email,
+            mobile: req.body?.mobile,
             timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
         });
 
-        const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body.email });
-        const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
+        const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body?.email });
+        const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body?.mobile });
 
 
         if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length === 0) {
-            const responseCheckEmail = await validateEmail(req.body.email);
-            const responseCheckMobile = await validateMobile(req.body.mobile);
+            const responseCheckEmail = await validateEmail(req.body?.email);
+            const responseCheckMobile = await validateMobile(req.body?.mobile);
             console.log(responseCheckEmail, responseCheckMobile);
 
             const isMobileValid = responseCheckMobile?.carrier !== '' && responseCheckMobile?.location !== '';
@@ -320,8 +320,8 @@ export default async function VerifyInterestedClient(req, res, next){
             else return res.status(400).json({ message: 'Enter details correctly..!' });
 
         } else if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length > 0) {
-            const responseCheckEmail = await validateEmail(req.body.email);
-            const responseCheckMobile = await validateMobile(req.body.mobile);
+            const responseCheckEmail = await validateEmail(req.body?.email);
+            const responseCheckMobile = await validateMobile(req.body?.mobile);
 
             req.body.carrier = responseCheckMobile?.carrier;
             req.body.location = responseCheckMobile?.location;
@@ -332,14 +332,14 @@ export default async function VerifyInterestedClient(req, res, next){
                 const duplicateMessage = {
                     Message: "Duplicate user detected..!",
                     "Duplicate Values": {
-                        "Duplicate Client Name": req.body.name,
-                        "Duplicate Client Email": req.body.email,
-                        "Duplicate Client Mobile": req.body.mobile,
+                        "Duplicate Client Name": req.body?.name,
+                        "Duplicate Client Email": req.body?.email,
+                        "Duplicate Client Mobile": req.body?.mobile,
                     },
                     "Original/ Old Values": {
-                        "Client Name": checkingInDatabaseForEmail?.[0].name,
-                        "Client Email": checkingInDatabaseForEmail?.[0].email,
-                        "Client Mobile": checkingInDatabaseForEmail?.[0].mobile
+                        "Client Name": checkingInDatabaseForEmail?.[0]?.name,
+                        "Client Email": checkingInDatabaseForEmail?.[0]?.email,
+                        "Client Mobile": checkingInDatabaseForEmail?.[0]?.mobile
                     }
                 };
                 DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
@@ -348,12 +348,12 @@ export default async function VerifyInterestedClient(req, res, next){
                 const duplicateMessage = {
                     Message: "Duplicate user detected..!",
                     "Duplicate Values": {
-                        "Duplicate Client Name": req.body.name,
-                        "Duplicate Client Email": req.body.email,
+                        "Duplicate Client Name": req.body?.name,
+                        "Duplicate Client Email": req.body?.email,
                     },
                     "Original/ Old Values": {
-                        "Client Name": checkingInDatabaseForEmail?.[0].name,
-                        "Client Email": checkingInDatabaseForEmail?.[0].email,
+                        "Client Name": checkingInDatabaseForEmail?.[0]?.name,
+                        "Client Email": checkingInDatabaseForEmail?.[0]?.email,
                     }
                 };
                 DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
@@ -361,9 +361,9 @@ export default async function VerifyInterestedClient(req, res, next){
             }
         }
     } catch (error) {
-    console.error("❌ Error in VerifyInterestedClient:", error.message);
-    if (error.response) {
-        console.error("🚨 API Response Error:", error.response.data);
+    console.error("❌ Error in VerifyInterestedClient:", error?.message);
+    if (error?.response) {
+        console.error("🚨 API Response Error:", error?.response?.data);
     }
     return res.status(500).json({ message: "Internal Server Error in verification." });
 }
