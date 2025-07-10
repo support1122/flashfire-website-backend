@@ -6,10 +6,11 @@ export const InterestedClientsSchema = new mongoose.Schema({
     name : {
         type : String,
         required : true, 
+        default : '<UNNAMED USER>'
     },
     email : {
         type : String,
-        default : ' ',
+        default : '<UNKNOWN EMAIL>',
         // unique : true
     },
     mobile : {
