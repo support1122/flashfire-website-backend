@@ -91,27 +91,27 @@ export default async function Register_Sessions(req, res) {
     DiscordConnect(JSON.stringify(discordMessage, null, 2));
 
     // ✅ Insert into Supabase
-    const supabaseData = {
-      name,
-      email: is_smtp_valid ? email : null,
-      mobile: (carrier !== '' && location !== '') ? mobile : null,
-      work_authorization: workAuthorization
-    };
+    // const supabaseData = {
+    //   name,
+    //   email: is_smtp_valid ? email : null,
+    //   mobile: (carrier !== '' && location !== '') ? mobile : null,
+    //   work_authorization: workAuthorization
+    // };
 
-    const { data, error } = await SupabaseConnect
-      .from('client_fields')  // ✅ Supabase table name (confirmed)
-      .insert([supabaseData]);
+    // const { data, error } = await SupabaseConnect
+    //   .from('client_fields')  // ✅ Supabase table name (confirmed)
+    //   .insert([supabaseData]);
 
-    if (error) {
-      console.error('❌ Supabase insertion failed:');
-      console.error('Message:', error.message);
-      console.error('Details:', error.details);
-      console.error('Hint:', error.hint);
-      return res.status(500).json({ message: 'Supabase insertion failed', error });
-    }
+    // if (error) {
+    //   console.error('❌ Supabase insertion failed:');
+    //   console.error('Message:', error.message);
+    //   console.error('Details:', error.details);
+    //   console.error('Hint:', error.hint);
+    //   return res.status(500).json({ message: 'Supabase insertion failed', error });
+    // }
 
-    console.log('✅ Inserted into Supabase:', supabaseData);
-    return res.status(201).json({ message: 'Success' });
+    // console.log('✅ Inserted into Supabase:', supabaseData);
+    // return res.status(201).json({ message: 'Success' });
 
   } catch (error) {
     console.error('❌ Unhandled Error:', error.message);

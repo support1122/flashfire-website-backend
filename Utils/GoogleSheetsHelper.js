@@ -16,7 +16,7 @@ export async function appendToGoogleSheet({ name, email, mobile, timestamp }) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SHEET_ID,
-    range:`${SHEET_NAME}!A:C`,
+    range:`${SHEET_NAME}!A:D`,
     valueInputOption: 'USER_ENTERED',
     requestBody: {
       values: [[name, email, mobile, timestamp]],

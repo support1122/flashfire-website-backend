@@ -10,11 +10,11 @@ export default async function Calendly_Meet_Integration(req, res ) {
                 const { invitee, event: eventData, questions_and_answers} = payload;
         //extracted detail and storing in booking Details..
                 const bookingDetails = {
-                "Invitee Name": payload?.name,
-                "Invitee Email": payload?.email,
-                "GoogleMeet Link": payload?.scheduled_event?.location?.join_url,
-                "EventStart Time": new Date(payload?.scheduled_event?.start_time).toLocaleString('en-IN',{timeZone : 'Asia/Kolkata'}),
-                "Booked At":new Date(req.body?.created_at).toLocaleString('en-IN',{timeZone : 'Asia/Kolkata'})
+                    "Invitee Name": payload?.name,
+                    "Invitee Email": payload?.email,
+                    "GoogleMeet Link": payload?.scheduled_event?.location?.join_url,
+                    "EventStart Time": new Date(payload?.scheduled_event?.start_time).toLocaleString('en-IN',{timeZone : 'Asia/Kolkata'}),
+                    "Booked At":new Date(req.body?.created_at).toLocaleString('en-IN',{timeZone : 'Asia/Kolkata'})
                 };
         
             console.log("📅 New Calendly Booking:");

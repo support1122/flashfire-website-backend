@@ -38,7 +38,7 @@ export default function Routes(app){
   //  app.post("/calendly-webhook",GetMeetDetails);
    //the routes that handles contact us page..
    app.post('/api/contact', Contact)
-   app.post('/calendly-webhook',Calendly_Meet_Integration)
+   app.post('/calendly-webhook',Calendly_Meet_Integration);
   
 
 }
