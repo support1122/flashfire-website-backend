@@ -1,4 +1,4 @@
-import {DiscordConnect) from '../Utils/DiscordConnect.js'
+import {DiscordConnect} from '../Utils/DiscordConnect.js'
 import dotenv from 'dotenv'
 dotenv.config();
 
