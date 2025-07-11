@@ -220,7 +220,8 @@ export default async function VerifyInterestedClient(req, res, next){
                         "Client Mobile": checkingInDatabaseForEmail?.[0].mobile
                     }
                 };
-                DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+                // DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+              DiscordConnect(process.env.DISCORD_WEB_HOOK_URL,JSON.stringify(duplicateMessage, null, 2));
                 return res.status(400).json({ message: 'User already exists with this Email and Mobile No.' });
             } else if (checkingInDatabaseForEmail.length > 0 && checkingInDatabaseForMobile.length === 0) {
                 const duplicateMessage = {
@@ -234,7 +235,8 @@ export default async function VerifyInterestedClient(req, res, next){
                         "Client Email": checkingInDatabaseForEmail?.[0].email,
                     }
                 };
-                DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+                // DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+                DiscordConnect(process.env.DISCORD_WEB_HOOK_URL,JSON.stringify(duplicateMessage, null, 2));
                 return res.status(400).json({ message: 'User already exists with this Email' });
             }
         }
