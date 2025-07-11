@@ -175,6 +175,9 @@ export default async function VerifyInterestedClient(req, res, next){
             mobile: req.body.mobile,
             timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
         });
+      if(req.body.email =='' && req.body.mobile == '' && req.body.name ==''){
+        return;
+      }
 
         const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body.email });
         const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
