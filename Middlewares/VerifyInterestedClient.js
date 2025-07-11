@@ -117,8 +117,6 @@
 //         console.log(error)
 //     }   
 // }
-
-
 import { InterestedClientsModel } from "../Schema_Models/InterestedClients.js";
 import dotenv from 'dotenv';
 import axios from 'axios';
@@ -167,108 +165,86 @@ const httpsAgent = new https.Agent({ rejectUnauthorized: !isDev });
             }
     
 };
-
-export default async function VerifyInterestedClient(req, res, next){  
-    if(req.body.mobile == ''){
-        return res.json({message : 'enter details correctly..!'})
-    }
+//
+export default async function VerifyInterestedClient(req, res, next){
+    console.log("req.body:", req.body);
     try {
-        console.log("req.body:", req.body);
-        
-
-        // const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body?.email });
-        const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body?.mobile });
-
-// checkingInDatabaseForEmail.length === 0 && 
-        if (checkingInDatabaseForMobile.length === 0) {
-            // const responseCheckEmail = await validateEmail(req.body?.email);
-            const responseCheckMobile = await validateMobile(req.body?.mobile);
-            // responseCheckEmail,
-            console.log(responseCheckMobile);
-
-            const isMobileValid = responseCheckMobile?.carrier !== '' && responseCheckMobile?.location !== '';
-            // const isEmailValid = responseCheckEmail?.is_smtp_valid?.value;
-            if(responseCheckMobile?.carrier!= '' && responseCheckMobile?.location1 != ''){
-            req.body.carrier = responseCheckMobile?.carrier;
-            req.body.location = responseCheckMobile?.location;
-            await appendToGoogleSheet({
-                name: 'unknown user',
-                email: 'unknwon email',
-                mobile: req.body?.mobile,
-               // mobileVerification: 'verified',
-                timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-        });
-            // req.body.is_smtp_valid = isEmailValid;
-
-             return next(); //&& isEmailValid  // if (isMobileValid )
-            // else if (!isMobileValid && isEmailValid) return next();
-            // else if (isMobileValid && !isEmailValid) return next();
-            }
-            else {
-                await appendToGoogleSheet({
-                    name: req.body?.name,
-                    email: req.body?.email,
-                    mobile: req.body?.mobile,
-                    //mobileVerification : 'not verified',
-                    timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-                });
-                return res.status(400).json({ message: 'Enter details correctly..!' });
-            }
-
-        } else if (checkingInDatabaseForMobile.length > 0) { //checkingInDatabaseForEmail.length === 0 && 
-            // const responseCheckEmail = await validateEmail(req.body?.email);
-            // const responseCheckMobile = await validateMobile(req.body?.mobile);
-
-            // req.body.carrier = responseCheckMobile?.carrier;
-            // req.body.location = responseCheckMobile?.location;
-            // req.body.is_smtp_valid = responseCheckEmail?.is_smtp_valid?.value;
-        //     return next();
-        // } else {
-            // if ( checkingInDatabaseForMobile.length > 0) { //checkingInDatabaseForEmail.length > 0 &&
-            await appendToGoogleSheet({
-            name: req.body?.name,
-            email: req.body?.email,
-            mobile: req.body?.mobile,
-            mobileVerification : 'verified',
+        await appendToGoogleSheet({
+            name: req.body.name,
+            email: req.body.email,
+            mobile: req.body.mobile,
             timestamp: new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
         });
+
+        const checkingInDatabaseForEmail = await InterestedClientsModel.find({ email: req.body.email });
+        const checkingInDatabaseForMobile = await InterestedClientsModel.find({ mobile: req.body.mobile });
+
+
+        if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length === 0) {
+            const responseCheckEmail = await validateEmail(req.body.email);
+            const responseCheckMobile = await validateMobile(req.body.mobile);
+            console.log(responseCheckEmail, responseCheckMobile);
+
+            const isMobileValid = responseCheckMobile?.carrier !== '' && responseCheckMobile?.location !== '';
+            const isEmailValid = responseCheckEmail?.is_smtp_valid?.value;
+
+            req.body.carrier = responseCheckMobile?.carrier;
+            req.body.location = responseCheckMobile?.location;
+            req.body.is_smtp_valid = isEmailValid;
+
+            if (isMobileValid && isEmailValid) return next();
+            else if (!isMobileValid && isEmailValid) return next();
+            else if (isMobileValid && !isEmailValid) return next();
+            else return res.status(400).json({ message: 'Enter details correctly..!' });
+
+        } else if (checkingInDatabaseForEmail.length === 0 && checkingInDatabaseForMobile.length > 0) {
+            const responseCheckEmail = await validateEmail(req.body.email);
+            const responseCheckMobile = await validateMobile(req.body.mobile);
+
+            req.body.carrier = responseCheckMobile?.carrier;
+            req.body.location = responseCheckMobile?.location;
+            req.body.is_smtp_valid = responseCheckEmail?.is_smtp_valid?.value;
+            return next();
+        } else {
+            if (checkingInDatabaseForEmail.length > 0 && checkingInDatabaseForMobile.length > 0) {
                 const duplicateMessage = {
                     Message: "Duplicate user detected..!",
                     "Duplicate Values": {
-                        "Duplicate Client Name": req.body?.name || "<UNNAMED USER>",
-                        "Duplicate Client Email": req.body?.email || "<UNKNOWN EMAIL>",
-                        "Duplicate Client Mobile": req.body?.mobile,
+                        "Duplicate Client Name": req.body.name,
+                        "Duplicate Client Email": req.body.email,
+                        "Duplicate Client Mobile": req.body.mobile,
                     },
                     "Original/ Old Values": {
-                        "Client Name": checkingInDatabaseForMobile?.[0]?.name || "<UNNAMED USER>",
-                        "Client Email": checkingInDatabaseForMobile?.[0]?.email || "<UNKNOWN EMAIL>",
-                        "Client Mobile": checkingInDatabaseForMobile?.[0]?.mobile 
+                        "Client Name": checkingInDatabaseForEmail?.[0].name,
+                        "Client Email": checkingInDatabaseForEmail?.[0].email,
+                        "Client Mobile": checkingInDatabaseForEmail?.[0].mobile
                     }
                 };
-                DiscordConnect(process.env.DISCORD_WEB_HOOK_URL, JSON.stringify(duplicateMessage, null, 2));
-                return res.status(400).json({ message: 'User already exists with this Mobile No.' });
-            } 
-            // else if (checkingInDatabaseForEmail.length > 0 && checkingInDatabaseForMobile.length === 0) {
-            //     const duplicateMessage = {
-            //         Message: "Duplicate user detected..!",
-            //         "Duplicate Values": {
-            //             "Duplicate Client Name": req.body?.name,
-            //             "Duplicate Client Email": req.body?.email,
-            //         },
-            //         "Original/ Old Values": {
-            //             "Client Name": checkingInDatabaseForEmail?.[0]?.name,
-            //             "Client Email": checkingInDatabaseForEmail?.[0]?.email,
-            //         }
-            //     };
-            //     DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
-            //     return res.status(400).json({ message: 'User already exists with this Email' });
-            // }
-       // }
+                DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+                return res.status(400).json({ message: 'User already exists with this Email and Mobile No.' });
+            } else if (checkingInDatabaseForEmail.length > 0 && checkingInDatabaseForMobile.length === 0) {
+                const duplicateMessage = {
+                    Message: "Duplicate user detected..!",
+                    "Duplicate Values": {
+                        "Duplicate Client Name": req.body.name,
+                        "Duplicate Client Email": req.body.email,
+                    },
+                    "Original/ Old Values": {
+                        "Client Name": checkingInDatabaseForEmail?.[0].name,
+                        "Client Email": checkingInDatabaseForEmail?.[0].email,
+                    }
+                };
+                DiscordConnect(JSON.stringify(duplicateMessage, null, 2));
+                return res.status(400).json({ message: 'User already exists with this Email' });
+            }
+        }
     } catch (error) {
-    console.error("❌ Error in VerifyInterestedClient:", error?.message);
-    if (error?.response) {
-        console.error("🚨 API Response Error:", error?.response?.data);
+    console.error("❌ Error in VerifyInterestedClient:", error.message);
+    if (error.response) {
+        console.error("🚨 API Response Error:", error.response.data);
     }
     return res.status(500).json({ message: "Internal Server Error in verification." });
 }
 }
+
+
