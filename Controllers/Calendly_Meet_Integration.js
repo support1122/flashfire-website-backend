@@ -1,3 +1,4 @@
+import {DiscordConnect) from '../Utils/DiscordConnect.js'
 import dotenv from 'dotenv'
 dotenv.config();
 
@@ -20,7 +21,7 @@ export default async function Calendly_Meet_Integration(req, res ) {
             console.log("📅 New Calendly Booking:");
             console.log(bookingDetails);
             //Sending meeting details to Discord..
-            await DiscordConnect(JSON.stringify(bookingDetails,null,2));
+            await DiscordConnect(process.env.DISCORD_MEET_WEB_HOOK_URL, JSON.stringify(bookingDetails,null,2));
         
             return res.status(200).json({message : 'Webhook received',
                                 bookingDetails                    
@@ -30,25 +31,4 @@ export default async function Calendly_Meet_Integration(req, res ) {
         console.log(error);
     }
     
-}
-const DiscordConnect = async (message) => {
-    const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
-    try {
-        const response = await fetch(webhookURL, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            content: `🚨 App Update: ${message}`,
-        }),
-        });
-
-        if (!response.ok) {
-        throw new Error(`Failed to send: ${response.statusText}`);
-        }
-        console.log('✅ Message sent to Discord!');
-    } catch (error) {
-        console.error('❌ Error sending message:', error);
-  }
 }
