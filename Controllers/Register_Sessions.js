@@ -66,29 +66,28 @@ import { DiscordConnect } from "../Utils/DiscordConnect.js";
 import { SupabaseConnect } from "../Utils/SupabaseConnect.js";
 
 export default async function Register_Sessions(req, res) {
-  let { name, email, mobile, is_smtp_valid, carrier, location, workAuthorization } = req.body;
-
   try {
-    console.log('from register_session', req.body);
+    let {  mobile, carrier, location } = req?.body;//name, email,, is_smtp_valid,, workAuthorization
+    console.log('from register_session', req?.body);
 
     // ✅ Save to MongoDB conditionally
-    if (is_smtp_valid && carrier !== '' && location !== '') {
-      await InterestedClientsModel.create({ name, email, mobile, workAuthorization });
-    } else if (!is_smtp_valid && (carrier !== '' && location !== '')) {
-      await InterestedClientsModel.create({ name, mobile, workAuthorization });
-    } else if (is_smtp_valid && (carrier == '' || location == '')) {
-      await InterestedClientsModel.create({ name, email, workAuthorization });
+    if ( carrier !== '' && location !== '') { //is_smtp_valid &&
+      await InterestedClientsModel.create({mobile});//name, email,, workAuthorization 
+    // } else if (!is_smtp_valid && (carrier !== '' && location !== '')) {
+    //   await InterestedClientsModel.create({ name, mobile, workAuthorization });
+    // } else if (is_smtp_valid && (carrier == '' || location == '')) {
+    //   await InterestedClientsModel.create({ name, email, workAuthorization });
     }
 
     // ✅ Send to Discord
     const discordMessage = {
       "Message": "A New Lead Added ..!!!",
-      'Client Name': name,
-      'Client E-Mail': is_smtp_valid ? email : "<INVALID E-MAIL>",
-      'Client Mobile': (carrier !== '' && location !== '') ? mobile : "<INVALID MOBILE NO.>",
-      'Work Authorization': workAuthorization
+      'Client Name':  '<UNNAMED USER>',
+      'Client E-Mail':  "<INVALID E-MAIL>", //is_smtp_valid ?
+      'Client Mobile':  mobile ,
+      'Work Authorization': '<NOT SPECIFIED>'
     };
-    DiscordConnect(JSON.stringify(discordMessage, null, 2));
+    DiscordConnect(process.env.DISCORD_WEB_HOOK_URL, JSON.stringify(discordMessage, null, 2));
 
     // ✅ Insert into Supabase
     // const supabaseData = {

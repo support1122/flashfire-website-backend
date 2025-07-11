@@ -117,8 +117,6 @@
 //         console.log(error)
 //     }   
 // }
-
-
 import { InterestedClientsModel } from "../Schema_Models/InterestedClients.js";
 import dotenv from 'dotenv';
 import axios from 'axios';
@@ -248,3 +246,5 @@ export default async function VerifyInterestedClient(req, res, next){
     return res.status(500).json({ message: "Internal Server Error in verification." });
 }
 }
+
+
