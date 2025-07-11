@@ -67,25 +67,25 @@ import { SupabaseConnect } from "../Utils/SupabaseConnect.js";
 
 export default async function Register_Sessions(req, res) {
   try {
-    let {  mobile, carrier, location } = req?.body;//name, email,, is_smtp_valid,, workAuthorization
+    let {  mobile,name, email,is_smtp_valid, workAuthorization, carrier, location } = req?.body;//name, email,, 
     console.log('from register_session', req?.body);
 
     // ✅ Save to MongoDB conditionally
-    if ( carrier !== '' && location !== '') { //is_smtp_valid &&
-      await InterestedClientsModel.create({mobile});//name, email,, workAuthorization 
-    // } else if (!is_smtp_valid && (carrier !== '' && location !== '')) {
-    //   await InterestedClientsModel.create({ name, mobile, workAuthorization });
-    // } else if (is_smtp_valid && (carrier == '' || location == '')) {
-    //   await InterestedClientsModel.create({ name, email, workAuthorization });
+    if (is_smtp_valid && carrier !== '' && location !== '') { //
+      await InterestedClientsModel.create({mobile, name, email, workAuthorization});// 
+    } else if (!is_smtp_valid && (carrier !== '' && location !== '')) {
+      await InterestedClientsModel.create({ name, mobile, workAuthorization });
+    } else if (is_smtp_valid && (carrier == '' || location == '')) {
+      await InterestedClientsModel.create({ name, email, workAuthorization });
     }
 
     // ✅ Send to Discord
     const discordMessage = {
       "Message": "A New Lead Added ..!!!",
-      'Client Name':  '<UNNAMED USER>',
-      'Client E-Mail':  "<INVALID E-MAIL>", //is_smtp_valid ?
-      'Client Mobile':  mobile ,
-      'Work Authorization': '<NOT SPECIFIED>'
+      'Client Name':  name,
+      'Client E-Mail': is_smtp_valid ?email:'<INVALID EMAIL>',
+      'Client Mobile': (carrier!='' && location!='')? mobile :'<INVALID MOBILE>',
+      'Work Authorization': workAuthorization?.length>0 ? workAuthorization: '<NOT SPECIFIED>'
     };
     DiscordConnect(process.env.DISCORD_WEB_HOOK_URL, JSON.stringify(discordMessage, null, 2));
 
