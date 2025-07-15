@@ -61,7 +61,7 @@ const webhookURL = process.env.DISCORD_WEB_HOOK_URL;
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        content: 🚨 App Update: ${message},
+        content: `🚨 App Update: ${message}`,
       }),
     });
 
