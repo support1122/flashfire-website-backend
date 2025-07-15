@@ -53,7 +53,7 @@ app.use(express.json());
 
 
 export const DiscordConnect = async (message) => {
-const webhookURL = process.env.DISCORD_WEB_HOOK_URL;
+const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
   try {
     const response = await fetch(webhookURL, {
       method: 'POST',
