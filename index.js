@@ -66,7 +66,7 @@ const webhookURL = process.env.DISCORD_WEB_HOOK_URL;
     });
 
     if (!response.ok) {
-      throw new Error(Failed to send: ${response.statusText});
+      throw new Error(`Failed to send: ${response.statusText}`);
     }
 
     console.log('✅ Message sent to Discord!');
