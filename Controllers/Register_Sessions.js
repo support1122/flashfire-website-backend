@@ -60,10 +60,9 @@
 
 
 
-import mongoose from "mongoose";
 import { InterestedClientsModel } from "../Schema_Models/InterestedClients.js";
 import { DiscordConnect } from "../Utils/DiscordConnect.js";
-import { SupabaseConnect } from "../Utils/SupabaseConnect.js";
+// import { SupabaseConnect } from "../Utils/SupabaseConnect.js";
 
 export default async function Register_Sessions(req, res) {
   try {
