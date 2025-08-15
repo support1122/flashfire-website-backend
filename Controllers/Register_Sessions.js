@@ -86,7 +86,7 @@ export default async function Register_Sessions(req, res) {
       'Client Mobile': (carrier!='' && location!='')? mobile :'<INVALID MOBILE>',
       'Work Authorization': workAuthorization?.length>0 ? workAuthorization: '<NOT SPECIFIED>'
     };
-    DiscordConnect(process.env.DISCORD_WEB_HOOK_URL, JSON.stringify(discordMessage, null, 2));
+    await DiscordConnect(process.env.DISCORD_WEB_HOOK_URL, JSON.stringify(discordMessage, null, 2));
 
     // ✅ Insert into Supabase
     // const supabaseData = {
