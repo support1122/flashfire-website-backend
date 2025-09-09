@@ -111,7 +111,7 @@ app.post('/calendly-webhook', async (req, res) => {
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       let scheduledJobs = [];
 
-      if (inviteePhone && phoneRegex.test(inviteePhone)) {
+      if (inviteePhone) {
         await callQueue.add('callUser', {
           phone: inviteePhone,
           meetingTime: meetingTimeUS, // Send US time in the IVR message
