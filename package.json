@@ -16,14 +16,18 @@
     "@tailwindcss/vite": "^4.1.10",
     "axios": "^1.10.0",
     "bcrypt": "^6.0.0",
+    "bullmq": "^5.58.5",
     "cors": "^2.8.5",
     "dotenv": "^17.0.0",
     "express": "^5.1.0",
     "googleapis": "^150.0.1",
+    "ioredis": "^5.7.0",
     "jsonwebtoken": "^9.0.2",
+    "luxon": "^3.7.2",
     "mongoose": "^8.16.0",
     "nodemon": "^3.1.10",
     "puppeteer": "^24.10.2",
-    "tailwindcss": "^4.1.10"
+    "tailwindcss": "^4.1.10",
+    "twilio": "^5.9.0"
   }
 }
