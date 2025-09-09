@@ -77,7 +77,7 @@ app.post('/calendly-webhook', async (req, res) => {
       // ✅ Convert to different time zones
       const meetingStartUTC = DateTime.fromISO(payload?.scheduled_event?.start_time, { zone: 'utc' });
       const meetingTimeUS = meetingStartUTC.setZone('America/New_York').toFormat('ff');
-      // const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+      const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
 
       // ✅ Extract details
       const inviteeName = payload?.invitee?.name || payload?.name;
@@ -87,7 +87,7 @@ app.post('/calendly-webhook', async (req, res) => {
       )?.answer || null;
 
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
-      // const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
       // const teamMemberPhone = process.env.TEAM_MEMBER_PHONE || '+91XXXXXXXXXX';
 
