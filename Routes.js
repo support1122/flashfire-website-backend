@@ -42,7 +42,7 @@ export default function Routes(app){
    app.post('/api/contact', Contact);
    app.post('/employerform', EmployerForm);
    // app.post('/calendly-webhook',Calendly_Meet_Integration);
-   app.post('/twilio/ivr',TwilioReminder);
+   app.post('/twilio-ivr',TwilioReminder);
   
 
 }

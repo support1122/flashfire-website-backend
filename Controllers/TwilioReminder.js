@@ -9,9 +9,9 @@ export default async function TwilioReminder(req, res) {
     method: 'POST'
   });
 
-  gather.say(`Hello! This is a reminder for your meeting scheduled at ${meetingTime}.`);
+  gather.say(`Hello! This is a reminder for your meeting scheduled with Flashfire at ${meetingTime}.`);
 
-  twiml.say('No input received. Goodbye.');
+  twiml.say('Thank you. Goodbye.');
   res.type('text/xml');
   res.send(twiml.toString());
 }
