@@ -128,11 +128,20 @@ new Worker(
   async (job) => {
     console.log(`[Worker] Processing job for ${job.data.phone}`);
 
-    await client.calls.create({
-      to: job.data.phone,
-      from: process.env.TWILIO_PHONE_NUMBER,
-      url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
-    });
+    try {
+      const call = await client.calls.create({
+        to: job.data.phone,
+        from: process.env.TWILIO_PHONE_NUMBER, // must be a Twilio voice-enabled number
+        url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+      });
+
+      console.log(`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}`);
+    } catch (error) {
+      console.error(`[Worker] ❌ Twilio call failed for ${job.data.phone}:`, error.message);
+
+      // Send error to Discord for visibility
+      await DiscordConnect(`❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`);
+    }
   },
   { connection: { url: process.env.UPSTASH_REDIS_URL } }
 );
