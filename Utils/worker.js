@@ -1,7 +1,7 @@
 import { Worker } from 'bullmq';
 import Twilio from 'twilio';
 
-const client = Twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 const worker = new Worker(
   'callQueue',

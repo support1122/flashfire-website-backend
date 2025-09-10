@@ -123,7 +123,7 @@ if (inviteePhone) {
 });
 
 // -------------------- Worker Setup --------------------
-const client = Twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
+const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 new Worker(
   'callQueue',
