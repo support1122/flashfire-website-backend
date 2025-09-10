@@ -1,4 +1,3 @@
-
 import express from 'express';
 import Routes from './Routes.js';
 import Connection from './Utils/ConnectDB.js';
@@ -6,29 +5,25 @@ import cors from 'cors';
 import 'dotenv/config';
 import { callQueue } from './Utils/queue.js';
 import Twilio from 'twilio';
-import {DateTime} from 'luxon';
+import { DateTime } from 'luxon';
+import { Worker } from 'bullmq';
 
+// -------------------- Express Setup --------------------
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-
+// -------------------- Discord Utility --------------------
 export const DiscordConnect = async (message) => {
-const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
+  const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
   try {
     const response = await fetch(webhookURL, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        content: `🚨 App Update: ${message}`,
-      }),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: `🚨 App Update: ${message}` }),
     });
 
-    if (!response.ok) {
-      throw new Error(`Failed to send: ${response.statusText}`);
-    }
+    if (!response.ok) throw new Error(`Failed to send: ${response.statusText}`);
 
     console.log('✅ Message sent to Discord!');
   } catch (error) {
@@ -36,28 +31,7 @@ const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
   }
 };
 
-// const twilioIVR = async (req, res) => {
-//   try {
-//     const meetingTime = req.query.meetingTime;
-//     const twiml = new Twilio.twiml.VoiceResponse();
-
-//     const gather = twiml.gather({
-//       numDigits: 1,
-//       action: '/twilio/response',
-//       method: 'POST'
-//     });
-
-//     gather.say(`Hello! This is a reminder for your meeting with FlashFire scheduled at ${meetingTime}`);
-
-//     twiml.say('Thank you. Goodbye.');
-//     res.type('text/xml');
-//     res.send(twiml.toString());
-    
-//   } catch (error) {
-//     console.log(error)
-//   }
-  
-// }
+// -------------------- Calendly Webhook --------------------
 app.post('/calendly-webhook', async (req, res) => {
   const { event, payload } = req.body;
 
@@ -89,8 +63,6 @@ app.post('/calendly-webhook', async (req, res) => {
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-      // const teamMemberPhone = process.env.TEAM_MEMBER_PHONE || '+91XXXXXXXXXX';
-
       // ✅ Prepare booking details for Discord
       const bookingDetails = {
         "Invitee Name": inviteeName,
@@ -111,10 +83,10 @@ app.post('/calendly-webhook', async (req, res) => {
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       let scheduledJobs = [];
 
-      if (inviteePhone) {
+      if (inviteePhone && phoneRegex.test(inviteePhone)) {
         await callQueue.add('callUser', {
           phone: inviteePhone,
-          meetingTime: meetingTimeUS, // Send US time in the IVR message
+          meetingTime: meetingTimeUS,
           role: 'client'
         }, { delay });
         scheduledJobs.push(`Client: ${inviteePhone}`);
@@ -122,17 +94,6 @@ app.post('/calendly-webhook', async (req, res) => {
         console.log("⚠ No valid phone number provided by invitee.");
         await DiscordConnect(`⚠ No valid phone for client: ${inviteeName} (${inviteeEmail})`);
       }
-
-      // if (teamMemberPhone && phoneRegex.test(teamMemberPhone)) {
-      //   await callQueue.add('callUser', {
-      //     phone: teamMemberPhone,
-      //     meetingTime: meetingTimeIndia, // Send India time in the IVR message
-      //     role: 'team'
-      //   }, { delay });
-      //   scheduledJobs.push(`Team: ${teamMemberPhone}`);
-      // } else {
-      //   console.log("⚠ Team member phone is invalid.");
-      // }
 
       console.log(`✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
 
@@ -151,58 +112,36 @@ app.post('/calendly-webhook', async (req, res) => {
   }
 });
 
-// app.post('/calendly-webhook', async (req, res) => {
+// -------------------- Worker Setup --------------------
+const client = Twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
 
-//   const { event, payload } = req.body;
-//   console.log("req.body-->",req.body);
-//   console.log('meet link', req.body.payload?.scheduled_event?.location)
-//   try {
-//     if (event === "invitee.created") {
-//     const { invitee, event: eventData, questions_and_answers} = payload;
-// //extracted detail and storing in booking Details..
-//     const bookingDetails = {
-//       "Invitee Name": payload?.name,
-//       "Invitee Email": payload?.email,
-//       "GoogleMeet Link": payload?.scheduled_event?.location?.join_url,
-//       "EventStart Time": new Date(payload?.scheduled_event?.start_time).toLocaleString('en-IN',{timeZone : 'Asia/Kolkata'}),
-//       "Booked At":new Date(req.body?.created_at).toLocaleString('en-IN',{timeZone : 'Asia/Kolkata'})
-//     };
+new Worker(
+  'callQueue',
+  async (job) => {
+    console.log(`[Worker] Processing job for ${job.data.phone}`);
 
-//     console.log("📅 New Calendly Booking:");
-//     console.log(bookingDetails);
-//     //Sending meeting details to Discord..
-//     await DiscordConnect(JSON.stringify(bookingDetails,null,2));
+    await client.calls.create({
+      to: job.data.phone,
+      from: process.env.TWILIO_PHONE_NUMBER,
+      url: `https://your-domain.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+    });
+  },
+  { connection: { url: process.env.UPSTASH_REDIS_URL } }
+);
 
-//     return res.status(200).json({message : 'Webhook received',
-//                         bookingDetails
-//                     });
-//   }
-
-//   } catch (error) {
-//     console.log('something went wrong...,',error);
-//   } 
-// });
-
+// -------------------- Base Route --------------------
 app.get("/", (req, res) => {
   res.send("FlashFire API is up and running 🚀");
 });
 
-// Routes
+// -------------------- Routes & DB --------------------
 Routes(app);
-
-// Connect to MongoDB
 Connection();
 
-// ✅ Use only Render's dynamic port (no fallback)
+// -------------------- Start Server --------------------
 const PORT = process.env.PORT;
-
-if (!PORT) {
-  throw new Error('❌ process.env.PORT is not set. This is required for Render deployment.');
-}
+if (!PORT) throw new Error('❌ process.env.PORT is not set. This is required for Render deployment.');
 
 app.listen(PORT || 4001, () => {
   console.log('✅ Server is live at port:', PORT || 4001);
 });
-
-
-
