@@ -91,7 +91,7 @@ if (inviteePhone) {
       if (inviteePhone && phoneRegex.test(inviteePhone)) {
         await callQueue.add('callUser', {
           phone: inviteePhone,
-          meetingTime: meetingTimeUS,
+          meetingTime: meetingTimeIndia,// meetingTimeUS,
           role: 'client'
         }, { delay });
         scheduledJobs.push(`Client: ${inviteePhone}`);
