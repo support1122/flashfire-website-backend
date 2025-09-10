@@ -1,17 +1,34 @@
-// worker.js
 import { Worker } from 'bullmq';
 import Twilio from 'twilio';
 
 const client = Twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
 
-new Worker('callQueue', async (job) => {
-  console.log(`'worker.js ::':Processing job for ${job.data.phone}`);
-  
-  await client.calls.create({
-    to: job.data.phone,
-    from: process.env.TWILIO_PHONE_NUMBER,
-    url: `https://your-domain.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
-  });
-}, {
-  connection: { url: process.env.UPSTASH_REDIS_URL }
+const worker = new Worker(
+  'callQueue',
+  async (job) => {
+    console.log(`[Worker] Processing job for ${job.data.phone}`);
+
+    try {
+      const call = await client.calls.create({
+        to: job.data.phone,
+        from: process.env.TWILIO_PHONE_NUMBER,
+        url: `https://your-domain.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+      });
+
+      console.log(`📞 Call initiated. SID: ${call.sid}`);
+    } catch (err) {
+      console.error(`❌ Failed to create call for ${job.data.phone}:`, err.message);
+      throw err; // important so BullMQ marks job as failed
+    }
+  },
+  { connection: { url: process.env.UPSTASH_REDIS_URL } }
+);
+
+// Track worker lifecycle
+worker.on("completed", (job) => {
+  console.log(`✅ Job completed: ${job.id}`);
+});
+
+worker.on("failed", (job, err) => {
+  console.error(`❌ Job failed: ${job.id}`, err);
 });
