@@ -56,10 +56,14 @@ app.post('/calendly-webhook', async (req, res) => {
       // ✅ Extract details
       const inviteeName = payload?.invitee?.name || payload?.name;
       const inviteeEmail = payload?.invitee?.email || payload?.email;
-      const inviteePhone = payload?.questions_and_answers?.find(q =>
-        q.question.trim().toLowerCase() === 'phone number'
-      )?.answer || null;
+      let inviteePhone = payload?.questions_and_answers?.find(q =>
+  q.question.trim().toLowerCase() === 'phone number'
+)?.answer || null;
 
+if (inviteePhone) {
+  // Remove spaces and any non-digit except leading +
+  inviteePhone = inviteePhone.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '');
+}
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
@@ -80,6 +84,7 @@ app.post('/calendly-webhook', async (req, res) => {
       await DiscordConnect(JSON.stringify(bookingDetails, null, 2));
 
       // ✅ Validate phone numbers
+
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       let scheduledJobs = [];
 
@@ -90,9 +95,12 @@ app.post('/calendly-webhook', async (req, res) => {
           role: 'client'
         }, { delay });
         scheduledJobs.push(`Client: ${inviteePhone}`);
+        console.log(`📞 Valid phone, scheduled: ${inviteePhone}`);
       } else {
         console.log("⚠ No valid phone number provided by invitee.");
-        await DiscordConnect(`⚠ No valid phone for client: ${inviteeName} (${inviteeEmail})`);
+        await DiscordConnect(
+          `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
+        );
       }
 
       console.log(`✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
