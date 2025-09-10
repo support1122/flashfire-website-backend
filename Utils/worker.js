@@ -11,7 +11,7 @@ const worker = new Worker(
     try {
       const call = await client.calls.create({
         to: job.data.phone,
-        from: process.env.TWILIO_PHONE_NUMBER,
+        from: process.env.TWILIO_FROM,
         url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
       });
 

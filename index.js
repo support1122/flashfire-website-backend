@@ -133,7 +133,7 @@ new Worker(
     try {
       const call = await client.calls.create({
         to: job.data.phone,
-        from: process.env.TWILIO_PHONE_NUMBER, // must be a Twilio voice-enabled number
+        from: process.env.TWILIO_FROM, // must be a Twilio voice-enabled number
         url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
         // method: 'POST', // optional (Twilio defaults to POST for Calls API)
       });
