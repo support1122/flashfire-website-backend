@@ -12,6 +12,8 @@ import { Worker } from 'bullmq';
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+
 
 // -------------------- Discord Utility --------------------
 export const DiscordConnect = async (message) => {
@@ -133,13 +135,12 @@ new Worker(
         to: job.data.phone,
         from: process.env.TWILIO_PHONE_NUMBER, // must be a Twilio voice-enabled number
         url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+        // method: 'POST', // optional (Twilio defaults to POST for Calls API)
       });
 
       console.log(`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}`);
     } catch (error) {
       console.error(`[Worker] ❌ Twilio call failed for ${job.data.phone}:`, error.message);
-
-      // Send error to Discord for visibility
       await DiscordConnect(`❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`);
     }
   },

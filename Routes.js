@@ -4,6 +4,7 @@ import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
 import EmployerForm from "./Controllers/EmployerForm.js";
 import TwilioReminder from "./Controllers/TwilioReminder.js";
+import twilio from 'twilio';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -42,7 +43,21 @@ export default function Routes(app){
    app.post('/api/contact', Contact);
    app.post('/employerform', EmployerForm);
    // app.post('/calendly-webhook',Calendly_Meet_Integration);
-   app.post('/twilio-ivr',TwilioReminder);
+   app.all("/twilio-ivr", TwilioReminder);
+
+  // Handle Gather result
+  app.post("/twilio/response", (req, res) => {
+    const VoiceResponse = twilio.twiml.VoiceResponse;
+    const twiml = new VoiceResponse();
+
+    const digit = (req.body?.Digits || "").trim();
+    if (digit === "1") {
+      twiml.say("Great. See you in the meeting. Goodbye!");
+    } else {
+      twiml.say("Input received. Goodbye!");
+    }
+    res.status(200).type("text/xml").send(twiml.toString());
+  });
   
 
 }
