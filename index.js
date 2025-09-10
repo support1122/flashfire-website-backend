@@ -131,7 +131,7 @@ new Worker(
     await client.calls.create({
       to: job.data.phone,
       from: process.env.TWILIO_PHONE_NUMBER,
-      url: `https://your-domain.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+      url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
     });
   },
   { connection: { url: process.env.UPSTASH_REDIS_URL } }
