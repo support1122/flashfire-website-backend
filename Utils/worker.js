@@ -5,7 +5,7 @@ import Twilio from 'twilio';
 const client = Twilio(process.env.TWILIO_SID, process.env.TWILIO_AUTH_TOKEN);
 
 new Worker('callQueue', async (job) => {
-  console.log(`Processing job for ${job.data.phone}`);
+  console.log(`'worker.js ::':Processing job for ${job.data.phone}`);
   
   await client.calls.create({
     to: job.data.phone,

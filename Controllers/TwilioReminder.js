@@ -1,4 +1,5 @@
 export default async function TwilioReminder(req, res) {
+  console.log('twilio reminder hitt..')
   const meetingTime = req.query.meetingTime || 'your scheduled time';
   const role = req.query.role || 'participant';
   const twiml = new Twilio.twiml.VoiceResponse();

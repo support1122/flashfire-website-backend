@@ -200,8 +200,8 @@ if (!PORT) {
   throw new Error('❌ process.env.PORT is not set. This is required for Render deployment.');
 }
 
-app.listen(PORT, () => {
-  console.log('✅ Server is live at port:', PORT);
+app.listen(PORT || 4001, () => {
+  console.log('✅ Server is live at port:', PORT || 4001);
 });
 
 
