@@ -5,6 +5,7 @@ import Contact from "./Controllers/Contact.js";
 import EmployerForm from "./Controllers/EmployerForm.js";
 import TwilioReminder from "./Controllers/TwilioReminder.js";
 import twilio from 'twilio';
+import SendEmailReminder from "./Controllers/SendEmailReminder.js";
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -58,7 +59,7 @@ export default function Routes(app){
     }
     res.status(200).type("text/xml").send(twiml.toString());
   });
-  
+  app.post('/sendReminderEmail', SendEmailReminder);
 
 }
 

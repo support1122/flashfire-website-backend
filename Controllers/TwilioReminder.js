@@ -45,8 +45,7 @@ export default async function TwilioReminder(req, res) {
     });
 
     gather.say(
-      `Hello! This is a reminder for your meeting scheduled with Flashfire at ${meetingTime}. 
-       If you will join, press 1.`
+      `Hello! This is a reminder for your meeting scheduled with Flashfire at ${meetingTime}.`
     );
 
     // Fallback if no input
