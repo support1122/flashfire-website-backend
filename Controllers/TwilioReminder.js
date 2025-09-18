@@ -44,7 +44,7 @@ export default async function TwilioReminder(req, res) {
       method: "POST"
     });
 
-    gather.say(
+    twiml.say(
       `Hello! This is a reminder for your meeting scheduled with Flashfire at ${meetingTime}.`
     );
 
