@@ -9,3 +9,4 @@ dotenv.config();
 // });
 
 export const callQueue = new Queue('callQueue', { connection: {url: process.env.UPSTASH_REDIS_URL} });
+export const emailQueue = new Queue('emailQueue', {connection : { url : process.env.UPSTASH_REDIS_URL}});
