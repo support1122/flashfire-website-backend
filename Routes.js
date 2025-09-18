@@ -59,7 +59,7 @@ export default function Routes(app){
     }
     res.status(200).type("text/xml").send(twiml.toString());
   });
-  app.post('/sendReminderEmail', SendEmailReminder);
+  // app.post('/sendReminderEmail', SendEmailReminder);
 
 }
 
