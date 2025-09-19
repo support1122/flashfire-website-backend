@@ -28,7 +28,7 @@
 
 // Controllers/TwilioReminder.js
 import twilio from "twilio";
-import { DiscordConnect } from "../Utils/DiscordConnect";
+import { DiscordConnect } from "../Utils/DiscordConnect.js";
 
 export default async function TwilioReminder(req, res) {
   try {
