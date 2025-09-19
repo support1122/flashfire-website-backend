@@ -49,7 +49,7 @@ export default async function TwilioReminder(req, res) {
     );
 
     // Fallback if no input
-    twiml.say("Thank you. Goodbye.");
+    twiml.say("See You in the meeting. Thank you and Good luck.");
 
     res.status(200).type("text/xml").send(twiml.toString());
   } catch (error) {
