@@ -128,23 +128,41 @@ dotenv.config();
 const isDev = process.env.NODE_ENV !== 'production';
 const httpsAgent = new https.Agent({ rejectUnauthorized: !isDev });
 
-        const validateEmail = async (email) => {
-            try {
-                const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
-                    params: {
-                        api_key: process.env.ABSTRACT_API_EMAIL_VERIFICATION_API_KEY,
-                        email
-                    },
-                    httpsAgent,
-                    headers: {
-                        'User-Agent': 'FlashFire/1.0'
-                    }});
-            return res.data;
+//         const validateEmail = async (email) => {
+//             try {
+//                 const res = await axios.get(`https://emailvalidation.abstractapi.com/v1/`, {
+//                     params: {
+//                         api_key: process.env.ABSTRACT_API_EMAIL_VERIFICATION_API_KEY,
+//                         email
+//                     },
+//                     httpsAgent,
+//                     headers: {
+//                         'User-Agent': 'FlashFire/1.0'
+//                     }});
+//             return res.data;
 
-            } catch (error) {
-                console.log(error)
-            }
+//             } catch (error) {
+//                 console.log(error)
+//             }
     
+// };
+const validateEmail = async (email) => {
+  try {
+    const res = await axios.get("https://api.kickbox.com/v2/verify", {
+      params: {
+        email,
+        apikey: process.env.KICKBOX_API_KEY, // your Kickbox API key here
+      },
+      httpsAgent,
+      headers: {
+        "User-Agent": "FlashFire/1.0",
+      },
+    });
+    console.log(res.data);
+    return res.data; // same style as before
+  } catch (error) {
+    console.log(error);
+  }
 };
 
         const validateMobile = async (phone) => {
@@ -189,7 +207,7 @@ export default async function VerifyInterestedClient(req, res, next){
             console.log(responseCheckEmail, responseCheckMobile);
 
             const isMobileValid = responseCheckMobile?.carrier !== '' && responseCheckMobile?.location !== '';
-            const isEmailValid = responseCheckEmail?.is_smtp_valid?.value;
+            const isEmailValid = responseCheckEmail?.result=='deliverable';
 
             req.body.carrier = responseCheckMobile?.carrier;
             req.body.location = responseCheckMobile?.location;
@@ -206,7 +224,7 @@ export default async function VerifyInterestedClient(req, res, next){
 
             req.body.carrier = responseCheckMobile?.carrier;
             req.body.location = responseCheckMobile?.location;
-            req.body.is_smtp_valid = responseCheckEmail?.is_smtp_valid?.value;
+            req.body.is_smtp_valid = responseCheckEmail?.result=='deliverable';
             return next();
         } else {
             if (checkingInDatabaseForEmail.length > 0 && checkingInDatabaseForMobile.length > 0) {
