@@ -28,6 +28,7 @@
 
 // Controllers/TwilioReminder.js
 import twilio from "twilio";
+import { DiscordConnect } from "../Utils/DiscordConnect";
 
 export default async function TwilioReminder(req, res) {
   try {
@@ -54,6 +55,7 @@ export default async function TwilioReminder(req, res) {
     res.status(200).type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("twilio error,", error);
+    DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, error);
     // Always send a TwiML error response so Twilio doesn't retry indefinitely
     const VoiceResponse = twilio.twiml.VoiceResponse;
     const errTwiml = new VoiceResponse();

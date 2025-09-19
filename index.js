@@ -7,6 +7,7 @@ import { callQueue } from './Utils/queue.js';
 import Twilio from 'twilio';
 import { DateTime } from 'luxon';
 import { Worker } from 'bullmq';
+import { DiscordConnect } from './Utils/DiscordConnect.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -31,7 +32,7 @@ app.use(express.urlencoded({ extended: false }));
 
 
 // -------------------- Discord Utility --------------------
-export const DiscordConnect = async (message) => {
+export const DiscordConnectForMeet = async (message) => {
   const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
   try {
     const response = await fetch(webhookURL, {
@@ -98,7 +99,7 @@ if (inviteePhone) {
       console.log("📅 New Calendly Booking:", bookingDetails);
 
       // ✅ Send to Discord
-      await DiscordConnect(JSON.stringify(bookingDetails, null, 2));
+      await DiscordConnectForMeet(JSON.stringify(bookingDetails, null, 2));
 
       // ✅ Validate phone numbers
 
@@ -113,14 +114,17 @@ if (inviteePhone) {
         }, { delay });
         scheduledJobs.push(`Client: ${inviteePhone}`);
         console.log(`📞 Valid phone, scheduled: ${inviteePhone}`);
+        const scheduledMessage =`Reminder Call Scheduled For ${inviteePhone}-${inviteeName} for meeting scheduled on ${meetingTimeIndia} (IST).Reminder 10 minutes before Start of meeting.`
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
       } else {
         console.log("⚠ No valid phone number provided by invitee.");
-        await DiscordConnect(
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
           `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
         );
       }
 
       console.log(`✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
+      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`✅ Scheduled calls: ${scheduledJobs.join(', ')}` )
 
       return res.status(200).json({
         message: 'Webhook received & calls scheduled',
@@ -154,9 +158,10 @@ new Worker(
       });
 
       console.log(`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}`);
+      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}` )
     } catch (error) {
       console.error(`[Worker] ❌ Twilio call failed for ${job.data.phone}:`, error.message);
-      await DiscordConnect(`❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`);
+      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`);
     }
   },
   { connection: { url: process.env.UPSTASH_REDIS_URL } }
