@@ -13,6 +13,8 @@ import { DiscordConnect } from './Utils/DiscordConnect.js';
 const app = express();
 const allowedOrigins = [
   "https://flashfire-frontend-hoisted.vercel.app", // your frontend
+  "http://localhost:5173",
+  "https://www.flashfirejobs.com"
 ];
 
 app.use(
@@ -48,6 +50,33 @@ export const DiscordConnectForMeet = async (message) => {
     console.error('❌ Error sending message:', error);
   }
 };
+
+
+
+app.post("/call-status", async (req, res) => {
+  const { CallSid, CallStatus, To, From, AnsweredBy, Timestamp } = req.body;
+
+  try {
+    console.log(`📞 Call Update: SID=${CallSid}, To=${To}, Status=${CallStatus}, AnsweredBy=${AnsweredBy}`);
+
+    const msg = `
+📞 **Call Status Update**
+- To: ${To}
+- From: ${From}
+- Status: ${CallStatus}
+- Answered By: ${AnsweredBy || "Unknown"}
+- At: ${Timestamp || new Date().toISOString()}
+SID: ${CallSid}
+    `;
+
+    await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, msg);
+
+    res.status(200).send("✅ Call status received");
+  } catch (error) {
+    console.error("❌ Error in /call-status:", error);
+    res.status(500).send("Server Error");
+  }
+});
 
 // -------------------- Calendly Webhook --------------------
 app.post('/calendly-webhook', async (req, res) => {
@@ -153,7 +182,9 @@ new Worker(
       const call = await client.calls.create({
         to: job.data.phone,
         from: process.env.TWILIO_FROM, // must be a Twilio voice-enabled number
-        url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+        url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
+        statusCallback: 'https://flashfire-backend-hoisted.onrender.com/call-status',
+        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed']
         // method: 'POST', // optional (Twilio defaults to POST for Calls API)
       });
 
