@@ -44,21 +44,22 @@ export default function Routes(app){
    app.post('/api/contact', Contact);
    app.post('/employerform', EmployerForm);
    // app.post('/calendly-webhook',Calendly_Meet_Integration);
-   app.all("/twilio-ivr", TwilioReminder);
+  //  app.post("/twilio-ivr", TwilioReminder);
 
-  // Handle Gather result
-  app.post("/twilio/response", (req, res) => {
-    const VoiceResponse = twilio.twiml.VoiceResponse;
-    const twiml = new VoiceResponse();
+  // // Handle Gather result
+  // app.post("/twilio/response", (req, res) => {
+  //   const VoiceResponse = twilio.twiml.VoiceResponse;
+  //   const twiml = new VoiceResponse();
 
-    const digit = (req.body?.Digits || "").trim();
-    if (digit === "1") {
-      twiml.say("Great. See you in the meeting. Goodbye!");
-    } else {
-      twiml.say("Input received. Goodbye!");
-    }
-    res.status(200).type("text/xml").send(twiml.toString());
-  });
+  //   const digit = (req.body?.Digits || "").trim();
+  //   if (digit === "1") {
+  //     twiml.say("Great. See you in the meeting. Goodbye!");
+  //   } else {
+  //     twiml.say("Input received. Goodbye!");
+  //   }
+  //   res.status(200).type("text/xml").send(twiml.toString());
+  // });
+  
   // app.post('/sendReminderEmail', SendEmailReminder);
 }
 
