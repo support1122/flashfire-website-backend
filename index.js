@@ -8,6 +8,7 @@ import Twilio from 'twilio';
 import { DateTime } from 'luxon';
 import { Worker } from 'bullmq';
 import { DiscordConnect } from './Utils/DiscordConnect.js';
+import TwilioReminder from './Controllers/TwilioReminder.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -169,9 +170,10 @@ if (inviteePhone) {
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
-
+app.post("/twilio-ivr", TwilioReminder);
 // -------------------- Worker Setup --------------------
 const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+   
 
 new Worker(
   'callQueue',
@@ -184,8 +186,8 @@ new Worker(
         from: process.env.TWILIO_FROM, // must be a Twilio voice-enabled number
         url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
         statusCallback: 'https://flashfire-backend-hoisted.onrender.com/call-status',
-        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed']
-        // method: 'POST', // optional (Twilio defaults to POST for Calls API)
+        statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+        method: 'POST', // optional (Twilio defaults to POST for Calls API)
       });
 
       console.log(`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}`);
