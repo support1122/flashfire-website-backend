@@ -184,8 +184,8 @@ new Worker(
       const call = await client.calls.create({
         to: job.data.phone,
         from: process.env.TWILIO_FROM, // must be a Twilio voice-enabled number
-        url: `https://flashfire-backend-hoisted.onrender.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
-        statusCallback: 'https://flashfire-backend-hoisted.onrender.com/call-status',
+        url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
+        statusCallback: 'https://api.flashfirejobs.com/call-status',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         method: 'POST', // optional (Twilio defaults to POST for Calls API)
       });
@@ -216,3 +216,4 @@ if (!PORT) throw new Error('❌ process.env.PORT is not set. This is required fo
 app.listen(PORT || 4001, () => {
   console.log('✅ Server is live at port:', PORT || 4001);
 });
+
