@@ -4,11 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo "Error: no test specified" && exit 1",
-    "start": "node index.js",
-    "worker": "node Utils/worker.js",
-    "dev": "nodemon index.js"
-  },
+  "test": "echo \"Error: no test specified\" && exit 1",
+  "start": "node index.js",
+  "worker": "node Utils/worker.js",
+  "dev": "nodemon index.js"
+},
   "keywords": [],
   "author": "",
   "license": "ISC",
