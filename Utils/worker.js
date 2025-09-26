@@ -23,7 +23,7 @@ const worker = new Worker(
       throw err; // important so BullMQ marks job as failed
     }
   },
-  { connection: { url: process.env.UPSTASH_REDIS_URL } }
+  { connection: { url: process.env.REDIS_CLOUD_URL } }
 );
 
 // Track worker lifecycle
