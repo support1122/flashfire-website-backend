@@ -230,7 +230,7 @@ import { DateTime } from 'luxon';
 import { Worker } from 'bullmq';
 import { DiscordConnect } from './Utils/DiscordConnect.js';
 import TwilioReminder from './Controllers/TwilioReminder.js';
-
+import axios from 'axios'
 // -------------------- Express Setup --------------------
 const app = express();
 const allowedOrigins = [
@@ -306,21 +306,81 @@ app.post('/calendly-webhook', async (req, res) => {
   const { event, payload } = req.body;
   console.log(event,'-----------------------------------------------------------------');
   try {
-    if (event === "invitee.canceled") {
-      const inviteePhone = payload?.invitee?.questions_and_answers?.find(q =>
-        q.question.trim().toLowerCase() === 'phone number'
-      )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
+    if (event === "invitee_no_show.created") {
+  const inviteeName = payload?.name || payload?.invitee?.name;
+  const meetLink = payload?.scheduled_event?.location?.join_url || "Not Provided";
 
-      if (inviteePhone) {
-        // remove by jobId = phone (we'll schedule jobs with phone as jobId below)
-        await callQueue.removeJobs(inviteePhone);
-        console.log(`🗑 Removed scheduled job for canceled invitee: ${inviteePhone}`);
-        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-          `🗑 Removed scheduled job for canceled meeting. Phone: ${inviteePhone}`
-        );
-      }
-      return res.status(200).json({ message: 'Invitee canceled, job removed' });
+  // ✅ Fix: questions_and_answers is top-level, not under payload.invitee
+  const inviteeNumber = payload?.questions_and_answers?.find(q =>
+    q.question.trim().toLowerCase() === "phone number"
+  )?.answer
+    ?.replace(/\s+/g, "")
+    ?.replace(/(?!^\+)\D/g, "") || null;
+
+  if (inviteeNumber) {
+    try {
+      const WATI_BASE_URL = process.env.WATI_URL;
+      const WATI_TOKEN = process.env.WATI_TOKEN;
+
+      // ✅ Using Template Message since we are initiating
+      await axios.post(
+        `${WATI_BASE_URL}/sendTemplateMessage?whatsappNumber=${inviteeNumber}`,
+        {
+          template_name: "no_show_reminder", // must match approved template name
+          broadcast_name: "Calendly_NoShow",
+          parameters: [
+            { name: "1", value: inviteeName },
+            { name: "2", value: meetLink }
+          ]
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${WATI_TOKEN}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      console.log(`✅ WhatsApp No-Show reminder sent to ${inviteeNumber}`);
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `✅ WhatsApp No-Show reminder sent to ${inviteeNumber}`
+      );
+    } catch (err) {
+      console.error("❌ Failed to send Template message:", err.response?.data || err.message);
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `❌ WhatsApp No-Show reminder Error to ${inviteeNumber}, ${err.message}`
+      );
     }
+  } else {
+    console.warn("⚠️ No phone number available for invitee.");
+  }
+}
+
+
+    if (event === "invitee.canceled") {
+  const inviteePhone = payload?.questions_and_answers?.find(q =>
+    q.question.trim().toLowerCase() === "phone number"
+  )?.answer
+    ?.replace(/\s+/g, "")
+    ?.replace(/(?!^\+)\D/g, "") || null;
+
+  if (inviteePhone && !inviteePhone.startsWith('+91')) {
+    // remove by jobId = phone (we'll schedule jobs with phone as jobId below)
+    await callQueue.removeJobs(inviteePhone);
+    console.log(`🗑 Removed scheduled job for canceled invitee: ${inviteePhone}`);
+    await DiscordConnect(
+      process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+      `🗑 Removed scheduled job for canceled meeting. Phone: ${inviteePhone}`
+    );
+  } else {
+    console.log("⚠️ No phone number found in canceled payload");
+  }
+
+  return res.status(200).json({ message: "Invitee canceled, job removed" });
+}
+
     if (event === "invitee.created") {
       console.log("📥 Calendly Webhook Received:", JSON.stringify(payload, null, 2));
 
@@ -361,7 +421,8 @@ if (inviteePhone) {
         "Meeting Time (Client US)": meetingTimeUS,
         "Meeting Time (Team India)": meetingTimeIndia,
         "Booked At": bookedAt,
-        "UTM Source" : payload?.tracking?.utm_source || 'webpage_visit'
+        "UTM Source" : payload?.tracking?.utm_source || 'webpage_visit',
+          "Cancel URL": payload?.cancel_url
       };
        if(payload.tracking.utm_source !== 'webpage_visit' && payload.tracking.utm_source !== null ){
         const utmData ={
@@ -486,6 +547,7 @@ if (!PORT) throw new Error('❌ process.env.PORT is not set. This is required fo
 app.listen(PORT || 4001, () => {
   console.log('✅ Server is live at port:', PORT || 4001);
 });
+
 
 
 
