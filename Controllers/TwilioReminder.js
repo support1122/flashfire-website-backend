@@ -54,7 +54,7 @@ export default async function TwilioReminder(req, res) {
     );
 
     twiml.say({ voice: "alice", language: "en-US" },
-      "If you have any questions, you can reply to our confirmation email. Thank you."
+      "See You in the meeting. Thank you and Good luck."
     );
 
     res.status(200).type("text/xml").send(twiml.toString());
@@ -68,3 +68,4 @@ export default async function TwilioReminder(req, res) {
     res.status(200).type("text/xml").send(errTwiml.toString());
   }
 }
+
