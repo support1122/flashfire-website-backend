@@ -406,12 +406,38 @@ if (inviteePhone) {
       // ✅ NOT A DUPLICATE - Save DIRECTLY to database (same place as Discord)
       // Find campaign by UTM source
       let campaignId = null;
-      const campaign = await CampaignModel.findOne({ utmSource });
+      let campaign = await CampaignModel.findOne({ utmSource });
+      
       if (campaign) {
         campaignId = campaign.campaignId;
         Logger.info('✅ Campaign found for booking', { campaignId, utmSource });
       } else {
-        Logger.warn('⚠️ No campaign found for UTM source', { utmSource });
+        // No campaign found - this is a direct Calendly booking
+        // Create a virtual campaign WITHOUT auto-generated numbers
+        Logger.warn('⚠️ No campaign found for UTM source - Creating virtual campaign for direct booking', { utmSource });
+        
+        try {
+          const virtualCampaign = new CampaignModel({
+            campaignName: utmSource, // Just use the UTM source as name (no "Direct Calendly:" prefix or numbers)
+            utmSource: utmSource,
+            utmMedium: utmMedium || 'direct',
+            utmCampaign: utmCampaign || 'calendly_direct',
+            generatedUrl: `https://calendly.com/feedback-flashfire/30min?utm_source=${utmSource}&utm_medium=${utmMedium || 'direct'}`,
+            baseUrl: 'https://calendly.com/feedback-flashfire/30min',
+            isActive: true
+          });
+          
+          await virtualCampaign.save();
+          campaignId = virtualCampaign.campaignId;
+          
+          Logger.info('✅ Virtual campaign created for direct Calendly booking', {
+            campaignId,
+            utmSource,
+            campaignName: virtualCampaign.campaignName
+          });
+        } catch (error) {
+          Logger.error('❌ Failed to create virtual campaign', { error: error.message, utmSource });
+        }
       }
 
       // Create booking object directly here (where Discord data is)

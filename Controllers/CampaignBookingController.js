@@ -31,6 +31,27 @@ export const saveCalendlyBooking = async (bookingData) => {
       const campaign = await CampaignModel.findOne({ utmSource });
       if (campaign) {
         campaignId = campaign.campaignId;
+      } else {
+        // Get or create default "Calendly" campaign for direct bookings
+        let defaultCampaign = await CampaignModel.findOne({ utmSource: 'calendly_direct' });
+        
+        if (!defaultCampaign) {
+          // Create default Calendly campaign if it doesn't exist
+          defaultCampaign = new CampaignModel({
+            campaignName: 'Calendly Direct Bookings',
+            utmSource: 'calendly_direct',
+            utmMedium: 'calendly',
+            utmCampaign: 'direct_booking',
+            generatedUrl: 'https://www.flashfirejobs.com?utm_source=calendly_direct&utm_medium=calendly&utm_campaign=direct_booking',
+            baseUrl: 'https://www.flashfirejobs.com',
+            createdBy: 'system'
+          });
+          await defaultCampaign.save();
+          console.log('✅ Created default Calendly campaign', { campaignId: defaultCampaign.campaignId });
+        }
+        
+        campaignId = defaultCampaign.campaignId;
+        console.log('✅ Assigned booking to default Calendly campaign', { campaignId });
       }
     }
 
