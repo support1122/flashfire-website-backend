@@ -4,11 +4,11 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-  "test": "echo \"Error: no test specified\" && exit 1",
-  "start": "node index.js",
-  "worker": "node Utils/worker.js",
-  "dev": "nodemon index.js"
-},
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node index.js",
+    "worker": "node Utils/worker.js",
+    "dev": "nodemon index.js"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -29,7 +29,6 @@
     "luxon": "^3.7.2",
     "mongoose": "^8.16.0",
     "nodemon": "^3.1.10",
-    "puppeteer": "^24.10.2",
     "tailwindcss": "^4.1.10",
     "twilio": "^5.9.0"
   }

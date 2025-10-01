@@ -6,6 +6,25 @@ import EmployerForm from "./Controllers/EmployerForm.js";
 import TwilioReminder from "./Controllers/TwilioReminder.js";
 import twilio from 'twilio';
 import SendEmailReminder from "./Controllers/SendEmailReminder.js";
+// Campaign Controllers
+import {
+  createCampaign,
+  getAllCampaigns,
+  getCampaignById,
+  trackPageVisit,
+  updateCampaign,
+  deleteCampaign,
+  getCampaignStatistics
+} from "./Controllers/CampaignController.js";
+import {
+  getAllBookings,
+  getBookingById,
+  updateBookingStatus,
+  getBookingsByEmail,
+  exportBookingsForMicroservice,
+  markBookingsAsSynced,
+  captureFrontendBooking
+} from "./Controllers/CampaignBookingController.js";
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -45,6 +64,54 @@ export default function Routes(app){
    app.post('/employerform', EmployerForm);
    // app.post('/calendly-webhook',Calendly_Meet_Integration);
   //  app.post("/twilio-ivr", TwilioReminder);
+
+  // ==================== CAMPAIGN ROUTES ====================
+  // Campaign Management
+  app.post('/api/campaigns', createCampaign); // Create new campaign
+  app.get('/api/campaigns', getAllCampaigns); // Get all campaigns
+  app.get('/api/campaigns/stats', getCampaignStatistics); // Get overall statistics
+  app.get('/api/campaigns/:campaignId', getCampaignById); // Get specific campaign with details
+  app.put('/api/campaigns/:campaignId', updateCampaign); // Update campaign
+  app.delete('/api/campaigns/:campaignId', deleteCampaign); // Delete campaign
+  
+  // Tracking
+  app.post('/api/campaigns/track/visit', trackPageVisit); // Track page visit with UTM
+  
+  // Booking Management
+  app.get('/api/campaign-bookings', getAllBookings); // Get all bookings
+  app.get('/api/campaign-bookings/debug/all', async (req, res) => {
+    // DEBUG ENDPOINT - Shows ALL bookings with full details
+    try {
+      const { CampaignBookingModel } = await import('./Schema_Models/CampaignBooking.js');
+      const bookings = await CampaignBookingModel.find().sort({ bookingCreatedAt: -1 }).limit(20);
+      return res.status(200).json({
+        success: true,
+        count: bookings.length,
+        bookings: bookings.map(b => ({
+          bookingId: b.bookingId,
+          campaignId: b.campaignId,
+          utmSource: b.utmSource,
+          clientName: b.clientName,
+          clientEmail: b.clientEmail,
+          clientPhone: b.clientPhone,
+          calendlyMeetLink: b.calendlyMeetLink,
+          scheduledEventStartTime: b.scheduledEventStartTime,
+          bookingCreatedAt: b.bookingCreatedAt,
+          bookingStatus: b.bookingStatus
+        }))
+      });
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+  app.get('/api/campaign-bookings/:bookingId', getBookingById); // Get specific booking
+  app.get('/api/campaign-bookings/email/:email', getBookingsByEmail); // Get bookings by email
+  app.put('/api/campaign-bookings/:bookingId/status', updateBookingStatus); // Update booking status
+  app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
+  
+  // Microservice Integration
+  app.get('/api/campaign-bookings/export', exportBookingsForMicroservice); // Export bookings
+  app.post('/api/campaign-bookings/mark-synced', markBookingsAsSynced); // Mark as synced
 
   // // Handle Gather result
   // app.post("/twilio/response", (req, res) => {

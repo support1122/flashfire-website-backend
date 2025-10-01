@@ -5,3 +5,4 @@ node_modules/
 
 google-service-key.json
 google-service-key.json
+.env.backup
