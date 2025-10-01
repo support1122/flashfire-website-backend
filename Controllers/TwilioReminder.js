@@ -45,12 +45,17 @@ export default async function TwilioReminder(req, res) {
     //   method: "POST"
     // });
 
-    twiml.say(
-      `Hello! This is a reminder for your meeting scheduled with Flashfire at ${meetingTime}.`
+    // Slight pause to avoid abrupt start
+    twiml.pause({ length: 1 });
+
+    // Use a clear, natural voice and brand introduction
+    twiml.say({ voice: "alice", language: "en-US" },
+      `Hi, this is FlashFire. This is a quick reminder for your meeting scheduled at ${meetingTime}.`
     );
 
-    // Fallback if no input
-    twiml.say("See You in the meeting. Thank you and Good luck.");
+    twiml.say({ voice: "alice", language: "en-US" },
+      "If you have any questions, you can reply to our confirmation email. Thank you."
+    );
 
     res.status(200).type("text/xml").send(twiml.toString());
   } catch (error) {

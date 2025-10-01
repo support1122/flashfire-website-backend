@@ -229,7 +229,12 @@ import Twilio from 'twilio';
 import { DateTime } from 'luxon';
 import { Worker } from 'bullmq';
 import { DiscordConnect } from './Utils/DiscordConnect.js';
+import { Logger } from './Utils/Logger.js';
+import { basicFraudCheck } from './Utils/FraudScreening.js';
+import { isEventPresent } from './Utils/GoogleCalendarHelper.js';
 import TwilioReminder from './Controllers/TwilioReminder.js';
+import { CampaignBookingModel } from './Schema_Models/CampaignBooking.js';
+import { CampaignModel } from './Schema_Models/Campaign.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -304,7 +309,7 @@ SID: ${CallSid}
 // -------------------- Calendly Webhook --------------------
 app.post('/calendly-webhook', async (req, res) => {
   const { event, payload } = req.body;
-  console.log(event,'-----------------------------------------------------------------');
+  Logger.info('Calendly webhook received', { event });
   try {
     if (event === "invitee.canceled") {
       const inviteePhone = payload?.invitee?.questions_and_answers?.find(q =>
@@ -322,15 +327,14 @@ app.post('/calendly-webhook', async (req, res) => {
       return res.status(200).json({ message: 'Invitee canceled, job removed' });
     }
     if (event === "invitee.created") {
-      console.log("📥 Calendly Webhook Received:", JSON.stringify(payload, null, 2));
+      Logger.info('Calendly payload received');
 
       // ✅ Calculate meeting start in UTC
       const meetingStart = new Date(payload?.scheduled_event?.start_time);
       const delay = meetingStart.getTime() - Date.now() - (10 * 60 * 1000);
 
       if (delay < 0) {
-        console.log('⚠ Meeting is too soon to schedule calls.');
-        // return res.status(400).json({ error: 'Meeting too soon to schedule call' });
+        Logger.warn('Meeting is too soon to schedule calls', { start: meetingStart.toISOString() });
       }
 
       // ✅ Convert to different time zones
@@ -352,8 +356,105 @@ if (inviteePhone) {
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-      // ✅ Prepare booking details for Discord
+      // ✅ Extract UTM parameters
+      const utmSource = payload?.tracking?.utm_source || 'direct';
+      const utmMedium = payload?.tracking?.utm_medium || null;
+      const utmCampaign = payload?.tracking?.utm_campaign || null;
+      const utmContent = payload?.tracking?.utm_content || null;
+      const utmTerm = payload?.tracking?.utm_term || null;
+
+      // ✅ Extract "anything to know" field
+      const anythingToKnow = payload?.questions_and_answers?.find(q =>
+        q.question.toLowerCase().includes('anything') || 
+        q.question.toLowerCase().includes('prepare')
+      )?.answer || null;
+
+      // ✅ Check for duplicate BEFORE saving and sending to Discord
+      const existingBooking = await CampaignBookingModel.findOne({
+        clientEmail: inviteeEmail,
+        scheduledEventStartTime: payload?.scheduled_event?.start_time
+      });
+
+      if (existingBooking) {
+        // ⚠️ Duplicate found - Don't save, don't send to Discord
+        Logger.warn('🔄 Duplicate booking detected - already exists in database', {
+          email: inviteeEmail,
+          bookingId: existingBooking.bookingId,
+          existingTime: existingBooking.scheduledEventStartTime
+        });
+
+        // Send duplicate notification to Discord
+        const duplicateMessage = {
+          "⚠️ Status": "DUPLICATE BOOKING DISCARDED",
+          "Invitee Name": inviteeName,
+          "Invitee Email": inviteeEmail,
+          "Meeting Time": meetingTimeIndia,
+          "Reason": "Booking already exists in database",
+          "Existing Booking ID": existingBooking.bookingId,
+          "UTM Source": utmSource
+        };
+        
+        await DiscordConnectForMeet(JSON.stringify(duplicateMessage, null, 2));
+
+        return res.status(200).json({
+          message: 'Duplicate booking detected and discarded',
+          duplicate: true,
+          existingBookingId: existingBooking.bookingId
+        });
+      }
+
+      // ✅ NOT A DUPLICATE - Save DIRECTLY to database (same place as Discord)
+      // Find campaign by UTM source
+      let campaignId = null;
+      const campaign = await CampaignModel.findOne({ utmSource });
+      if (campaign) {
+        campaignId = campaign.campaignId;
+        Logger.info('✅ Campaign found for booking', { campaignId, utmSource });
+      } else {
+        Logger.warn('⚠️ No campaign found for UTM source', { utmSource });
+      }
+
+      // Create booking object directly here (where Discord data is)
+      const newBooking = new CampaignBookingModel({
+        campaignId,
+        utmSource: utmSource || 'direct',
+        utmMedium,
+        utmCampaign,
+        utmContent,
+        utmTerm,
+        clientName: inviteeName,           // Same as Discord
+        clientEmail: inviteeEmail,         // Same as Discord
+        clientPhone: inviteePhone,         // Same as Discord
+        calendlyEventUri: payload?.scheduled_event?.uri,
+        calendlyInviteeUri: payload?.invitee?.uri,
+        calendlyMeetLink: meetLink,        // Same as Discord
+        scheduledEventStartTime: payload?.scheduled_event?.start_time,
+        scheduledEventEndTime: payload?.scheduled_event?.end_time,
+        anythingToKnow,
+        questionsAndAnswers: payload?.questions_and_answers,
+        visitorId: null,
+        userAgent: req.headers['user-agent'],
+        ipAddress: req.ip || req.connection.remoteAddress,
+        bookingStatus: 'scheduled'
+      });
+
+      // Save to database
+      await newBooking.save();
+
+      Logger.info('✅ Booking saved DIRECTLY in Discord webhook handler', {
+        bookingId: newBooking.bookingId,
+        campaignId: newBooking.campaignId,
+        utmSource: newBooking.utmSource,
+        clientName: newBooking.clientName,
+        clientEmail: newBooking.clientEmail,
+        clientPhone: newBooking.clientPhone,
+        calendlyMeetLink: newBooking.calendlyMeetLink
+      });
+
+      // ✅ Prepare booking details for Discord (same data that was saved)
       const bookingDetails = {
+        "Booking ID": newBooking.bookingId,           // NEW!
+        "Campaign ID": newBooking.campaignId || 'N/A', // NEW!
         "Invitee Name": inviteeName,
         "Invitee Email": inviteeEmail,
         "Invitee Phone": inviteePhone || 'Not Provided',
@@ -361,9 +462,13 @@ if (inviteePhone) {
         "Meeting Time (Client US)": meetingTimeUS,
         "Meeting Time (Team India)": meetingTimeIndia,
         "Booked At": bookedAt,
-        "UTM Source" : payload?.tracking?.utm_source || 'webpage_visit'
+        "UTM Source" : utmSource,
+        "UTM Medium": utmMedium || 'N/A',
+        "UTM Campaign": utmCampaign || 'N/A',
+        "Database Status": "✅ SAVED"                  // NEW!
       };
-       if(payload.tracking.utm_source !== 'webpage_visit' && payload.tracking.utm_source !== null ){
+
+       if(payload.tracking.utm_source !== 'webpage_visit' && payload.tracking.utm_source !== null && payload.tracking.utm_source !== 'direct'){
         const utmData ={
           clientName : inviteeName,
           clientEmail : inviteeEmail,
@@ -377,21 +482,33 @@ if (inviteePhone) {
                   },
           body:JSON.stringify(utmData)
         })
-        console.log('✅ UTM campaign lead tracked:', utmData);  
+        console.log('✅ UTM campaign lead tracked to external service:', utmData);  
       }
 
-      console.log("📅 New Calendly Booking:", bookingDetails);
+      Logger.info('New Calendly booking', bookingDetails);
 
-      // ✅ Send to Discord
+      // ✅ Send to Discord (only if not duplicate)
       await DiscordConnectForMeet(JSON.stringify(bookingDetails, null, 2));
+
+      // -------------------- Fraud Screening --------------------
+      const screening = basicFraudCheck({
+        email: inviteeEmail,
+        name: inviteeName,
+        utmSource: payload?.tracking?.utm_source
+      });
+      if (screening.flagged) {
+        Logger.warn('Booking flagged by fraud screening, skipping call', { email: inviteeEmail, reasons: screening.reasons });
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Fraud screening flagged booking. Email: ${inviteeEmail}. Reasons: ${screening.reasons.join(', ')}`);
+        return res.status(200).json({ message: 'Booking flagged by fraud screening. Call not scheduled.', reasons: screening.reasons });
+      }
 
       // ✅ Validate phone numbers
 
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       let scheduledJobs = [];
       if (inviteePhone && inviteePhone.startsWith("+91")) {
-  console.log(`🚫 Skipping India number: ${inviteePhone}`);
-  DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`🚫 Skipping India number: ${inviteePhone}` );
+  Logger.info('Skipping India number', { phone: inviteePhone });
+  DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`Skipping India number: ${inviteePhone}` );
   return res.status(200).json({ message: 'Skipped India number' });
 }
 
@@ -403,6 +520,8 @@ if (inviteePhone) {
     phone: inviteePhone,
     meetingTime: meetingTimeIndia, // meetingTimeUS
     role: 'client',
+    inviteeEmail,
+    eventStartISO: payload?.scheduled_event?.start_time,
   },
   {
      jobId: inviteePhone,   // 🔑 use phone as jobId
@@ -413,17 +532,17 @@ if (inviteePhone) {
 );
 
         scheduledJobs.push(`Client: ${inviteePhone}`);
-        console.log(`📞 Valid phone, scheduled: ${inviteePhone}`);
+        Logger.info('Valid phone, scheduled call', { phone: inviteePhone, delayMs: delay });
         const scheduledMessage =`Reminder Call Scheduled For ${inviteePhone}-${inviteeName} for meeting scheduled on ${meetingTimeIndia} (IST).Reminder 10 minutes before Start of meeting.`
         await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
       } else {
-        console.log("⚠ No valid phone number provided by invitee.");
+        Logger.warn('No valid phone number provided by invitee', { phone: inviteePhone });
         await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
           `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
         );
       }
 
-      console.log(`✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
+      Logger.info('Scheduled calls summary', { jobs: scheduledJobs });
       DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`✅ Scheduled calls: ${scheduledJobs.join(', ')}` )
 
       return res.status(200).json({
@@ -451,10 +570,34 @@ new Worker(
     console.log(`[Worker] Processing job for ${job.data.phone}`);
 
     try {
+      // Pre-call Google Calendar presence check (optional, env-driven)
+      const calendarId = process.env.GOOGLE_CALENDAR_ID;
+      const shouldCheck = Boolean(calendarId);
+      if (shouldCheck) {
+        const present = await isEventPresent({
+          calendarId,
+          eventStartISO: job.data.eventStartISO,
+          inviteeEmail: job.data.inviteeEmail,
+          windowMinutes: 20
+        });
+        if (!present) {
+          Logger.info('Event not present in Google Calendar window; skipping call', {
+            phone: job.data.phone,
+            inviteeEmail: job.data.inviteeEmail,
+            eventStartISO: job.data.eventStartISO
+          });
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+            `Skipping call. Event not found in calendar window for ${job.data.phone} (${job.data.inviteeEmail || 'unknown email'}).`);
+          return;
+        }
+      }
+
       const call = await client.calls.create({
         to: job.data.phone,
         from: process.env.TWILIO_FROM, // must be a Twilio voice-enabled number
         url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
+        machineDetection: 'Enable', // basic AMD to avoid leaving awkward messages
+        // machineDetectionTimeout: 5, // optional: shorter detection window
         statusCallback: 'https://api.flashfirejobs.com/call-status',
         statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
         method: 'POST', // optional (Twilio defaults to POST for Calls API)
