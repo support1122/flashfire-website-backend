@@ -92,7 +92,7 @@ export const getAllCampaigns = async (req, res) => {
 
     const campaigns = await CampaignModel.find(query)
       .sort({ createdAt: -1 })
-      .select('-pageVisits -__v'); // Exclude detailed page visits for list view
+      .select('-__v'); // Include pageVisits for filtering
 
     // Enhance with booking counts
     const campaignsWithStats = await Promise.all(
