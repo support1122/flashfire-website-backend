@@ -384,17 +384,17 @@ if (inviteePhone) {
         });
 
         // Send duplicate notification to Discord
-        const duplicateMessage = {
-          "⚠️ Status": "DUPLICATE BOOKING DISCARDED",
-          "Invitee Name": inviteeName,
-          "Invitee Email": inviteeEmail,
-          "Meeting Time": meetingTimeIndia,
-          "Reason": "Booking already exists in database",
-          "Existing Booking ID": existingBooking.bookingId,
-          "UTM Source": utmSource
-        };
+        // const duplicateMessage = {
+        //   "⚠️ Status": "DUPLICATE BOOKING DISCARDED",
+        //   "Invitee Name": inviteeName,
+        //   "Invitee Email": inviteeEmail,
+        //   "Meeting Time": meetingTimeIndia,
+        //   "Reason": "Booking already exists in database",
+        //   "Existing Booking ID": existingBooking.bookingId,
+        //   "UTM Source": utmSource
+        // };
         
-        await DiscordConnectForMeet(JSON.stringify(duplicateMessage, null, 2));
+        // await DiscordConnectForMeet(JSON.stringify(duplicateMessage, null, 2));
 
         return res.status(200).json({
           message: 'Duplicate booking detected and discarded',
