@@ -241,6 +241,8 @@ const app = express();
 const allowedOrigins = [
   "https://flashfire-frontend-hoisted.vercel.app", // your frontend
   "http://localhost:5173",
+  "http://localhost:5174",
+  "http://localhost:5174/",
   "https://www.flashfirejobs.com",
   "https://flashfirejobs.com"
 ];
@@ -384,23 +386,23 @@ if (inviteePhone) {
         });
 
         // Send duplicate notification to Discord
-        const duplicateMessage = {
-          "⚠️ Status": "DUPLICATE BOOKING DISCARDED",
-          "Invitee Name": inviteeName,
-          "Invitee Email": inviteeEmail,
-          "Meeting Time": meetingTimeIndia,
-          "Reason": "Booking already exists in database",
-          "Existing Booking ID": existingBooking.bookingId,
-          "UTM Source": utmSource
-        };
+        // const duplicateMessage = {
+        //   "⚠️ Status": "DUPLICATE BOOKING DISCARDED",
+        //   "Invitee Name": inviteeName,
+        //   "Invitee Email": inviteeEmail,
+        //   "Meeting Time": meetingTimeIndia,
+        //   "Reason": "Booking already exists in database",
+        //   "Existing Booking ID": existingBooking.bookingId,
+        //   "UTM Source": utmSource
+        // };
         
-        await DiscordConnectForMeet(JSON.stringify(duplicateMessage, null, 2));
+        // await DiscordConnectForMeet(JSON.stringify(duplicateMessage, null, 2));
 
-        return res.status(200).json({
-          message: 'Duplicate booking detected and discarded',
-          duplicate: true,
-          existingBookingId: existingBooking.bookingId
-        });
+        // return res.status(200).json({
+        //   message: 'Duplicate booking detected and discarded',
+        //   duplicate: true,
+        //   existingBookingId: existingBooking.bookingId
+        // });
       }
 
       // ✅ NOT A DUPLICATE - Save DIRECTLY to database (same place as Discord)
@@ -517,16 +519,16 @@ if (inviteePhone) {
       await DiscordConnectForMeet(JSON.stringify(bookingDetails, null, 2));
 
       // -------------------- Fraud Screening --------------------
-      const screening = basicFraudCheck({
-        email: inviteeEmail,
-        name: inviteeName,
-        utmSource: payload?.tracking?.utm_source
-      });
-      if (screening.flagged) {
-        Logger.warn('Booking flagged by fraud screening, skipping call', { email: inviteeEmail, reasons: screening.reasons });
-        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Fraud screening flagged booking. Email: ${inviteeEmail}. Reasons: ${screening.reasons.join(', ')}`);
-        return res.status(200).json({ message: 'Booking flagged by fraud screening. Call not scheduled.', reasons: screening.reasons });
-      }
+      // const screening = basicFraudCheck({
+      //   email: inviteeEmail,
+      //   name: inviteeName,
+      //   utmSource: payload?.tracking?.utm_source
+      // });
+      // if (screening.flagged) {
+      //   Logger.warn('Booking flagged by fraud screening, skipping call', { email: inviteeEmail, reasons: screening.reasons });
+      //   await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Fraud screening flagged booking. Email: ${inviteeEmail}. Reasons: ${screening.reasons.join(', ')}`);
+      //   return res.status(200).json({ message: 'Booking flagged by fraud screening. Call not scheduled.', reasons: screening.reasons });
+      // }
 
       // ✅ Validate phone numbers
 
