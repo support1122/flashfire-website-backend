@@ -115,7 +115,56 @@ export const CampaignBookingSchema = new mongoose.Schema({
   syncedAt: {
     type: Date,
     default: null
-  }
+  },
+  // No-show tracking
+  noShowDate: {
+    type: Date,
+    default: null
+  },
+  noShowProcessed: {
+    type: Boolean,
+    default: false
+  },
+  whatsappReminderSent: {
+    type: Boolean,
+    default: false
+  },
+  whatsappSentAt: {
+    type: Date,
+    default: null
+  },
+  // Payment reminder tracking
+  paymentReminders: [{
+    jobId: {
+      type: String,
+      required: true
+    },
+    paymentLink: {
+      type: String,
+      required: true
+    },
+    reminderDays: {
+      type: Number,
+      required: true
+    },
+    scheduledTime: {
+      type: Date,
+      required: true
+    },
+    status: {
+      type: String,
+      enum: ['scheduled', 'sent', 'failed', 'cancelled'],
+      default: 'scheduled'
+    },
+    sentAt: {
+      type: Date,
+      default: null
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }]
 }, {
   timestamps: true
 });

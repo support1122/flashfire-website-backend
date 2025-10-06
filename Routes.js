@@ -25,6 +25,11 @@ import {
   markBookingsAsSynced,
   captureFrontendBooking
 } from "./Controllers/CampaignBookingController.js";
+// Webhook Controllers
+import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
+// Payment Reminder Controllers
+import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
+import { getMessageTypes, sendMessage, testConnection, sendSimpleMessage } from "./Controllers/WhatsAppController.js";
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -112,6 +117,22 @@ export default function Routes(app){
   // Microservice Integration
   app.get('/api/campaign-bookings/export', exportBookingsForMicroservice); // Export bookings
   app.post('/api/campaign-bookings/mark-synced', markBookingsAsSynced); // Mark as synced
+
+  // ==================== WEBHOOK ROUTES ====================
+  // Calendly Webhooks
+  app.post('/api/webhooks/calendly', handleCalendlyWebhook); // Handle Calendly webhook events
+  app.get('/api/webhooks/test', testWebhook); // Test webhook functionality
+
+// ==================== PAYMENT REMINDER ROUTES ====================
+app.post('/api/payment-reminders', schedulePaymentReminder); // Schedule payment reminder
+app.get('/api/payment-reminders/:bookingId', getPaymentReminders); // Get scheduled reminders for booking
+app.delete('/api/payment-reminders/:jobId', cancelPaymentReminder); // Cancel scheduled reminder
+
+// ==================== WHATSAPP MESSAGING ROUTES ====================
+app.get('/api/whatsapp/message-types', getMessageTypes); // Get available message types
+app.post('/api/whatsapp/send-message', sendMessage); // Send WhatsApp message
+app.get('/api/whatsapp/test', testConnection); // Test WhatsApp connection
+app.post('/api/whatsapp/send-simple', sendSimpleMessage); // Send simple WhatsApp message (mobile + message only)
 
   // // Handle Gather result
   // app.post("/twilio/response", (req, res) => {
