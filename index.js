@@ -263,6 +263,45 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
 
+const sentDiscordFingerprints = new Map();
+const DISCORD_DEDUP_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function normalizeString(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim().toLowerCase();
+}
+
+function buildDiscordFingerprint(details) {
+  const parts = [
+    normalizeString(details["Campaign ID"]),
+    normalizeString(details["Invitee Name"]),
+    normalizeString(details["Invitee Email"]),
+    normalizeString(details["Invitee Phone"]),
+    normalizeString(details["Google Meet Link"]),
+    normalizeString(details["Meeting Time (Client US)"]),
+    normalizeString(details["Meeting Time (Team India)"]),
+    normalizeString(details["Booked At"]),
+    normalizeString(details["UTM Source"]),
+    normalizeString(details["UTM Medium"]),
+    normalizeString(details["UTM Campaign"]),
+    normalizeString(details["Database Status"])
+  ];
+  return parts.join('|');
+}
+
+function isDuplicateDiscord(details) {
+  const now = Date.now();
+  // Cleanup old entries
+  for (const [key, ts] of sentDiscordFingerprints.entries()) {
+    if (now - ts > DISCORD_DEDUP_TTL_MS) sentDiscordFingerprints.delete(key);
+  }
+  const fp = buildDiscordFingerprint(details);
+  if (sentDiscordFingerprints.has(fp)) return true;
+  sentDiscordFingerprints.set(fp, now);
+  return false;
+}
+
+
 // -------------------- Discord Utility --------------------
 export const DiscordConnectForMeet = async (message) => {
   const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
@@ -371,38 +410,30 @@ if (inviteePhone) {
         q.question.toLowerCase().includes('prepare')
       )?.answer || null;
 
-      // ✅ Check for duplicate BEFORE saving and sending to Discord
-      const existingBooking = await CampaignBookingModel.findOne({
-        clientEmail: inviteeEmail,
-        scheduledEventStartTime: payload?.scheduled_event?.start_time
-      });
+      const scheduledStartISO = payload?.scheduled_event?.start_time;
+      const duplicateQuery = {
+        scheduledEventStartTime: scheduledStartISO,
+        $or: [
+          { clientEmail: inviteeEmail },
+          inviteePhone ? { clientPhone: inviteePhone } : null,
+          meetLink && meetLink !== 'Not Provided' ? { calendlyMeetLink: meetLink } : null,
+        ].filter(Boolean)
+      };
+      const existingBooking = await CampaignBookingModel.findOne(duplicateQuery);
 
       if (existingBooking) {
-        // ⚠️ Duplicate found - Don't save, don't send to Discord
         Logger.warn('🔄 Duplicate booking detected - already exists in database', {
           email: inviteeEmail,
-          bookingId: existingBooking.bookingId,
+          phone: inviteePhone,
+          meetLink,
+          existingBookingId: existingBooking.bookingId,
           existingTime: existingBooking.scheduledEventStartTime
         });
-
-        // Send duplicate notification to Discord
-        // const duplicateMessage = {
-        //   "⚠️ Status": "DUPLICATE BOOKING DISCARDED",
-        //   "Invitee Name": inviteeName,
-        //   "Invitee Email": inviteeEmail,
-        //   "Meeting Time": meetingTimeIndia,
-        //   "Reason": "Booking already exists in database",
-        //   "Existing Booking ID": existingBooking.bookingId,
-        //   "UTM Source": utmSource
-        // };
-        
-        // await DiscordConnectForMeet(JSON.stringify(duplicateMessage, null, 2));
-
-        // return res.status(200).json({
-        //   message: 'Duplicate booking detected and discarded',
-        //   duplicate: true,
-        //   existingBookingId: existingBooking.bookingId
-        // });
+        return res.status(200).json({
+          message: 'Duplicate booking detected and suppressed',
+          duplicate: true,
+          existingBookingId: existingBooking.bookingId
+        });
       }
 
       // ✅ NOT A DUPLICATE - Save DIRECTLY to database (same place as Discord)
@@ -515,8 +546,15 @@ if (inviteePhone) {
 
       Logger.info('New Calendly booking', bookingDetails);
 
-      // ✅ Send to Discord (only if not duplicate)
-      await DiscordConnectForMeet(JSON.stringify(bookingDetails, null, 2));
+      if (!isDuplicateDiscord(bookingDetails)) {
+        await DiscordConnectForMeet(JSON.stringify(bookingDetails, null, 2));
+      } else {
+        Logger.warn('Duplicate Discord message suppressed (fingerprint match)', {
+          inviteeEmail,
+          inviteePhone,
+          scheduledStartISO
+        });
+      }
 
       // -------------------- Fraud Screening --------------------
       // const screening = basicFraudCheck({
