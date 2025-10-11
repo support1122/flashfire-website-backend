@@ -365,7 +365,158 @@ app.post('/calendly-webhook', async (req, res) => {
           `🗑 Removed scheduled job for canceled meeting. Phone: ${inviteePhone}`
         );
       }
+
+      // Update booking status to canceled
+      if (inviteeEmail) {
+        await CampaignBookingModel.findOneAndUpdate(
+          { clientEmail: inviteeEmail },
+          { bookingStatus: 'canceled' },
+          { sort: { bookingCreatedAt: -1 } }
+        );
+      }
+
       return res.status(200).json({ message: 'Invitee canceled, job removed' });
+    }
+
+    // ==================== HANDLE RESCHEDULED EVENTS ====================
+    if (event === "invitee.rescheduled") {
+      Logger.info('Processing rescheduled meeting');
+      
+      const inviteeEmail = payload?.new_invitee?.email || payload?.old_invitee?.email;
+      let inviteePhone = payload?.new_invitee?.questions_and_answers?.find(q =>
+        q.question.trim().toLowerCase() === 'phone number'
+      )?.answer || null;
+
+      if (inviteePhone) {
+        inviteePhone = inviteePhone.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '');
+      }
+
+      const oldStartTime = payload?.old_invitee?.scheduled_event?.start_time;
+      const newStartTime = payload?.new_invitee?.scheduled_event?.start_time;
+      
+      Logger.info('Meeting rescheduled', { 
+        email: inviteeEmail, 
+        phone: inviteePhone,
+        oldTime: oldStartTime,
+        newTime: newStartTime 
+      });
+
+      // 1. Remove old reminder call job
+      if (inviteePhone) {
+        try {
+          await callQueue.removeJobs(inviteePhone);
+          Logger.info('Removed old reminder call job', { phone: inviteePhone });
+        } catch (error) {
+          Logger.error('Failed to remove old call job', { error: error.message, phone: inviteePhone });
+        }
+      }
+
+      // 2. Calculate new delay for rescheduled meeting
+      const newMeetingStart = new Date(newStartTime);
+      const newDelay = newMeetingStart.getTime() - Date.now() - (10 * 60 * 1000);
+
+      if (newDelay < 0) {
+        Logger.warn('Rescheduled meeting is too soon for reminder call', { newStartTime });
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+          `⚠️ Rescheduled meeting too soon (${inviteeEmail}). Cannot schedule reminder call.`
+        );
+        return res.status(200).json({ message: 'Rescheduled meeting too soon for call' });
+      }
+
+      // 3. Convert times to different zones
+      const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
+      const newMeetingTimeUS = newMeetingStartUTC.setZone('America/New_York').toFormat('ff');
+      const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+
+      // 4. Extract additional details
+      const inviteeName = payload?.new_invitee?.name || payload?.old_invitee?.name;
+      const meetLink = payload?.new_invitee?.scheduled_event?.location?.join_url || 
+                       payload?.old_invitee?.scheduled_event?.location?.join_url || 'Not Provided';
+
+      // 5. Update database with reschedule info
+      if (inviteeEmail) {
+        await CampaignBookingModel.findOneAndUpdate(
+          { clientEmail: inviteeEmail },
+          { 
+            bookingStatus: 'rescheduled',
+            rescheduledFrom: oldStartTime,
+            rescheduledTo: newStartTime,
+            rescheduledAt: new Date(),
+            scheduledEventStartTime: newStartTime,
+            $inc: { rescheduledCount: 1 }
+          },
+          { sort: { bookingCreatedAt: -1 } }
+        );
+        Logger.info('Updated booking with reschedule info', { email: inviteeEmail });
+      }
+
+      // 6. Schedule NEW reminder call
+      const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+      if (inviteePhone && phoneRegex.test(inviteePhone)) {
+        if (inviteePhone.startsWith("+91")) {
+          Logger.info('Skipping India number for rescheduled meeting', { phone: inviteePhone });
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+            `🔁 Rescheduled but skipping India number: ${inviteePhone}`
+          );
+          return res.status(200).json({ message: 'Rescheduled but skipped India number' });
+        }
+
+        const newJob = await callQueue.add(
+          'callUser',
+          {
+            phone: inviteePhone,
+            meetingTime: newMeetingTimeIndia,
+            role: 'client',
+            inviteeEmail,
+            eventStartISO: newStartTime,
+          },
+          {
+            jobId: inviteePhone,
+            delay: newDelay,
+            removeOnComplete: true,
+            removeOnFail: 100
+          }
+        );
+
+        // Update database with new job ID
+        await CampaignBookingModel.findOneAndUpdate(
+          { clientEmail: inviteeEmail },
+          { 
+            reminderCallJobId: newJob.id.toString(),
+            bookingStatus: 'scheduled'  // Reset to scheduled after successful reschedule
+          },
+          { sort: { bookingCreatedAt: -1 } }
+        );
+
+        Logger.info('Scheduled NEW reminder call for rescheduled meeting', { 
+          phone: inviteePhone, 
+          newDelayMs: newDelay,
+          newMeetingTime: newMeetingTimeIndia,
+          jobId: newJob.id
+        });
+
+        const rescheduleMessage = `🔁 **Meeting Rescheduled**
+- Client: ${inviteeName} (${inviteeEmail})
+- Phone: ${inviteePhone}
+- Old Time: ${DateTime.fromISO(oldStartTime, { zone: 'utc' }).setZone('Asia/Kolkata').toFormat('ff')} (IST)
+- New Time: ${newMeetingTimeIndia} (IST)
+- Reminder Call: Scheduled 10 minutes before new time
+- Job ID: ${newJob.id}`;
+
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, rescheduleMessage);
+      } else {
+        Logger.warn('No valid phone for rescheduled meeting', { phone: inviteePhone });
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+          `⚠️ Rescheduled meeting but no valid phone: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
+        );
+      }
+
+      return res.status(200).json({
+        message: 'Rescheduled meeting processed successfully',
+        oldTime: oldStartTime,
+        newTime: newStartTime,
+        reminderScheduled: !!inviteePhone
+      });
     }
     if (event === "invitee.created") {
       Logger.info('Calendly payload received');
@@ -580,7 +731,7 @@ if (inviteePhone) {
 
 
       if (inviteePhone && phoneRegex.test(inviteePhone)) {
-        await callQueue.add(
+        const job = await callQueue.add(
   'callUser',
   {
     phone: inviteePhone,
@@ -597,8 +748,14 @@ if (inviteePhone) {
   }
 );
 
+        // Store the job ID in the booking record
+        await CampaignBookingModel.findOneAndUpdate(
+          { bookingId: newBooking.bookingId },
+          { reminderCallJobId: job.id.toString() }
+        );
+
         scheduledJobs.push(`Client: ${inviteePhone}`);
-        Logger.info('Valid phone, scheduled call', { phone: inviteePhone, delayMs: delay });
+        Logger.info('Valid phone, scheduled call', { phone: inviteePhone, delayMs: delay, jobId: job.id });
         const scheduledMessage =`Reminder Call Scheduled For ${inviteePhone}-${inviteeName} for meeting scheduled on ${meetingTimeIndia} (IST).Reminder 10 minutes before Start of meeting.`
         await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
       } else {

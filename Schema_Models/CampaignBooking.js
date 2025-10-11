@@ -164,7 +164,29 @@ export const CampaignBookingSchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     }
-  }]
+  }],
+  // Reschedule tracking
+  rescheduledFrom: {
+    type: Date,
+    default: null
+  },
+  rescheduledTo: {
+    type: Date,
+    default: null
+  },
+  rescheduledAt: {
+    type: Date,
+    default: null
+  },
+  rescheduledCount: {
+    type: Number,
+    default: 0
+  },
+  // Reminder call job ID
+  reminderCallJobId: {
+    type: String,
+    default: null
+  }
 }, {
   timestamps: true
 });
