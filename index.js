@@ -356,6 +356,7 @@ app.post('/calendly-webhook', async (req, res) => {
       const inviteePhone = payload?.invitee?.questions_and_answers?.find(q =>
         q.question.trim().toLowerCase() === 'phone number'
       )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
+      const inviteeEmail = payload?.invitee?.email || payload?.email;
 
       if (inviteePhone) {
         // remove by jobId = phone (we'll schedule jobs with phone as jobId below)
