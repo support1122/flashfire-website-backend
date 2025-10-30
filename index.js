@@ -250,26 +250,18 @@ const allowedOrigins = [
   "https://flashfirejobs.com"
 ];
 
+// Permissive CORS in production (allows all origins/headers). Safe with credentials when origin: true
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: true, // reflect request origin
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "ngrok-skip-browser-warning",
-      "X-Forwarded-For",
-      "x-forwarded-for",
-      "X-Requested-With",
-      "Accept",
-      "Origin"
-    ],
     credentials: true,
   })
 );
 
 // ✅ Handle preflight requests for all routes
-// Preflight will be handled by the cors middleware above
+// Handle preflight for any path (Express 5: avoid "*" pattern)
+app.options(/.*/, cors({ origin: true, credentials: true }));
 // app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
