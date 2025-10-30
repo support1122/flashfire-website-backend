@@ -235,9 +235,12 @@ import { isEventPresent } from './Utils/GoogleCalendarHelper.js';
 import TwilioReminder from './Controllers/TwilioReminder.js';
 import { CampaignBookingModel } from './Schema_Models/CampaignBooking.js';
 import { CampaignModel } from './Schema_Models/Campaign.js';
+import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
+// Respect proxy headers like X-Forwarded-For when deployed behind proxies (Render/NGINX/Cloudflare)
+app.set('trust proxy', true);
 const allowedOrigins = [
   "https://flashfire-frontend-hoisted.vercel.app", // your frontend
   "http://localhost:5173",
@@ -251,13 +254,22 @@ app.use(
   cors({
     origin: allowedOrigins,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "ngrok-skip-browser-warning",
+      "X-Forwarded-For",
+      "x-forwarded-for",
+      "X-Requested-With",
+      "Accept",
+      "Origin"
+    ],
     credentials: true,
   })
 );
 
 // ✅ Handle preflight requests for all routes
-// app.options("*", cors());
+// Preflight will be handled by the cors middleware above
 // app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -842,6 +854,39 @@ app.get("/", (req, res) => {
   res.send("FlashFire API is up and running 🚀");
 });
 
+// -------------------- GeoIP Route --------------------
+app.get('/api/geo', (req, res) => {
+  try {
+    // Allow test overrides in dev: ?debugIp=1.2.3.4 or env FORCE_TEST_IP
+    let ip = req.query?.debugIp || process.env.FORCE_TEST_IP || getClientIp(req);
+    console.log('[GeoAPI] Incoming /api/geo request');
+    console.log('[GeoAPI] Headers of interest:', {
+      'cf-connecting-ip': req.headers['cf-connecting-ip'],
+      'x-real-ip': req.headers['x-real-ip'],
+      'x-forwarded-for': req.headers['x-forwarded-for'],
+      remoteAddress: req.connection?.remoteAddress || req.socket?.remoteAddress
+    });
+    console.log('[GeoAPI] Resolved client IP:', ip);
+    const geo = detectCountryFromIp(ip);
+    console.log('[GeoAPI] Result:', geo);
+    return res.json({
+      success: true,
+      countryCode: geo.countryCode,
+      country: geo.country,
+      ip: ip || undefined,
+      detectionMethod: 'ip-geolocation'
+    });
+  } catch (error) {
+    console.error('Geo detection error:', error);
+    return res.json({
+      success: false,
+      countryCode: 'US',
+      country: 'United States',
+      detectionMethod: 'fallback'
+    });
+  }
+});
+
 // -------------------- Routes & DB --------------------
 Routes(app);
 Connection();
@@ -853,6 +898,9 @@ if (!PORT) throw new Error('❌ process.env.PORT is not set. This is required fo
 app.listen(PORT || 4001, () => {
   console.log('✅ Server is live at port:', PORT || 4001);
 });
+
+// Initialize GeoIP after server startup
+initGeoIp();
 
 
 
