@@ -795,9 +795,39 @@ const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TO
 new Worker(
   'callQueue',
   async (job) => {
-    console.log(`[Worker] Processing job for ${job.data.phone}`);
+    const meta = {
+      jobId: job?.id,
+      type: job?.data?.type || 'call_reminder',
+      phone: job?.data?.phone,
+      meetingTime: job?.data?.meetingTime,
+      inviteeEmail: job?.data?.inviteeEmail
+    };
+    console.log('[Worker] Processing job', meta);
 
     try {
+      // Skip payment reminder jobs here; they are handled by the dedicated worker in Utils/worker.js
+      if (job?.data?.type === 'payment_reminder') {
+        console.log('[Worker] Skipping payment reminder job in inline worker', { jobId: job?.id });
+        return;
+      }
+
+      // Validate phone before attempting a call
+      const phone = job?.data?.phone;
+      if (!phone) {
+        console.error('[Worker] Missing phone in job data; aborting call', meta);
+        return;
+      }
+
+      const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+      if (!phoneRegex.test(phone)) {
+        console.error('[Worker] Invalid E.164 phone format; aborting call', { ...meta, phone });
+        return;
+      }
+
+      if (!process.env.TWILIO_FROM) {
+        console.error('[Worker] TWILIO_FROM not configured; aborting call');
+        return;
+      }
       // Pre-call Google Calendar presence check (optional, env-driven)
       const calendarId = process.env.GOOGLE_CALENDAR_ID;
       const shouldCheck = Boolean(calendarId);
@@ -821,7 +851,7 @@ new Worker(
       }
 
       const call = await client.calls.create({
-        to: job.data.phone,
+        to: phone,
         from: process.env.TWILIO_FROM, // must be a Twilio voice-enabled number
         url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
         machineDetection: 'Enable', // basic AMD to avoid leaving awkward messages
@@ -831,10 +861,22 @@ new Worker(
         method: 'POST', // optional (Twilio defaults to POST for Calls API)
       });
 
-      console.log(`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}`);
+      console.log('[Worker] ✅ Call initiated', {
+        jobId: job?.id,
+        sid: call?.sid,
+        status: call?.status,
+        to: phone,
+        from: process.env.TWILIO_FROM
+      });
       DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}` )
     } catch (error) {
-      console.error(`[Worker] ❌ Twilio call failed for ${job.data.phone}:`, error.message);
+      console.error('[Worker] ❌ Twilio call failed', {
+        jobId: job?.id,
+        phone: job?.data?.phone,
+        error: error?.message,
+        code: error?.code,
+        moreInfo: error?.moreInfo
+      });
       await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`);
     }
   },

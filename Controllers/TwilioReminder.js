@@ -62,9 +62,11 @@ export default async function TwilioReminder(req, res) {
     console.error("twilio error,", error);
     DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, error);
     // Always send a TwiML error response so Twilio doesn't retry indefinitely
-    // const VoiceResponse = twilio.twiml.VoiceResponse;
-    // const errTwiml = new VoiceResponse();
-    // errTwiml.say("We are sorry. The reminder could not be completed at this time.");
+    const VoiceResponse = twilio.twiml.VoiceResponse;
+    const errTwiml = new VoiceResponse();
+    errTwiml.say({ voice: "alice", language: "en-US" },
+      "We are sorry. The reminder could not be completed at this time."
+    );
     res.status(200).type("text/xml").send(errTwiml.toString());
   }
 }

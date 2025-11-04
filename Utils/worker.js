@@ -108,22 +108,57 @@ FlashFire Team`;
 
 // Process call reminder jobs (existing functionality)
 async function processCallReminder(job) {
-  console.log(`[Worker] Processing job for ${job.data.phone}`);
+  const meta = {
+    jobId: job?.id,
+    type: job?.data?.type || 'call_reminder',
+    phone: job?.data?.phone,
+    meetingTime: job?.data?.meetingTime,
+    inviteeEmail: job?.data?.inviteeEmail
+  };
+  console.log('[Worker] Processing job', meta);
 
-  const call = await client.calls.create({
-    to: job.data.phone,
-    from: process.env.TWILIO_FROM,
-    url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
-  });
+  const phone = job?.data?.phone;
+  if (!phone) {
+    Logger.error('[Worker] Missing phone in job data; aborting call', meta);
+    return;
+  }
 
-  console.log(`📞 Call initiated. SID: ${call.sid}`);
+  const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+  if (!phoneRegex.test(phone)) {
+    Logger.error('[Worker] Invalid E.164 phone format; aborting call', { ...meta, phone });
+    return;
+  }
+
+  if (!process.env.TWILIO_FROM) {
+    Logger.error('[Worker] TWILIO_FROM not configured; aborting call');
+    return;
+  }
+
+  try {
+    const call = await client.calls.create({
+      to: phone,
+      from: process.env.TWILIO_FROM,
+      url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+    });
+
+    console.log('📞 Call initiated.', { sid: call?.sid, status: call?.status, to: phone });
+  } catch (error) {
+    Logger.error('[Worker] Twilio call failed', {
+      jobId: job?.id,
+      phone,
+      error: error?.message,
+      code: error?.code,
+      moreInfo: error?.moreInfo
+    });
+    throw error;
+  }
 }
 
 // Track worker lifecycle
 worker.on("completed", (job) => {
-  console.log(✅ Job completed: ${job.id});
+  console.log(`✅ Job completed: ${job.id}`);
 });
 
 worker.on("failed", (job, err) => {
-  console.error(❌ Job failed: ${job.id}, err);
+  console.error(`❌ Job failed: ${job?.id}`, err);
 });
