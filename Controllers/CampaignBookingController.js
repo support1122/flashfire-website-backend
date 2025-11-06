@@ -4,7 +4,7 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 // ==================== SAVE CALENDLY BOOKING WITH UTM ====================
 export const saveCalendlyBooking = async (bookingData) => {
   try {
-    const {
+    let {
       utmSource,
       utmMedium,
       utmCampaign,
@@ -24,6 +24,63 @@ export const saveCalendlyBooking = async (bookingData) => {
       userAgent,
       ipAddress
     } = bookingData;
+
+    if ((!clientName || clientName.trim() === '') || (!clientEmail || clientEmail.trim() === '')) {
+      console.log('⚠️ Missing client name or email, searching for existing Calendly booking...');
+      
+      const findQuery = {};
+      if (utmSource) {
+        findQuery.utmSource = utmSource;
+      }
+      if (scheduledEventStartTime) {
+        findQuery.scheduledEventStartTime = scheduledEventStartTime;
+      }
+      if (calendlyMeetLink && calendlyMeetLink !== 'Not Provided') {
+        findQuery.calendlyMeetLink = calendlyMeetLink;
+      }
+      if (clientPhone) {
+        findQuery.clientPhone = clientPhone;
+      }
+
+      if (Object.keys(findQuery).length > 0) {
+        const existingBooking = await CampaignBookingModel.findOne(findQuery)
+          .sort({ bookingCreatedAt: -1 })
+          .limit(1);
+
+        if (existingBooking) {
+          console.log('✅ Found existing Calendly booking, using its data to fill missing fields');
+          // Use Calendly data to fill in missing fields
+          if (!clientName || clientName.trim() === '') {
+            clientName = existingBooking.clientName || 'Unknown Client';
+          }
+          if (!clientEmail || clientEmail.trim() === '') {
+            clientEmail = existingBooking.clientEmail || `unknown_${Date.now()}@calendly.placeholder`;
+          }
+          if (!clientPhone && existingBooking.clientPhone) {
+            clientPhone = existingBooking.clientPhone;
+          }
+          if (!calendlyMeetLink && existingBooking.calendlyMeetLink) {
+            calendlyMeetLink = existingBooking.calendlyMeetLink;
+          }
+          if (!calendlyEventUri && existingBooking.calendlyEventUri) {
+            calendlyEventUri = existingBooking.calendlyEventUri;
+          }
+          if (!calendlyInviteeUri && existingBooking.calendlyInviteeUri) {
+            calendlyInviteeUri = existingBooking.calendlyInviteeUri;
+          }
+        }
+      }
+    }
+
+    // Use defaults if still empty after checking existing bookings
+    if (!clientName || clientName.trim() === '') {
+      clientName = 'Unknown Client';
+      console.log('⚠️ Using default client name: Unknown Client');
+    }
+    if (!clientEmail || clientEmail.trim() === '') {
+      clientEmail = `unknown_${Date.now()}@calendly.placeholder`;
+      console.log('⚠️ Using default client email:', clientEmail);
+    }
 
     // Find the campaign
     let campaignId = null;
@@ -55,6 +112,37 @@ export const saveCalendlyBooking = async (bookingData) => {
       }
     }
 
+    // Final duplicate check before saving (safety net)
+    const finalDuplicateCheck = {
+      $or: []
+    };
+    
+    if (clientEmail && clientEmail.trim() !== '' && !clientEmail.includes('@calendly.placeholder')) {
+      finalDuplicateCheck.$or.push({
+        clientEmail: clientEmail.trim().toLowerCase(),
+        scheduledEventStartTime: scheduledEventStartTime
+      });
+    }
+    
+    if (scheduledEventStartTime && calendlyMeetLink && calendlyMeetLink !== 'Not Provided') {
+      finalDuplicateCheck.$or.push({
+        scheduledEventStartTime: scheduledEventStartTime,
+        calendlyMeetLink: calendlyMeetLink
+      });
+    }
+    
+    if (finalDuplicateCheck.$or.length > 0) {
+      const existingDuplicate = await CampaignBookingModel.findOne(finalDuplicateCheck);
+      if (existingDuplicate) {
+        console.log('⚠️ Duplicate booking detected before save, returning existing booking');
+        return {
+          success: true,
+          data: existingDuplicate,
+          duplicate: true
+        };
+      }
+    }
+
     // Create booking record
     const booking = new CampaignBookingModel({
       campaignId,
@@ -63,8 +151,8 @@ export const saveCalendlyBooking = async (bookingData) => {
       utmCampaign,
       utmContent,
       utmTerm,
-      clientName,
-      clientEmail,
+      clientName: clientName.trim(),
+      clientEmail: clientEmail.trim().toLowerCase(),
       clientPhone,
       calendlyEventUri,
       calendlyInviteeUri,
@@ -358,23 +446,51 @@ export const captureFrontendBooking = async (req, res) => {
       utmSource: bookingData.utmSource
     });
 
-    // Check if booking already exists (from webhook)
-    const existingBooking = await CampaignBookingModel.findOne({
-      clientEmail: bookingData.clientEmail,
-      scheduledEventStartTime: bookingData.scheduledEventStartTime
-    });
+    // Build query to check if booking already exists (from webhook)
+    // Check by multiple criteria since frontend might send empty email/name
+    const duplicateQuery = {
+      $or: []
+    };
 
-    if (existingBooking) {
-      console.log('ℹ️ Booking already exists (webhook captured it first), skipping duplicate');
-      return res.status(200).json({
-        success: true,
-        message: 'Booking already captured by webhook',
-        duplicate: true,
-        bookingId: existingBooking.bookingId
+    // If email is provided, check by email and scheduled time
+    if (bookingData.clientEmail && bookingData.clientEmail.trim() !== '') {
+      duplicateQuery.$or.push({
+        clientEmail: bookingData.clientEmail,
+        scheduledEventStartTime: bookingData.scheduledEventStartTime
       });
     }
 
-    // Save booking using the existing function
+    // Also check by UTM source and scheduled time (for when email is empty)
+    if (bookingData.utmSource && bookingData.scheduledEventStartTime) {
+      duplicateQuery.$or.push({
+        utmSource: bookingData.utmSource,
+        scheduledEventStartTime: bookingData.scheduledEventStartTime
+      });
+    }
+
+    // Check by meet link if available
+    if (bookingData.calendlyMeetLink && bookingData.calendlyMeetLink !== 'Not Provided') {
+      duplicateQuery.$or.push({
+        calendlyMeetLink: bookingData.calendlyMeetLink
+      });
+    }
+
+    // If we have query criteria, check for duplicates
+    if (duplicateQuery.$or.length > 0) {
+      const existingBooking = await CampaignBookingModel.findOne(duplicateQuery);
+
+      if (existingBooking) {
+        console.log('ℹ️ Booking already exists (webhook captured it first), skipping duplicate');
+        return res.status(200).json({
+          success: true,
+          message: 'Booking already captured by webhook',
+          duplicate: true,
+          bookingId: existingBooking.bookingId
+        });
+      }
+    }
+
+    // Save booking using the existing function (it will handle missing data)
     const result = await saveCalendlyBooking(bookingData);
 
     if (result.success) {
