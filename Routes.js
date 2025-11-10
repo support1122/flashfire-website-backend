@@ -2,6 +2,8 @@
 import VerifyInterestedClient from "./Middlewares/VerifyInterestedClient.js";
 import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
+import Signup from "./Controllers/Signup.js";
+import GetUsersWithoutBookings from "./Controllers/GetUsersWithoutBookings.js";
 import EmployerForm from "./Controllers/EmployerForm.js";
 import TwilioReminder from "./Controllers/TwilioReminder.js";
 import twilio from 'twilio';
@@ -66,6 +68,8 @@ export default function Routes(app){
   //  app.post("/calendly-webhook",GetMeetDetails);
    //the routes that handles contact us page..
    app.post('/api/contact', Contact);
+   app.post('/signup', Signup);
+   app.get('/api/users/without-bookings', GetUsersWithoutBookings);
    app.post('/employerform', EmployerForm);
    // app.post('/calendly-webhook',Calendly_Meet_Integration);
   //  app.post("/twilio-ivr", TwilioReminder);
