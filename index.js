@@ -234,8 +234,10 @@ import { basicFraudCheck } from './Utils/FraudScreening.js';
 import { isEventPresent } from './Utils/GoogleCalendarHelper.js';
 import TwilioReminder from './Controllers/TwilioReminder.js';
 import { CampaignBookingModel } from './Schema_Models/CampaignBooking.js';
+import { UserModel } from './Schema_Models/User.js';
 import { CampaignModel } from './Schema_Models/Campaign.js';
 import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
+import emailWorker from './Utils/emailWorker.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -362,13 +364,43 @@ app.post('/calendly-webhook', async (req, res) => {
       )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
       const inviteeEmail = payload?.invitee?.email || payload?.email;
 
-      if (inviteePhone) {
-        // remove by jobId = phone (we'll schedule jobs with phone as jobId below)
-        await callQueue.removeJobs(inviteePhone);
-        console.log(`🗑 Removed scheduled job for canceled invitee: ${inviteePhone}`);
-        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-          `🗑 Removed scheduled job for canceled meeting. Phone: ${inviteePhone}`
-        );
+      // Remove old reminder call job - Get jobId from database
+      if (inviteeEmail) {
+        try {
+          const existingBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
+            .sort({ bookingCreatedAt: -1 });
+          
+          if (existingBooking?.reminderCallJobId) {
+            const oldJobId = existingBooking.reminderCallJobId;
+            const oldJob = await callQueue.getJob(oldJobId);
+            
+            if (oldJob) {
+              await oldJob.remove();
+              Logger.info('Removed reminder call job from queue', { 
+                jobId: oldJobId, 
+                phone: inviteePhone 
+              });
+              await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+                `🗑️ Removed reminder call job for canceled meeting. Email: ${inviteeEmail}, Phone: ${inviteePhone}`
+              );
+            } else {
+              Logger.warn('Job not found in queue (may have already executed)', { 
+                jobId: oldJobId, 
+                phone: inviteePhone 
+              });
+            }
+          } else {
+            Logger.warn('No reminderCallJobId found in database for this booking', { 
+              email: inviteeEmail 
+            });
+          }
+        } catch (error) {
+          Logger.error('Failed to remove call job', { 
+            error: error.message, 
+            phone: inviteePhone,
+            email: inviteeEmail 
+          });
+        }
       }
 
       // Update booking status to canceled
@@ -406,13 +438,41 @@ app.post('/calendly-webhook', async (req, res) => {
         newTime: newStartTime 
       });
 
-      // 1. Remove old reminder call job
-      if (inviteePhone) {
+      if (inviteeEmail) {
         try {
-          await callQueue.removeJobs(inviteePhone);
-          Logger.info('Removed old reminder call job', { phone: inviteePhone });
+          const existingBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
+            .sort({ bookingCreatedAt: -1 });
+          
+          if (existingBooking?.reminderCallJobId) {
+            const oldJobId = existingBooking.reminderCallJobId;
+            const oldJob = await callQueue.getJob(oldJobId);
+            
+            if (oldJob) {
+              await oldJob.remove();
+              Logger.info('Removed old reminder call job from queue', { 
+                jobId: oldJobId, 
+                phone: inviteePhone 
+              });
+              await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+                `🗑️ Removed old reminder call job for rescheduled meeting. Email: ${inviteeEmail}, Phone: ${inviteePhone}`
+              );
+            } else {
+              Logger.warn('Old job not found in queue (may have already executed)', { 
+                jobId: oldJobId, 
+                phone: inviteePhone 
+              });
+            }
+          } else {
+            Logger.warn('No reminderCallJobId found in database for this booking', { 
+              email: inviteeEmail 
+            });
+          }
         } catch (error) {
-          Logger.error('Failed to remove old call job', { error: error.message, phone: inviteePhone });
+          Logger.error('Failed to remove old call job', { 
+            error: error.message, 
+            phone: inviteePhone,
+            email: inviteeEmail 
+          });
         }
       }
 
@@ -655,6 +715,22 @@ if (inviteePhone) {
 
       // Save to database
       await newBooking.save();
+
+      // Mark user as booked in UserModel since they now have a booking
+      try {
+        const escapedEmail = inviteeEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        await UserModel.updateOne(
+          { email: { $regex: new RegExp(`^${escapedEmail}$`, 'i') } },
+          { $set: { booked: true } }
+        );
+        Logger.info('✅ User marked as booked:', { email: inviteeEmail });
+      } catch (userUpdateError) {
+        Logger.warn('⚠️ Failed to update user booked status:', { 
+          email: inviteeEmail, 
+          error: userUpdateError.message 
+        });
+        // Don't fail the whole request if user update fails
+      }
 
       Logger.info('✅ Booking saved DIRECTLY in Discord webhook handler', {
         bookingId: newBooking.bookingId,

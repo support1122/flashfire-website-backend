@@ -4,6 +4,14 @@ import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
 import Signup from "./Controllers/Signup.js";
 import GetUsersWithoutBookings from "./Controllers/GetUsersWithoutBookings.js";
+import GetUsersWithoutBookingsDetailed from "./Controllers/GetUsersWithoutBookingsDetailed.js";
+import SendEmailCampaign from "./Controllers/SendEmailCampaign.js";
+import GetEmailCampaigns from "./Controllers/GetEmailCampaigns.js";
+import CreateScheduledEmailCampaign from "./Controllers/CreateScheduledEmailCampaign.js";
+import GetScheduledEmailCampaigns from "./Controllers/GetScheduledEmailCampaigns.js";
+import GetUserCampaigns from "./Controllers/GetUserCampaigns.js";
+import GetCampaignDetails from "./Controllers/GetCampaignDetails.js";
+import ResendEmailCampaign from "./Controllers/ResendEmailCampaign.js";
 import EmployerForm from "./Controllers/EmployerForm.js";
 import TwilioReminder from "./Controllers/TwilioReminder.js";
 import twilio from 'twilio';
@@ -25,7 +33,8 @@ import {
   getBookingsByEmail,
   exportBookingsForMicroservice,
   markBookingsAsSynced,
-  captureFrontendBooking
+  captureFrontendBooking,
+  rescheduleBooking
 } from "./Controllers/CampaignBookingController.js";
 // Webhook Controllers
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
@@ -69,7 +78,15 @@ export default function Routes(app){
    //the routes that handles contact us page..
    app.post('/api/contact', Contact);
    app.post('/signup', Signup);
-   app.get('/api/users/without-bookings', GetUsersWithoutBookings);
+  app.get('/api/users/without-bookings', GetUsersWithoutBookings);
+  app.get('/api/users/without-bookings/detailed', GetUsersWithoutBookingsDetailed);
+  app.post('/api/email-campaign/send', SendEmailCampaign);
+  app.post('/api/email-campaign/scheduled', CreateScheduledEmailCampaign);
+  app.get('/api/email-campaigns', GetEmailCampaigns);
+  app.get('/api/email-campaigns/scheduled', GetScheduledEmailCampaigns);
+  app.get('/api/email-campaigns/user/:email', GetUserCampaigns);
+  app.get('/api/email-campaigns/:campaignId/details/:userEmail', GetCampaignDetails);
+  app.post('/api/email-campaign/resend', ResendEmailCampaign);
    app.post('/employerform', EmployerForm);
    // app.post('/calendly-webhook',Calendly_Meet_Integration);
   //  app.post("/twilio-ivr", TwilioReminder);
@@ -116,6 +133,7 @@ export default function Routes(app){
   app.get('/api/campaign-bookings/:bookingId', getBookingById); // Get specific booking
   app.get('/api/campaign-bookings/email/:email', getBookingsByEmail); // Get bookings by email
   app.put('/api/campaign-bookings/:bookingId/status', updateBookingStatus); // Update booking status
+  app.post('/api/campaign-bookings/:bookingId/reschedule', rescheduleBooking); // Reschedule booking and refresh queue
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
   
   // Microservice Integration

@@ -1,5 +1,8 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CampaignModel } from '../Schema_Models/Campaign.js';
+import { UserModel } from '../Schema_Models/User.js';
+import { callQueue } from '../Utils/queue.js';
+import { DateTime } from 'luxon';
 
 // ==================== SAVE CALENDLY BOOKING WITH UTM ====================
 export const saveCalendlyBooking = async (bookingData) => {
@@ -168,6 +171,22 @@ export const saveCalendlyBooking = async (bookingData) => {
     });
 
     await booking.save();
+
+    // Mark user as booked in UserModel since they now have a booking
+    try {
+      const escapedEmail = booking.clientEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      await UserModel.updateOne(
+        { email: { $regex: new RegExp(`^${escapedEmail}$`, 'i') } },
+        { $set: { booked: true } }
+      );
+      console.log('✅ User marked as booked:', { email: booking.clientEmail });
+    } catch (userUpdateError) {
+      console.warn('⚠️ Failed to update user booked status:', { 
+        email: booking.clientEmail, 
+        error: userUpdateError.message 
+      });
+      // Don't fail the whole request if user update fails
+    }
 
     console.log('✅ Calendly booking saved with UTM data:', {
       bookingId: booking.bookingId,
@@ -348,6 +367,105 @@ export const getBookingsByEmail = async (req, res) => {
       success: false,
       message: 'Failed to fetch bookings',
       error: error.message
+    });
+  }
+};
+
+// ==================== RESCHEDULE BOOKING ====================
+export const rescheduleBooking = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const { newTime } = req.body;
+
+    if (!newTime) {
+      return res.status(400).json({
+        success: false,
+        message: 'newTime (ISO string) is required',
+      });
+    }
+
+    const parsedTime = new Date(newTime);
+    if (Number.isNaN(parsedTime.getTime())) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid date provided for newTime',
+      });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found',
+      });
+    }
+
+    // Remove existing reminder call job if present
+    if (booking.reminderCallJobId) {
+      try {
+        const existingJob = await callQueue.getJob(booking.reminderCallJobId);
+        if (existingJob) {
+          await existingJob.remove();
+        }
+      } catch (error) {
+        console.error('Error removing previous reminder call job:', error);
+      }
+      booking.reminderCallJobId = null;
+    }
+
+    const rescheduledFrom = booking.scheduledEventStartTime;
+    booking.rescheduledFrom = rescheduledFrom || null;
+    booking.rescheduledTo = parsedTime;
+    booking.rescheduledAt = new Date();
+    booking.rescheduledCount = (booking.rescheduledCount || 0) + 1;
+    booking.scheduledEventStartTime = parsedTime;
+
+    // Attempt to schedule new reminder call 10 minutes before meeting
+    const phone = booking.clientPhone?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
+    const delayMs = parsedTime.getTime() - Date.now() - 10 * 60 * 1000;
+    if (phone && delayMs > 0) {
+      const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+      if (phoneRegex.test(phone) && !phone.startsWith('+91')) {
+        try {
+          const meetingStartUTC = DateTime.fromJSDate(parsedTime, { zone: 'utc' });
+          const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+          const job = await callQueue.add(
+            'callUser',
+            {
+              phone,
+              meetingTime: meetingTimeIndia,
+              role: 'client',
+              inviteeEmail: booking.clientEmail,
+              eventStartISO: parsedTime.toISOString(),
+            },
+            {
+              jobId: phone,
+              delay: delayMs,
+              removeOnComplete: true,
+              removeOnFail: 100,
+            }
+          );
+          booking.reminderCallJobId = job.id.toString();
+        } catch (error) {
+          console.error('Error scheduling new reminder job:', error);
+        }
+      }
+    }
+
+    booking.bookingStatus = 'scheduled';
+    await booking.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Booking rescheduled successfully',
+      data: booking.toObject(),
+    });
+  } catch (error) {
+    console.error('Error rescheduling booking:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to reschedule booking',
+      error: error.message,
     });
   }
 };

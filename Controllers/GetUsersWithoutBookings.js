@@ -5,7 +5,7 @@ import { DiscordConnect } from "../Utils/DiscordConnect.js";
 
 export default async function GetUsersWithoutBookings(req, res) {
     try {
-        const allUsers = await UserModel.find({}).select('email fullName phone countryCode createdAt workAuthorization').lean();
+        const allUsers = await UserModel.find({}).select('email fullName phone countryCode createdAt workAuthorization booked').lean();
         
         const bookedEmails = await CampaignBookingModel.distinct('clientEmail');
         
@@ -16,47 +16,54 @@ export default async function GetUsersWithoutBookings(req, res) {
             if (!userEmailLower || userEmailLower === 'not specified') {
                 return false;
             }
+            if (user.booked) {
+                return false;
+            }
+            if (user.workAuthorization?.toLowerCase() !== 'yes') {
+                return false;
+            }
             return !bookedEmailsLower.includes(userEmailLower);
         });
         
-        const responseData = {
-            totalUsers: allUsers.length,
-            totalBookedUsers: bookedEmails.length,
-            usersWithoutBookings: usersWithoutBookings.length,
-            users: usersWithoutBookings.map(user => ({
-                email: user.email,
-                fullName: user.fullName,
-                phone: user.phone,
-                countryCode: user.countryCode,
-                workAuthorization: user.workAuthorization,
-                signedUpAt: user.createdAt
-            }))
-        };
+        const emails = usersWithoutBookings.map(user => user.email).filter(Boolean);
         
-        const discordMessage = {
-            "Message": "Users Without Bookings",
-            "Total Users Signed Up": allUsers.length,
-            "Users Who Booked Meetings": bookedEmails.length,
-            "Users Without Bookings": usersWithoutBookings.length,
-            "Details": usersWithoutBookings.slice(0, 10).map(user => ({
-                "Name": user.fullName,
-                "Email": user.email,
-                "Phone": user.phone,
-                "Signed Up": new Date(user.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
-            }))
-        };
+        const uniqueEmails = [];
+        const seenEmails = new Set();
         
-         if (usersWithoutBookings.length > 0) {
-            try {
-                await DiscordConnect(process.env.DISCORD_WEB_HOOK_URL || process.env.DISCORD_MEET_WEB_HOOK_URL, JSON.stringify(discordMessage, null, 2));
-            } catch (discordError) {
-                console.error('Failed to send Discord notification:', discordError);
+        for (const email of emails) {
+            const emailLower = email.toLowerCase();
+            if (!seenEmails.has(emailLower)) {
+                seenEmails.add(emailLower);
+                uniqueEmails.push(email);
             }
         }
         
+        const responseData = uniqueEmails;
+        
+        // const discordMessage = {
+        //     "Message": "Users Without Bookings",
+        //     "Total Users Signed Up": allUsers.length,
+        //     "Users Who Booked Meetings": bookedEmails.length,
+        //     "Users Without Bookings": usersWithoutBookings.length,
+        //     "Details": usersWithoutBookings.slice(0, 10).map(user => ({
+        //         "Name": user.fullName,
+        //         "Email": user.email,
+        //         "Phone": user.phone,
+        //         "Signed Up": new Date(user.createdAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+        //     }))
+        // };
+        
+        //  if (usersWithoutBookings.length > 0) {
+        //     try {
+        //         await DiscordConnect(process.env.DISCORD_WEB_HOOK_URL || process.env.DISCORD_MEET_WEB_HOOK_URL, JSON.stringify(discordMessage, null, 2));
+        //     } catch (discordError) {
+        //         console.error('Failed to send Discord notification:', discordError);
+        //     }
+        // }
+        
         return res.status(200).json({
             success: true,
-            message: `Found ${usersWithoutBookings.length} users who signed up but haven't booked a meeting`,
+            message: `Found ${uniqueEmails.length} users who signed up but haven't booked a meeting`,
             data: responseData
         });
         
