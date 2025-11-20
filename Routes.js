@@ -9,6 +9,7 @@ import SendEmailCampaign from "./Controllers/SendEmailCampaign.js";
 import GetEmailCampaigns from "./Controllers/GetEmailCampaigns.js";
 import CreateScheduledEmailCampaign from "./Controllers/CreateScheduledEmailCampaign.js";
 import GetScheduledEmailCampaigns from "./Controllers/GetScheduledEmailCampaigns.js";
+import UpdateScheduledEmailCampaignStatus from "./Controllers/UpdateScheduledEmailCampaignStatus.js";
 import GetUserCampaigns from "./Controllers/GetUserCampaigns.js";
 import GetCampaignDetails from "./Controllers/GetCampaignDetails.js";
 import ResendEmailCampaign from "./Controllers/ResendEmailCampaign.js";
@@ -84,6 +85,7 @@ export default function Routes(app){
   app.post('/api/email-campaign/scheduled', CreateScheduledEmailCampaign);
   app.get('/api/email-campaigns', GetEmailCampaigns);
   app.get('/api/email-campaigns/scheduled', GetScheduledEmailCampaigns);
+  app.put('/api/email-campaigns/scheduled/:campaignId/status', UpdateScheduledEmailCampaignStatus);
   app.get('/api/email-campaigns/user/:email', GetUserCampaigns);
   app.get('/api/email-campaigns/:campaignId/details/:userEmail', GetCampaignDetails);
   app.post('/api/email-campaign/resend', ResendEmailCampaign);

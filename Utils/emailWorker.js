@@ -67,6 +67,40 @@ const emailWorker = new Worker(
             throw new Error(`Campaign ${campaignId} not found`);
         }
 
+        // Check if campaign is paused or cancelled - if so, skip sending emails
+        if (campaign.status === 'paused' || campaign.status === 'cancelled') {
+            console.log(`[EmailWorker] Campaign ${campaignId} is ${campaign.status}, skipping email send for day ${sendDay}`);
+            
+            const scheduleIndex = campaign.sendSchedule.findIndex(s => s.day === sendDay);
+            if (scheduleIndex !== -1) {
+                campaign.sendSchedule[scheduleIndex].status = 'skipped';
+                campaign.sendSchedule[scheduleIndex].skippedCount = recipientEmails.length;
+                campaign.sendSchedule[scheduleIndex].completedAt = new Date();
+            }
+            
+            campaign.logs.push({
+                timestamp: new Date(),
+                level: 'warning',
+                message: `Skipped email send for day ${sendDay} - campaign is ${campaign.status}`,
+                details: { 
+                    jobId: job.id, 
+                    sendDay, 
+                    campaignStatus: campaign.status,
+                    recipientCount: recipientEmails.length
+                }
+            });
+            await campaign.save();
+            
+            return {
+                success: true,
+                sendDay,
+                successful: 0,
+                failed: 0,
+                skipped: recipientEmails.length,
+                reason: `Campaign is ${campaign.status}`
+            };
+        }
+
         const scheduleIndex = campaign.sendSchedule.findIndex(s => s.day === sendDay);
         if (scheduleIndex === -1) {
             throw new Error(`Schedule for day ${sendDay} not found`);
