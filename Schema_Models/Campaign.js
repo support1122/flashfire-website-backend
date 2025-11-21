@@ -18,6 +18,36 @@ const PageVisitSchema = new mongoose.Schema({
   pageUrl: String
 });
 
+// Schema for tracking button clicks
+const ButtonClickSchema = new mongoose.Schema({
+  visitorId: {
+    type: String,
+    required: true,
+    index: true
+  },
+  timestamp: {
+    type: Date,
+    default: Date.now,
+    index: true
+  },
+  buttonText: {
+    type: String,
+    required: true
+  },
+  buttonLocation: {
+    type: String,
+    required: true
+  },
+  buttonType: {
+    type: String,
+    enum: ['cta', 'secondary', 'link', 'icon'],
+    default: 'cta'
+  },
+  pageUrl: String,
+  userAgent: String,
+  ipAddress: String
+});
+
 // Main Campaign Schema
 export const CampaignSchema = new mongoose.Schema({
   campaignId: {
@@ -66,11 +96,16 @@ export const CampaignSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  totalButtonClicks: {
+    type: Number,
+    default: 0
+  },
   uniqueVisitors: {
     type: [String], // Array of unique visitor IDs
     default: []
   },
   pageVisits: [PageVisitSchema],
+  buttonClicks: [ButtonClickSchema],
   // Campaign status
   isActive: {
     type: Boolean,

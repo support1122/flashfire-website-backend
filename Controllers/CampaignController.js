@@ -151,6 +151,7 @@ export const getCampaignById = async (req, res) => {
         bookings,
         stats: {
           totalClicks: campaign.totalClicks,
+          totalButtonClicks: campaign.totalButtonClicks || 0,
           uniqueVisitors: campaign.uniqueVisitors.length,
           totalBookings: bookings.length,
           conversionRate: campaign.uniqueVisitors.length > 0 
@@ -233,6 +234,79 @@ export const trackPageVisit = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to track page visit',
+      error: error.message
+    });
+  }
+};
+
+// ==================== TRACK BUTTON CLICK ====================
+export const trackButtonClick = async (req, res) => {
+  try {
+    const { utmSource, visitorId, buttonText, buttonLocation, buttonType, pageUrl, userAgent, ipAddress } = req.body;
+
+    if (!utmSource || !buttonText || !buttonLocation) {
+      return res.status(400).json({
+        success: false,
+        message: 'utm_source, buttonText, and buttonLocation are required'
+      });
+    }
+
+    const campaign = await CampaignModel.findOne({ utmSource });
+
+    if (!campaign) {
+      // Campaign doesn't exist, but don't fail - just log it
+      console.log(`Button click tracked for non-existent campaign: ${utmSource}`);
+      return res.status(200).json({
+        success: true,
+        message: 'Button click tracked (campaign not found in system)'
+      });
+    }
+
+    // Generate visitor ID if not provided
+    const finalVisitorId = visitorId || crypto.randomBytes(16).toString('hex');
+
+    // Add button click
+    campaign.buttonClicks.push({
+      visitorId: finalVisitorId,
+      timestamp: new Date(),
+      buttonText,
+      buttonLocation,
+      buttonType: buttonType || 'cta',
+      pageUrl,
+      userAgent,
+      ipAddress
+    });
+
+    // Increment total button clicks
+    campaign.totalButtonClicks = (campaign.totalButtonClicks || 0) + 1;
+
+    // Also increment total clicks (for backward compatibility)
+    campaign.totalClicks += 1;
+
+    // Add to unique visitors if not already present
+    if (!campaign.uniqueVisitors.includes(finalVisitorId)) {
+      campaign.uniqueVisitors.push(finalVisitorId);
+    }
+
+    campaign.updatedAt = new Date();
+    await campaign.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Button click tracked successfully',
+      data: {
+        campaignName: campaign.campaignName,
+        totalButtonClicks: campaign.totalButtonClicks,
+        totalClicks: campaign.totalClicks,
+        visitorId: finalVisitorId
+      }
+    });
+
+  } catch (error) {
+    console.error('Error tracking button click:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to track button click',
       error: error.message
     });
   }
