@@ -23,6 +23,7 @@ import {
   getAllCampaigns,
   getCampaignById,
   trackPageVisit,
+  trackButtonClick,
   updateCampaign,
   deleteCampaign,
   getCampaignStatistics
@@ -104,6 +105,7 @@ export default function Routes(app){
   
   // Tracking
   app.post('/api/campaigns/track/visit', trackPageVisit); // Track page visit with UTM
+  app.post('/api/campaigns/track/button-click', trackButtonClick); // Track button click with UTM
   
   // Booking Management
   app.get('/api/campaign-bookings', getAllBookings); // Get all bookings
