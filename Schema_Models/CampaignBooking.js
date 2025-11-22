@@ -186,6 +186,10 @@ export const CampaignBookingSchema = new mongoose.Schema({
   reminderCallJobId: {
     type: String,
     default: null
+  },
+  meetingNotes: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true

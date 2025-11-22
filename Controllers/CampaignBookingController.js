@@ -30,7 +30,7 @@ export const saveCalendlyBooking = async (bookingData) => {
 
     if ((!clientName || clientName.trim() === '') || (!clientEmail || clientEmail.trim() === '')) {
       console.log('⚠️ Missing client name or email, searching for existing Calendly booking...');
-      
+
       const findQuery = {};
       if (utmSource) {
         findQuery.utmSource = utmSource;
@@ -94,7 +94,7 @@ export const saveCalendlyBooking = async (bookingData) => {
       } else {
         // Get or create default "Calendly" campaign for direct bookings
         let defaultCampaign = await CampaignModel.findOne({ utmSource: 'calendly_direct' });
-        
+
         if (!defaultCampaign) {
           // Create default Calendly campaign if it doesn't exist
           defaultCampaign = new CampaignModel({
@@ -109,7 +109,7 @@ export const saveCalendlyBooking = async (bookingData) => {
           await defaultCampaign.save();
           console.log('✅ Created default Calendly campaign', { campaignId: defaultCampaign.campaignId });
         }
-        
+
         campaignId = defaultCampaign.campaignId;
         console.log('✅ Assigned booking to default Calendly campaign', { campaignId });
       }
@@ -119,21 +119,21 @@ export const saveCalendlyBooking = async (bookingData) => {
     const finalDuplicateCheck = {
       $or: []
     };
-    
+
     if (clientEmail && clientEmail.trim() !== '' && !clientEmail.includes('@calendly.placeholder')) {
       finalDuplicateCheck.$or.push({
         clientEmail: clientEmail.trim().toLowerCase(),
         scheduledEventStartTime: scheduledEventStartTime
       });
     }
-    
+
     if (scheduledEventStartTime && calendlyMeetLink && calendlyMeetLink !== 'Not Provided') {
       finalDuplicateCheck.$or.push({
         scheduledEventStartTime: scheduledEventStartTime,
         calendlyMeetLink: calendlyMeetLink
       });
     }
-    
+
     if (finalDuplicateCheck.$or.length > 0) {
       const existingDuplicate = await CampaignBookingModel.findOne(finalDuplicateCheck);
       if (existingDuplicate) {
@@ -181,9 +181,9 @@ export const saveCalendlyBooking = async (bookingData) => {
       );
       console.log('✅ User marked as booked:', { email: booking.clientEmail });
     } catch (userUpdateError) {
-      console.warn('⚠️ Failed to update user booked status:', { 
-        email: booking.clientEmail, 
-        error: userUpdateError.message 
+      console.warn('⚠️ Failed to update user booked status:', {
+        email: booking.clientEmail,
+        error: userUpdateError.message
       });
       // Don't fail the whole request if user update fails
     }
@@ -309,7 +309,7 @@ export const updateBookingStatus = async (req, res) => {
     const { status } = req.body;
 
     const validStatuses = ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show'];
-    
+
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
         success: false,
@@ -351,8 +351,8 @@ export const getBookingsByEmail = async (req, res) => {
   try {
     const { email } = req.params;
 
-    const bookings = await CampaignBookingModel.find({ 
-      clientEmail: email.toLowerCase() 
+    const bookings = await CampaignBookingModel.find({
+      clientEmail: email.toLowerCase()
     }).sort({ bookingCreatedAt: -1 });
 
     return res.status(200).json({
@@ -531,7 +531,7 @@ export const markBookingsAsSynced = async (req, res) => {
 
     const result = await CampaignBookingModel.updateMany(
       { bookingId: { $in: bookingIds } },
-      { 
+      {
         syncedToMicroservice: true,
         syncedAt: new Date()
       }
@@ -634,4 +634,40 @@ export const captureFrontendBooking = async (req, res) => {
     });
   }
 };
+
+// ==================== UPDATE BOOKING NOTES ====================
+export const updateBookingNotes = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const { notes } = req.body;
+
+    const booking = await CampaignBookingModel.findOneAndUpdate(
+      { bookingId },
+      { meetingNotes: notes },
+      { new: true }
+    );
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Booking notes updated successfully',
+      data: booking
+    });
+
+  } catch (error) {
+    console.error('Error updating booking notes:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update booking notes',
+      error: error.message
+    });
+  }
+};
+
 
