@@ -228,18 +228,19 @@ export const saveCalendlyBooking = async (bookingData) => {
 // ==================== GET ALL BOOKINGS ====================
 export const getAllBookings = async (req, res) => {
   try {
-    const { utmSource, status, limit = 100, skip = 0 } = req.query;
+    const { utmSource, status } = req.query;
 
     let query = {};
     if (utmSource) query.utmSource = utmSource;
     if (status) query.bookingStatus = status;
 
+    // Fetch ALL bookings without pagination for better performance
+    // Sort by scheduledEventStartTime (meeting time) first, then bookingCreatedAt
     const bookings = await CampaignBookingModel.find(query)
-      .sort({ bookingCreatedAt: -1 })
-      .limit(parseInt(limit))
-      .skip(parseInt(skip));
+      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
+      .lean(); // Use lean() for better performance
 
-    const total = await CampaignBookingModel.countDocuments(query);
+    const total = bookings.length;
 
     return res.status(200).json({
       success: true,
@@ -665,6 +666,77 @@ export const updateBookingNotes = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to update booking notes',
+      error: error.message
+    });
+  }
+};
+
+// ==================== CREATE BOOKING MANUALLY ====================
+export const createBookingManually = async (req, res) => {
+  try {
+    const {
+      clientName,
+      clientEmail,
+      clientPhone,
+      scheduledEventStartTime,
+      utmSource,
+      utmMedium,
+      utmCampaign,
+      bookingStatus,
+      calendlyMeetLink,
+      anythingToKnow,
+      meetingNotes
+    } = req.body;
+
+    // Validation
+    if (!clientName || !clientEmail || !clientPhone || !scheduledEventStartTime) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: clientName, clientEmail, clientPhone, scheduledEventStartTime'
+      });
+    }
+
+    // Find or create campaign
+    let campaignId = null;
+    if (utmSource) {
+      const campaign = await CampaignModel.findOne({ utmSource });
+      if (campaign) {
+        campaignId = campaign.campaignId;
+      }
+    }
+
+    // Create booking
+    const newBooking = new CampaignBookingModel({
+      clientName: clientName.trim(),
+      clientEmail: clientEmail.trim().toLowerCase(),
+      clientPhone: clientPhone.trim(),
+      scheduledEventStartTime: new Date(scheduledEventStartTime),
+      scheduledEventEndTime: new Date(new Date(scheduledEventStartTime).getTime() + 30 * 60000), // 30 min default
+      utmSource: utmSource || 'MANUAL',
+      utmMedium: utmMedium || null,
+      utmCampaign: utmCampaign || null,
+      campaignId: campaignId,
+      bookingStatus: bookingStatus || 'scheduled',
+      calendlyMeetLink: calendlyMeetLink || null,
+      anythingToKnow: anythingToKnow || null,
+      meetingNotes: meetingNotes || null,
+      bookingCreatedAt: new Date()
+    });
+
+    await newBooking.save();
+
+    console.log('✅ Booking created manually:', newBooking.bookingId);
+
+    return res.status(201).json({
+      success: true,
+      message: 'Booking created successfully',
+      booking: newBooking
+    });
+  } catch (error) {
+    console.error('❌ Error creating booking manually:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to create booking',
       error: error.message
     });
   }

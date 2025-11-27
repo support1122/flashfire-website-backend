@@ -37,12 +37,15 @@ import {
   markBookingsAsSynced,
   captureFrontendBooking,
   rescheduleBooking,
-  updateBookingNotes
+  updateBookingNotes,
+  createBookingManually
 } from "./Controllers/CampaignBookingController.js";
 // Webhook Controllers
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
+// Payment Controllers
+import { createPayment, getAllPayments, getPaymentById, getPaymentsByEmail } from "./Controllers/PaymentController.js";
 import { getMessageTypes, sendMessage, testConnection, sendSimpleMessage } from "./Controllers/WhatsAppController.js";
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
@@ -109,6 +112,7 @@ export default function Routes(app) {
   app.post('/api/campaigns/track/button-click', trackButtonClick); // Track button click with UTM
 
   // Booking Management
+  app.post('/api/campaign-bookings/manual', createBookingManually); // Create booking manually
   app.get('/api/campaign-bookings', getAllBookings); // Get all bookings
   app.get('/api/campaign-bookings/debug/all', async (req, res) => {
     // DEBUG ENDPOINT - Shows ALL bookings with full details
@@ -155,6 +159,12 @@ export default function Routes(app) {
   app.post('/api/payment-reminders', schedulePaymentReminder); // Schedule payment reminder
   app.get('/api/payment-reminders/:bookingId', getPaymentReminders); // Get scheduled reminders for booking
   app.delete('/api/payment-reminders/:jobId', cancelPaymentReminder); // Cancel scheduled reminder
+
+  // ==================== PAYMENT ROUTES ====================
+  app.post('/api/payments', createPayment); // Create new payment record
+  app.get('/api/payments', getAllPayments); // Get all payments
+  app.get('/api/payments/:paymentId', getPaymentById); // Get payment by ID
+  app.get('/api/payments/email/:email', getPaymentsByEmail); // Get payments by customer email
 
   // ==================== WHATSAPP MESSAGING ROUTES ====================
   app.get('/api/whatsapp/message-types', getMessageTypes); // Get available message types
