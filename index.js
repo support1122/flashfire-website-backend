@@ -238,6 +238,7 @@ import { UserModel } from './Schema_Models/User.js';
 import { CampaignModel } from './Schema_Models/Campaign.js';
 import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
 import emailWorker from './Utils/emailWorker.js';
+import whatsappWorker from './Utils/whatsappWorker.js';
 
 // -------------------- Express Setup --------------------
 const app = express();

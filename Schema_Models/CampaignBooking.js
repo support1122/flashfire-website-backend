@@ -104,7 +104,7 @@ export const CampaignBookingSchema = new mongoose.Schema({
   // Status tracking
   bookingStatus: {
     type: String,
-    enum: ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show'],
+    enum: ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'ignored'],
     default: 'scheduled'
   },
   // Sync status

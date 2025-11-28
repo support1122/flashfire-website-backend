@@ -47,6 +47,14 @@ import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } f
 // Payment Controllers
 import { createPayment, getAllPayments, getPaymentById, getPaymentsByEmail } from "./Controllers/PaymentController.js";
 import { getMessageTypes, sendMessage, testConnection, sendSimpleMessage } from "./Controllers/WhatsAppController.js";
+// WhatsApp Campaign Controllers
+import { 
+  getWatiTemplates, 
+  getMobileNumbersByStatus, 
+  createWhatsAppCampaign, 
+  getAllWhatsAppCampaigns, 
+  getScheduledWhatsAppCampaigns 
+} from "./Controllers/WhatsAppCampaignController.js";
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -94,6 +102,14 @@ export default function Routes(app) {
   app.get('/api/email-campaigns/user/:email', GetUserCampaigns);
   app.get('/api/email-campaigns/:campaignId/details/:userEmail', GetCampaignDetails);
   app.post('/api/email-campaign/resend', ResendEmailCampaign);
+  
+  // WhatsApp Campaign Routes
+  app.get('/api/whatsapp-campaigns/templates', getWatiTemplates);
+  app.get('/api/whatsapp-campaigns/mobile-numbers', getMobileNumbersByStatus);
+  app.post('/api/whatsapp-campaigns', createWhatsAppCampaign);
+  app.get('/api/whatsapp-campaigns', getAllWhatsAppCampaigns);
+  app.get('/api/whatsapp-campaigns/scheduled', getScheduledWhatsAppCampaigns);
+  
   app.post('/employerform', EmployerForm);
   // app.post('/calendly-webhook',Calendly_Meet_Integration);
   //  app.post("/twilio-ivr", TwilioReminder);
