@@ -49,10 +49,15 @@ async function sendWhatsAppMessage(mobileNumber, templateName, parameters, campa
 
 let whatsappWorker;
 
-try {
-    whatsappWorker = new Worker(
-    'whatsappQueue',
-    async (job) => {
+// ONLY create worker if UPSTASH_REDIS_URL is configured
+if (!process.env.UPSTASH_REDIS_URL) {
+    console.warn('[WhatsAppWorker] ⚠️ UPSTASH_REDIS_URL not configured. WhatsApp campaigns will not work.');
+    whatsappWorker = null;
+} else {
+    try {
+        whatsappWorker = new Worker(
+        'whatsappQueue',
+        async (job) => {
         const {
             campaignId,
             sendDay,
@@ -177,29 +182,30 @@ try {
     },
     {
         connection: {
-            url: process.env.UPSTASH_REDIS_URL || process.env.REDIS_CLOUD_URL || `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
+            url: process.env.UPSTASH_REDIS_URL
         },
         limiter: {
             max: 10, // Process max 10 jobs
             duration: 1000, // per second
         },
     }
-);
+    );
 
-    whatsappWorker.on('completed', (job) => {
-        console.log(`[WhatsAppWorker] Job ${job.id} completed successfully`);
-    });
+        whatsappWorker.on('completed', (job) => {
+            console.log(`[WhatsAppWorker] Job ${job.id} completed successfully`);
+        });
 
-    whatsappWorker.on('failed', (job, err) => {
-        console.error(`[WhatsAppWorker] Job ${job.id} failed:`, err.message);
-    });
+        whatsappWorker.on('failed', (job, err) => {
+            console.error(`[WhatsAppWorker] Job ${job.id} failed:`, err.message);
+        });
 
-    console.log('[WhatsAppWorker] ✅ WhatsApp worker started and listening for jobs');
-} catch (error) {
-    console.warn('[WhatsAppWorker] ⚠️ Could not start WhatsApp worker - Redis connection failed');
-    console.warn('[WhatsAppWorker] WhatsApp campaigns will not be processed automatically');
-    console.warn('[WhatsAppWorker] Error:', error.message);
-    whatsappWorker = null;
+        console.log('[WhatsAppWorker] ✅ WhatsApp worker started and listening for jobs');
+    } catch (error) {
+        console.warn('[WhatsAppWorker] ⚠️ Could not start WhatsApp worker - Redis connection failed');
+        console.warn('[WhatsAppWorker] WhatsApp campaigns will not be processed automatically');
+        console.warn('[WhatsAppWorker] Error:', error.message);
+        whatsappWorker = null;
+    }
 }
 
 export default whatsappWorker;
