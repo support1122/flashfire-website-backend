@@ -82,6 +82,22 @@ export default async function CreateScheduledEmailCampaign(req, res) {
 
         await campaign.save();
 
+        // Check if queue is available
+        if (!emailQueue) {
+            campaign.status = 'failed';
+            campaign.logs.push({
+                timestamp: new Date(),
+                level: 'error',
+                message: 'Queue service unavailable. UPSTASH_REDIS_URL not configured.'
+            });
+            await campaign.save();
+            
+            return res.status(503).json({
+                success: false,
+                message: 'Email campaign created but queue service is unavailable. Please configure UPSTASH_REDIS_URL.'
+            });
+        }
+
         for (let i = 0; i < sendSchedule.length; i++) {
             const scheduleItem = sendSchedule[i];
             const delay = scheduleItem.scheduledDate.getTime() - Date.now();

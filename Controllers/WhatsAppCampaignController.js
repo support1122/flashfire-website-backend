@@ -6,12 +6,18 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 
 dotenv.config();
 
-// Initialize Bull MQ Queue for WhatsApp messages
-const whatsappQueue = new Queue('whatsappQueue', {
-  connection: {
-    url: process.env.UPSTASH_REDIS_URL || process.env.REDIS_CLOUD_URL || `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
-  },
-});
+// Initialize Bull MQ Queue for WhatsApp messages - ONLY if Redis configured
+let whatsappQueue = null;
+
+if (process.env.UPSTASH_REDIS_URL) {
+  whatsappQueue = new Queue('whatsappQueue', {
+    connection: {
+      url: process.env.UPSTASH_REDIS_URL
+    },
+  });
+} else {
+  console.warn('[WhatsAppController] ⚠️ UPSTASH_REDIS_URL not configured. Queue unavailable.');
+}
 
 // ==================== GET WATI TEMPLATES ====================
 export const getWatiTemplates = async (req, res) => {
@@ -130,6 +136,21 @@ export const createWhatsAppCampaign = async (req, res) => {
       await campaign.save();
 
       // Add job to queue (immediate send)
+      if (!whatsappQueue) {
+        campaign.status = 'FAILED';
+        campaign.errorMessage = 'Queue service unavailable. UPSTASH_REDIS_URL not configured.';
+        await campaign.save();
+        
+        return res.status(503).json({
+          success: false,
+          message: 'WhatsApp campaign created but queue service is unavailable. Please configure UPSTASH_REDIS_URL.',
+          campaign: {
+            campaignId: campaign.campaignId,
+            status: campaign.status
+          }
+        });
+      }
+
       try {
         await whatsappQueue.add(
           `whatsapp-campaign-${campaign.campaignId}-day-0`,
@@ -195,6 +216,21 @@ export const createWhatsAppCampaign = async (req, res) => {
       await campaign.save();
 
       // Add jobs to queue for each day
+      if (!whatsappQueue) {
+        campaign.status = 'FAILED';
+        campaign.errorMessage = 'Queue service unavailable. UPSTASH_REDIS_URL not configured.';
+        await campaign.save();
+        
+        return res.status(503).json({
+          success: false,
+          message: 'WhatsApp campaign created but queue service is unavailable. Please configure UPSTASH_REDIS_URL.',
+          campaign: {
+            campaignId: campaign.campaignId,
+            status: campaign.status
+          }
+        });
+      }
+
       try {
         for (const day of sendDays) {
           const scheduledDate = new Date();
@@ -400,6 +436,14 @@ export const sendWhatsAppCampaignNow = async (req, res) => {
     const mobilesToSend = dayGroups[nextDay];
 
     console.log(`Sending campaign ${campaignId} Day ${nextDay} to ${mobilesToSend.length} recipients`);
+
+    // Check if queue is available
+    if (!whatsappQueue) {
+      return res.status(503).json({
+        success: false,
+        message: 'Queue service unavailable. UPSTASH_REDIS_URL not configured.'
+      });
+    }
 
     // Add job to queue immediately
     try {
