@@ -47,7 +47,10 @@ async function sendEmail(email, templateId, domainName, templateName) {
     }
 }
 
-const emailWorker = new Worker(
+let emailWorker;
+
+try {
+    emailWorker = new Worker(
     'emailQueue',
     async (job) => {
         const {
@@ -233,40 +236,46 @@ const emailWorker = new Worker(
     }
 );
 
-emailWorker.on('completed', (job) => {
-    console.log(`[EmailWorker] Job ${job.id} completed`);
-});
+    emailWorker.on('completed', (job) => {
+        console.log(`[EmailWorker] Job ${job.id} completed`);
+    });
 
-emailWorker.on('failed', (job, err) => {
-    console.error(`[EmailWorker] Job ${job.id} failed:`, err.message);
-    
-    if (job?.data?.campaignId) {
-        ScheduledEmailCampaignModel.findById(job.data.campaignId).then(campaign => {
-            if (campaign) {
-                const scheduleIndex = campaign.sendSchedule.findIndex(s => s.day === job.data.sendDay);
-                if (scheduleIndex !== -1) {
-                    campaign.sendSchedule[scheduleIndex].status = 'failed';
-                }
-                campaign.logs.push({
-                    timestamp: new Date(),
-                    level: 'error',
-                    message: `Job ${job.id} failed`,
-                    details: {
-                        jobId: job.id,
-                        sendDay: job.data.sendDay,
-                        error: err.message,
-                        stack: err.stack
+    emailWorker.on('failed', (job, err) => {
+        console.error(`[EmailWorker] Job ${job.id} failed:`, err.message);
+        
+        if (job?.data?.campaignId) {
+            ScheduledEmailCampaignModel.findById(job.data.campaignId).then(campaign => {
+                if (campaign) {
+                    const scheduleIndex = campaign.sendSchedule.findIndex(s => s.day === job.data.sendDay);
+                    if (scheduleIndex !== -1) {
+                        campaign.sendSchedule[scheduleIndex].status = 'failed';
                     }
-                });
-                campaign.save();
-            }
-        }).catch(error => {
-            console.error(`[EmailWorker] Error updating campaign after failure:`, error.message);
-        });
-    }
-});
+                    campaign.logs.push({
+                        timestamp: new Date(),
+                        level: 'error',
+                        message: `Job ${job.id} failed`,
+                        details: {
+                            jobId: job.id,
+                            sendDay: job.data.sendDay,
+                            error: err.message,
+                            stack: err.stack
+                        }
+                    });
+                    campaign.save();
+                }
+            }).catch(error => {
+                console.error(`[EmailWorker] Error updating campaign after failure:`, error.message);
+            });
+        }
+    });
 
-console.log('[EmailWorker] Email worker started and listening for jobs');
+    console.log('[EmailWorker] ✅ Email worker started and listening for jobs');
+} catch (error) {
+    console.warn('[EmailWorker] ⚠️ Could not start email worker - Redis connection failed');
+    console.warn('[EmailWorker] Email campaigns will not be processed automatically');
+    console.warn('[EmailWorker] Error:', error.message);
+    emailWorker = null;
+}
 
 export default emailWorker;
 
