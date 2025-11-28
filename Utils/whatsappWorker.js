@@ -177,8 +177,7 @@ try {
     },
     {
         connection: {
-            host: process.env.REDIS_HOST || 'localhost',
-            port: process.env.REDIS_PORT || 6379,
+            url: process.env.UPSTASH_REDIS_URL || process.env.REDIS_CLOUD_URL || `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
         },
         limiter: {
             max: 10, // Process max 10 jobs

@@ -9,8 +9,7 @@ dotenv.config();
 // Initialize Bull MQ Queue for WhatsApp messages
 const whatsappQueue = new Queue('whatsappQueue', {
   connection: {
-    host: process.env.REDIS_HOST || 'localhost',
-    port: process.env.REDIS_PORT || 6379,
+    url: process.env.UPSTASH_REDIS_URL || process.env.REDIS_CLOUD_URL || `redis://${process.env.REDIS_HOST || 'localhost'}:${process.env.REDIS_PORT || 6379}`
   },
 });
 
