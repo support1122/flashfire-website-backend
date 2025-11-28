@@ -131,22 +131,38 @@ export const createWhatsAppCampaign = async (req, res) => {
       await campaign.save();
 
       // Add job to queue (immediate send)
-      await whatsappQueue.add(
-        `whatsapp-campaign-${campaign.campaignId}-day-0`,
-        {
-          campaignId: campaign.campaignId,
-          sendDay: 0,
-          scheduledDate: new Date(),
-          templateName,
-          parameters,
-          recipientMobiles: uniqueMobiles
-        },
-        {
-          jobId: `${campaign.campaignId}-day-0`,
-          removeOnComplete: true,
-          removeOnFail: false
-        }
-      );
+      try {
+        await whatsappQueue.add(
+          `whatsapp-campaign-${campaign.campaignId}-day-0`,
+          {
+            campaignId: campaign.campaignId,
+            sendDay: 0,
+            scheduledDate: new Date(),
+            templateName,
+            parameters,
+            recipientMobiles: uniqueMobiles
+          },
+          {
+            jobId: `${campaign.campaignId}-day-0`,
+            removeOnComplete: true,
+            removeOnFail: false
+          }
+        );
+      } catch (queueError) {
+        console.error('Failed to add job to queue:', queueError.message);
+        campaign.status = 'FAILED';
+        campaign.errorMessage = 'Queue service unavailable. Please configure Redis.';
+        await campaign.save();
+        
+        return res.status(503).json({
+          success: false,
+          message: 'WhatsApp campaign created but queue service is unavailable. Please contact support.',
+          campaign: {
+            campaignId: campaign.campaignId,
+            status: campaign.status
+          }
+        });
+      }
 
       return res.status(201).json({
         success: true,
@@ -180,32 +196,48 @@ export const createWhatsAppCampaign = async (req, res) => {
       await campaign.save();
 
       // Add jobs to queue for each day
-      for (const day of sendDays) {
-        const scheduledDate = new Date();
-        scheduledDate.setDate(scheduledDate.getDate() + day);
+      try {
+        for (const day of sendDays) {
+          const scheduledDate = new Date();
+          scheduledDate.setDate(scheduledDate.getDate() + day);
+          
+          // Schedule for 10 AM IST
+          scheduledDate.setHours(10, 0, 0, 0);
+
+          const delay = day === 0 ? 0 : scheduledDate.getTime() - Date.now();
+
+          await whatsappQueue.add(
+            `whatsapp-campaign-${campaign.campaignId}-day-${day}`,
+            {
+              campaignId: campaign.campaignId,
+              sendDay: day,
+              scheduledDate,
+              templateName,
+              parameters,
+              recipientMobiles: uniqueMobiles
+            },
+            {
+              jobId: `${campaign.campaignId}-day-${day}`,
+              delay: delay > 0 ? delay : 0,
+              removeOnComplete: true,
+              removeOnFail: false
+            }
+          );
+        }
+      } catch (queueError) {
+        console.error('Failed to add jobs to queue:', queueError.message);
+        campaign.status = 'FAILED';
+        campaign.errorMessage = 'Queue service unavailable. Please configure Redis.';
+        await campaign.save();
         
-        // Schedule for 10 AM IST
-        scheduledDate.setHours(10, 0, 0, 0);
-
-        const delay = day === 0 ? 0 : scheduledDate.getTime() - Date.now();
-
-        await whatsappQueue.add(
-          `whatsapp-campaign-${campaign.campaignId}-day-${day}`,
-          {
+        return res.status(503).json({
+          success: false,
+          message: 'WhatsApp campaign created but queue service is unavailable. Please contact support.',
+          campaign: {
             campaignId: campaign.campaignId,
-            sendDay: day,
-            scheduledDate,
-            templateName,
-            parameters,
-            recipientMobiles: uniqueMobiles
-          },
-          {
-            jobId: `${campaign.campaignId}-day-${day}`,
-            delay: delay > 0 ? delay : 0,
-            removeOnComplete: true,
-            removeOnFail: false
+            status: campaign.status
           }
-        );
+        });
       }
 
       return res.status(201).json({
@@ -324,6 +356,97 @@ export const getScheduledWhatsAppCampaigns = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch scheduled campaigns',
+      error: error.message
+    });
+  }
+};
+
+// ==================== SEND CAMPAIGN NOW ====================
+export const sendWhatsAppCampaignNow = async (req, res) => {
+  try {
+    const { campaignId } = req.params;
+
+    const campaign = await WhatsAppCampaignModel.findOne({ campaignId });
+
+    if (!campaign) {
+      return res.status(404).json({
+        success: false,
+        message: 'Campaign not found'
+      });
+    }
+
+    // Find pending/scheduled messages
+    const pendingMessages = campaign.messageStatuses.filter(
+      msg => msg.status === 'pending' || msg.status === 'scheduled'
+    );
+
+    if (pendingMessages.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No pending messages to send'
+      });
+    }
+
+    // Group pending messages by sendDay to send them intelligently
+    const dayGroups = {};
+    pendingMessages.forEach(msg => {
+      if (!dayGroups[msg.sendDay]) {
+        dayGroups[msg.sendDay] = [];
+      }
+      dayGroups[msg.sendDay].push(msg.mobileNumber);
+    });
+
+    // Get the next day to send (lowest sendDay with pending messages)
+    const nextDay = Math.min(...Object.keys(dayGroups).map(Number));
+    const mobilesToSend = dayGroups[nextDay];
+
+    console.log(`Sending campaign ${campaignId} Day ${nextDay} to ${mobilesToSend.length} recipients`);
+
+    // Add job to queue immediately
+    try {
+      await whatsappQueue.add(
+        `whatsapp-campaign-${campaignId}-day-${nextDay}-manual`,
+        {
+          campaignId: campaign.campaignId,
+          sendDay: nextDay,
+          scheduledDate: new Date(),
+          templateName: campaign.templateName,
+          parameters: campaign.parameters || [],
+          recipientMobiles: mobilesToSend
+        },
+        {
+          jobId: `${campaignId}-day-${nextDay}-manual-${Date.now()}`,
+          removeOnComplete: true,
+          removeOnFail: false
+        }
+      );
+
+      // Update campaign status
+      campaign.status = 'IN_PROGRESS';
+      await campaign.save();
+    } catch (queueError) {
+      console.error('Failed to add job to queue:', queueError.message);
+      return res.status(503).json({
+        success: false,
+        message: 'Queue service unavailable. Please configure Redis to send messages.',
+        error: queueError.message
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Sending ${mobilesToSend.length} messages for Day ${nextDay}`,
+      data: {
+        campaignId: campaign.campaignId,
+        day: nextDay,
+        recipientCount: mobilesToSend.length
+      }
+    });
+  } catch (error) {
+    console.error('Error sending campaign:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to send campaign',
       error: error.message
     });
   }

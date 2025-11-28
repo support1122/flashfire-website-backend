@@ -47,7 +47,10 @@ async function sendWhatsAppMessage(mobileNumber, templateName, parameters, campa
     }
 }
 
-const whatsappWorker = new Worker(
+let whatsappWorker;
+
+try {
+    whatsappWorker = new Worker(
     'whatsappQueue',
     async (job) => {
         const {
@@ -184,15 +187,21 @@ const whatsappWorker = new Worker(
     }
 );
 
-whatsappWorker.on('completed', (job) => {
-    console.log(`[WhatsAppWorker] Job ${job.id} completed successfully`);
-});
+    whatsappWorker.on('completed', (job) => {
+        console.log(`[WhatsAppWorker] Job ${job.id} completed successfully`);
+    });
 
-whatsappWorker.on('failed', (job, err) => {
-    console.error(`[WhatsAppWorker] Job ${job.id} failed:`, err.message);
-});
+    whatsappWorker.on('failed', (job, err) => {
+        console.error(`[WhatsAppWorker] Job ${job.id} failed:`, err.message);
+    });
 
-console.log('[WhatsAppWorker] WhatsApp worker started and listening for jobs');
+    console.log('[WhatsAppWorker] ✅ WhatsApp worker started and listening for jobs');
+} catch (error) {
+    console.warn('[WhatsAppWorker] ⚠️ Could not start WhatsApp worker - Redis connection failed');
+    console.warn('[WhatsAppWorker] WhatsApp campaigns will not be processed automatically');
+    console.warn('[WhatsAppWorker] Error:', error.message);
+    whatsappWorker = null;
+}
 
 export default whatsappWorker;
 

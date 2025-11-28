@@ -53,7 +53,8 @@ import {
   getMobileNumbersByStatus, 
   createWhatsAppCampaign, 
   getAllWhatsAppCampaigns, 
-  getScheduledWhatsAppCampaigns 
+  getScheduledWhatsAppCampaigns,
+  sendWhatsAppCampaignNow
 } from "./Controllers/WhatsAppCampaignController.js";
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
@@ -107,8 +108,9 @@ export default function Routes(app) {
   app.get('/api/whatsapp-campaigns/templates', getWatiTemplates);
   app.get('/api/whatsapp-campaigns/mobile-numbers', getMobileNumbersByStatus);
   app.post('/api/whatsapp-campaigns', createWhatsAppCampaign);
-  app.get('/api/whatsapp-campaigns', getAllWhatsAppCampaigns);
   app.get('/api/whatsapp-campaigns/scheduled', getScheduledWhatsAppCampaigns);
+  app.post('/api/whatsapp-campaigns/:campaignId/send-now', sendWhatsAppCampaignNow);
+  app.get('/api/whatsapp-campaigns', getAllWhatsAppCampaigns);
   
   app.post('/employerform', EmployerForm);
   // app.post('/calendly-webhook',Calendly_Meet_Integration);
