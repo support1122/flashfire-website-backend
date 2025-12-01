@@ -10,12 +10,28 @@ let redisConnection = null;
 
 if (REDIS_URL) {
   try {
-    redisConnection = new IORedis(REDIS_URL, {
+    // Parse the Redis URL to extract connection details
+    const url = new URL(REDIS_URL);
+    const host = url.hostname;
+    const port = parseInt(url.port) || 6379;
+    const username = url.username;
+    const password = url.password;
+    const useTLS = url.protocol === 'rediss:';
+
+    // Render Redis may not support ACL-style AUTH (username:password)
+    // Try password-only authentication first
+    // If that doesn't work, we'll need to use a different approach
+    redisConnection = new IORedis({
+      host,
+      port,
+      // Use password-only auth (no username) to avoid ACL AUTH command
+      // Render Redis might use password-only even if URL has username
+      password: password || undefined,
+      tls: useTLS ? {} : undefined,
       // Required by BullMQ to avoid throwing on blocking ops in serverless/managed redis
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
-      // Enable TLS for rediss:// URLs
-      tls: REDIS_URL.startsWith('rediss://') ? {} : undefined,
+      lazyConnect: false,
     });
 
     redisConnection.on('error', (err) => {
