@@ -227,11 +227,8 @@ import 'dotenv/config';
 import { callQueue } from './Utils/queue.js';
 import Twilio from 'twilio';
 import { DateTime } from 'luxon';
-import { Worker } from 'bullmq';
-import { DiscordConnect } from './Utils/DiscordConnect.js';
 import { Logger } from './Utils/Logger.js';
 import { basicFraudCheck } from './Utils/FraudScreening.js';
-import { isEventPresent } from './Utils/GoogleCalendarHelper.js';
 import TwilioReminder from './Controllers/TwilioReminder.js';
 import { CampaignBookingModel } from './Schema_Models/CampaignBooking.js';
 import { UserModel } from './Schema_Models/User.js';
@@ -239,6 +236,7 @@ import { CampaignModel } from './Schema_Models/Campaign.js';
 import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
 import emailWorker from './Utils/emailWorker.js';
 import whatsappWorker from './Utils/whatsappWorker.js';
+import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs)
 import redisConnection from './Utils/redisConnection.js';
 
 // -------------------- Express Setup --------------------
@@ -867,104 +865,8 @@ if (inviteePhone) {
 });
 app.post("/twilio-ivr", TwilioReminder);
 // -------------------- Worker Setup --------------------
-const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-   
-
-if (redisConnection) {
-  new Worker(
-    'callQueue',
-    async (job) => {
-      const meta = {
-        jobId: job?.id,
-        type: job?.data?.type || 'call_reminder',
-        phone: job?.data?.phone,
-        meetingTime: job?.data?.meetingTime,
-        inviteeEmail: job?.data?.inviteeEmail
-      };
-      console.log('[Worker] Processing job', meta);
-
-      try {
-        // Skip payment reminder jobs here; they are handled by the dedicated worker in Utils/worker.js
-        if (job?.data?.type === 'payment_reminder') {
-          console.log('[Worker] Skipping payment reminder job in inline worker', { jobId: job?.id });
-          return;
-        }
-
-        // Validate phone before attempting a call
-        const phone = job?.data?.phone;
-        if (!phone) {
-          console.error('[Worker] Missing phone in job data; aborting call', meta);
-          return;
-        }
-
-        const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-        if (!phoneRegex.test(phone)) {
-          console.error('[Worker] Invalid E.164 phone format; aborting call', { ...meta, phone });
-          return;
-        }
-
-        if (!process.env.TWILIO_FROM) {
-          console.error('[Worker] TWILIO_FROM not configured; aborting call');
-          return;
-        }
-        // Pre-call Google Calendar presence check (optional, env-driven)
-        const calendarId = process.env.GOOGLE_CALENDAR_ID;
-        const shouldCheck = Boolean(calendarId);
-        if (shouldCheck) {
-          const present = await isEventPresent({
-            calendarId,
-            eventStartISO: job.data.eventStartISO,
-            inviteeEmail: job.data.inviteeEmail,
-            windowMinutes: 20
-          });
-          if (!present) {
-            Logger.info('Event not present in Google Calendar window; skipping call', {
-              phone: job.data.phone,
-              inviteeEmail: job.data.inviteeEmail,
-              eventStartISO: job.data.eventStartISO
-            });
-            await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-              `Skipping call. Event not found in calendar window for ${job.data.phone} (${job.data.inviteeEmail || 'unknown email'}).`);
-            return;
-          }
-        }
-
-        const call = await client.calls.create({
-          to: phone,
-          from: process.env.TWILIO_FROM, // must be a Twilio voice-enabled number
-          url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
-          machineDetection: 'Enable', // basic AMD to avoid leaving awkward messages
-          // machineDetectionTimeout: 5, // optional: shorter detection window
-          statusCallback: 'https://api.flashfirejobs.com/call-status',
-          statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-          method: 'POST', // optional (Twilio defaults to POST for Calls API)
-        });
-
-        console.log('[Worker] ✅ Call initiated', {
-          jobId: job?.id,
-          sid: call?.sid,
-          status: call?.status,
-          to: phone,
-          from: process.env.TWILIO_FROM
-        });
-        DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}` )
-      } catch (error) {
-        console.error('[Worker] ❌ Twilio call failed', {
-          jobId: job?.id,
-          phone: job?.data?.phone,
-          error: error?.message,
-          code: error?.code,
-          moreInfo: error?.moreInfo
-        });
-        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`);
-      }
-    },
-    { connection: redisConnection }
-  );
-  console.log('[Worker] ✅ Call worker started');
-} else {
-  console.warn('[Worker] ⚠️ Redis connection not available. Call worker disabled.');
-}
+// Worker is now handled in Utils/worker.js to avoid duplicate connections
+// This reduces Redis connection count and prevents "Too many requests" errors
 
 // -------------------- Base Route --------------------
 app.get("/", (req, res) => {

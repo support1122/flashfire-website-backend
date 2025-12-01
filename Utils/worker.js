@@ -5,6 +5,8 @@ import { sendWhatsAppMessage } from '../Utils/WatiHelper.js';
 import { Logger } from './Logger.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import redisConnection from './redisConnection.js';
+import { isEventPresent } from './GoogleCalendarHelper.js';
+import { DiscordConnect } from './DiscordConnect.js';
 
 dotenv.config();
 
@@ -111,7 +113,7 @@ FlashFire Team`;
   }
 }
 
-// Process call reminder jobs (existing functionality)
+// Process call reminder jobs (with Google Calendar check)
 async function processCallReminder(job) {
   const meta = {
     jobId: job?.id,
@@ -139,22 +141,72 @@ async function processCallReminder(job) {
     return;
   }
 
+  // Pre-call Google Calendar presence check (optional, env-driven)
+  const calendarId = process.env.GOOGLE_CALENDAR_ID;
+  const shouldCheck = Boolean(calendarId);
+  if (shouldCheck) {
+    const present = await isEventPresent({
+      calendarId,
+      eventStartISO: job.data.eventStartISO,
+      inviteeEmail: job.data.inviteeEmail,
+      windowMinutes: 20
+    });
+    if (!present) {
+      Logger.info('Event not present in Google Calendar window; skipping call', {
+        phone: job.data.phone,
+        inviteeEmail: job.data.inviteeEmail,
+        eventStartISO: job.data.eventStartISO
+      });
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `Skipping call. Event not found in calendar window for ${job.data.phone} (${job.data.inviteeEmail || 'unknown email'}).`
+      );
+      return;
+    }
+  }
+
   try {
     const call = await client.calls.create({
       to: phone,
       from: process.env.TWILIO_FROM,
-      url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+      url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
+      machineDetection: 'Enable',
+      statusCallback: 'https://api.flashfirejobs.com/call-status',
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
+      method: 'POST',
     });
 
-    console.log('📞 Call initiated.', { sid: call?.sid, status: call?.status, to: phone });
+    console.log('[Worker] ✅ Call initiated', {
+      jobId: job?.id,
+      sid: call?.sid,
+      status: call?.status,
+      to: phone,
+      from: process.env.TWILIO_FROM
+    });
+
+    // Send Discord notification if configured
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}`
+      );
+    }
   } catch (error) {
-    Logger.error('[Worker] Twilio call failed', {
+    Logger.error('[Worker] ❌ Twilio call failed', {
       jobId: job?.id,
       phone,
       error: error?.message,
       code: error?.code,
       moreInfo: error?.moreInfo
     });
+
+    // Send Discord notification if configured
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`
+      );
+    }
     throw error;
   }
 }
