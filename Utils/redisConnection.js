@@ -10,7 +10,8 @@ let redisConnection = null;
 
 if (REDIS_URL) {
   try {
-    // Parse the Redis URL to extract connection details
+    // Parse URL to extract components for explicit ACL authentication
+    // This ensures Render Redis ACL (username:password) works correctly
     const url = new URL(REDIS_URL);
     const host = url.hostname;
     const port = parseInt(url.port) || 6379;
@@ -18,24 +19,24 @@ if (REDIS_URL) {
     const password = url.password;
     const useTLS = url.protocol === 'rediss:';
 
-    // Render Redis may not support ACL-style AUTH (username:password)
-    // Try password-only authentication first
-    // If that doesn't work, we'll need to use a different approach
+    // Create connection with explicit username and password for ACL authentication
+    // This forces IORedis to use AUTH username password (ACL) instead of just AUTH password
     redisConnection = new IORedis({
       host,
       port,
-      // Use password-only auth (no username) to avoid ACL AUTH command
-      // Render Redis might use password-only even if URL has username
-      password: password || undefined,
+      username: username || undefined, // Explicitly pass username for ACL
+      password: password || undefined, // Explicitly pass password for ACL
       tls: useTLS ? {} : undefined,
       // Required by BullMQ to avoid throwing on blocking ops in serverless/managed redis
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
-      lazyConnect: false,
     });
 
     redisConnection.on('error', (err) => {
-      console.error('[Redis] Connection error:', err.message);
+      // Only log non-auth errors to avoid spam
+      if (!err.message.includes('auth') && !err.message.includes('AUTH')) {
+        console.error('[Redis] Connection error:', err.message);
+      }
     });
 
     redisConnection.on('connect', () => {
