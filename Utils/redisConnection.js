@@ -10,26 +10,23 @@ let redisConnection = null;
 
 if (REDIS_URL) {
   try {
-    // Parse URL to extract components for explicit ACL authentication
-    // This ensures Render Redis ACL (username:password) works correctly
-    const url = new URL(REDIS_URL);
-    const host = url.hostname;
-    const port = parseInt(url.port) || 6379;
-    const username = url.username;
-    const password = url.password;
-    const useTLS = url.protocol === 'rediss:';
-
-    // Create connection with explicit username and password for ACL authentication
-    // This forces IORedis to use AUTH username password (ACL) instead of just AUTH password
-    redisConnection = new IORedis({
-      host,
-      port,
-      username: username || undefined, // Explicitly pass username for ACL
-      password: password || undefined, // Explicitly pass password for ACL
-      tls: useTLS ? {} : undefined,
+    // Pass URL directly to IORedis - let it handle parsing and authentication
+    // This matches the working client tracking system approach
+    // IORedis will automatically handle the rediss://username:password@host:port format
+    redisConnection = new IORedis(REDIS_URL, {
       // Required by BullMQ to avoid throwing on blocking ops in serverless/managed redis
       maxRetriesPerRequest: null,
       enableReadyCheck: false,
+      // Prevent automatic reconnection to avoid multiple auth attempts
+      retryStrategy: (times) => {
+        // Only retry a few times, then stop to avoid rate limiting
+        if (times > 3) {
+          return null; // Stop retrying
+        }
+        return Math.min(times * 200, 2000); // Exponential backoff
+      },
+      // Disable lazy connect to ensure connection happens immediately
+      lazyConnect: false,
     });
 
     redisConnection.on('error', (err) => {
