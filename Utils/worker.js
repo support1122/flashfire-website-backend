@@ -37,6 +37,8 @@ const worker = redisConnection ? new Worker(
 
 if (!worker) {
   console.warn('[Worker] ⚠️ Redis connection not available. Call worker disabled.');
+} else {
+  console.log('[Worker] ✅ Call worker started and listening for jobs on callQueue');
 }
 
 // Process payment reminder jobs

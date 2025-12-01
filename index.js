@@ -229,6 +229,7 @@ import Twilio from 'twilio';
 import { DateTime } from 'luxon';
 import { Logger } from './Utils/Logger.js';
 import { basicFraudCheck } from './Utils/FraudScreening.js';
+import { DiscordConnect } from './Utils/DiscordConnect.js';
 import TwilioReminder from './Controllers/TwilioReminder.js';
 import { CampaignBookingModel } from './Schema_Models/CampaignBooking.js';
 import { UserModel } from './Schema_Models/User.js';
