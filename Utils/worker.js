@@ -126,9 +126,31 @@ async function processCallReminder(job) {
   };
   console.log('[Worker] Processing job', meta);
 
+  // Validate job data before processing
   const phone = job?.data?.phone;
   if (!phone) {
-    Logger.error('[Worker] Missing phone in job data; aborting call', meta);
+    Logger.error('[Worker] Missing phone in job data; aborting call', {
+      ...meta,
+      fullJobData: job?.data,
+      jobName: job?.name
+    });
+    
+    // Send Discord notification about invalid job
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `⚠️ Invalid call job detected (ID: ${job?.id}). Missing phone number. Job data: ${JSON.stringify(job?.data)}`
+      );
+    }
+    
+    // Remove invalid job from queue to prevent reprocessing
+    try {
+      await job.remove();
+      Logger.info('[Worker] Removed invalid job from queue', { jobId: job?.id });
+    } catch (removeError) {
+      Logger.warn('[Worker] Could not remove invalid job', { jobId: job?.id, error: removeError.message });
+    }
+    
     return;
   }
 

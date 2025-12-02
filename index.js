@@ -947,6 +947,20 @@ if (inviteePhone) {
 
 
       if (inviteePhone && phoneRegex.test(inviteePhone)) {
+        // Validate all required data before adding job
+        if (!inviteePhone || !meetingTimeIndia || !inviteeEmail) {
+          Logger.error('Missing required data for call job', {
+            phone: inviteePhone,
+            meetingTime: meetingTimeIndia,
+            email: inviteeEmail
+          });
+          await DiscordConnect(
+            process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+            `⚠️ Failed to schedule call - missing required data. Phone: ${inviteePhone || 'missing'}, Email: ${inviteeEmail || 'missing'}, MeetingTime: ${meetingTimeIndia || 'missing'}`
+          );
+          return res.status(500).json({ error: 'Missing required data for call scheduling' });
+        }
+
         Logger.info('📞 Scheduling reminder call job', {
           phone: inviteePhone,
           inviteeName,

@@ -428,8 +428,24 @@ export const rescheduleBooking = async (req, res) => {
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       if (phoneRegex.test(phone) && !phone.startsWith('+91')) {
         try {
+          // Validate required data before adding job
+          if (!phone || !booking.clientEmail || !parsedTime) {
+            console.error('Missing required data for call job in CampaignBookingController', {
+              phone,
+              email: booking.clientEmail,
+              meetingTime: parsedTime
+            });
+            return;
+          }
+
           const meetingStartUTC = DateTime.fromJSDate(parsedTime, { zone: 'utc' });
           const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+          
+          if (!meetingTimeIndia) {
+            console.error('Failed to format meeting time', { parsedTime });
+            return;
+          }
+
           const job = await callQueue.add(
             'callUser',
             {
@@ -447,6 +463,11 @@ export const rescheduleBooking = async (req, res) => {
             }
           );
           booking.reminderCallJobId = job.id.toString();
+          console.log('✅ Call job scheduled from CampaignBookingController', {
+            jobId: job.id,
+            phone,
+            meetingTime: meetingTimeIndia
+          });
         } catch (error) {
           console.error('Error scheduling new reminder job:', error);
         }
