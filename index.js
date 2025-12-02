@@ -329,11 +329,133 @@ export const DiscordConnectForMeet = async (message) => {
 
 
 
+// GET handler for /call-status (for testing/debugging)
+app.get("/call-status", async (req, res) => {
+  const discordWebhookConfigured = !!process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+  const webhookUrlPreview = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL 
+    ? `${process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL.substring(0, 30)}...` 
+    : 'Not configured';
+
+  // Check queue status
+  let queueStatus = { available: false, waiting: 0, active: 0, completed: 0, failed: 0 };
+  try {
+    if (callQueue) {
+      const waiting = await callQueue.getWaitingCount();
+      const active = await callQueue.getActiveCount();
+      const completed = await callQueue.getCompletedCount();
+      const failed = await callQueue.getFailedCount();
+      queueStatus = { available: true, waiting, active, completed, failed };
+    }
+  } catch (error) {
+    console.error('Error checking queue status:', error);
+  }
+
+  res.status(200).json({
+    message: "✅ Call Status Webhook Endpoint is active",
+    endpoint: "/call-status",
+    method: "POST (for Twilio webhooks)",
+    status: "operational",
+    discordWebhook: {
+      configured: discordWebhookConfigured,
+      urlPreview: webhookUrlPreview
+    },
+    queue: queueStatus,
+    twilio: {
+      fromNumber: process.env.TWILIO_FROM ? 'Configured' : 'Not configured',
+      accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Configured' : 'Not configured'
+    },
+    note: "This endpoint accepts POST requests from Twilio. Use POST method to send call status updates."
+  });
+});
+
+// Diagnostic endpoint to check call system health
+app.get("/api/call-system-status", async (req, res) => {
+  try {
+    const status = {
+      timestamp: new Date().toISOString(),
+      discord: {
+        webhookConfigured: !!process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        urlPreview: process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL 
+          ? `${process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL.substring(0, 40)}...` 
+          : 'NOT CONFIGURED ⚠️'
+      },
+      twilio: {
+        fromNumber: process.env.TWILIO_FROM || 'NOT CONFIGURED ⚠️',
+        accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Configured' : 'NOT CONFIGURED ⚠️',
+        authToken: process.env.TWILIO_AUTH_TOKEN ? 'Configured' : 'NOT CONFIGURED ⚠️'
+      },
+      redis: {
+        connected: !!redisConnection
+      },
+      queue: {
+        available: !!callQueue
+      }
+    };
+
+    // Get queue stats if available
+    if (callQueue) {
+      try {
+        status.queue.waiting = await callQueue.getWaitingCount();
+        status.queue.active = await callQueue.getActiveCount();
+        status.queue.completed = await callQueue.getCompletedCount();
+        status.queue.failed = await callQueue.getFailedCount();
+      } catch (error) {
+        status.queue.error = error.message;
+      }
+    }
+
+    // Check recent bookings with call jobs
+    try {
+      const recentBookings = await CampaignBookingModel.find({
+        reminderCallJobId: { $exists: true, $ne: null },
+        bookingStatus: 'scheduled'
+      })
+      .sort({ bookingCreatedAt: -1 })
+      .limit(5)
+      .select('clientName clientPhone reminderCallJobId scheduledEventStartTime bookingCreatedAt')
+      .lean();
+
+      status.recentBookings = recentBookings.map(b => ({
+        clientName: b.clientName,
+        clientPhone: b.clientPhone,
+        jobId: b.reminderCallJobId,
+        meetingTime: b.scheduledEventStartTime,
+        bookedAt: b.bookingCreatedAt
+      }));
+    } catch (error) {
+      status.recentBookingsError = error.message;
+    }
+
+    res.status(200).json(status);
+  } catch (error) {
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+
+// POST handler for /call-status (Twilio webhook)
 app.post("/call-status", async (req, res) => {
   const { CallSid, CallStatus, To, From, AnsweredBy, Timestamp } = req.body;
 
   try {
-    console.log(`📞 Call Update: SID=${CallSid}, To=${To}, Status=${CallStatus}, AnsweredBy=${AnsweredBy}`);
+    // Log the raw request for debugging
+    console.log(`📞 Call Status Webhook Received:`, {
+      CallSid,
+      CallStatus,
+      To,
+      From,
+      AnsweredBy,
+      Timestamp,
+      receivedAt: new Date().toISOString()
+    });
+
+    Logger.info('📞 Call Status Update received from Twilio', {
+      CallSid,
+      CallStatus,
+      To,
+      From,
+      AnsweredBy,
+      Timestamp
+    });
 
     const msg = `
 📞 **Call Status Update**
@@ -345,11 +467,21 @@ app.post("/call-status", async (req, res) => {
 SID: ${CallSid}
     `;
 
-    await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, msg);
+    // Send Discord notification if configured
+    const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+    if (discordWebhookUrl) {
+      Logger.info('Sending call status to Discord', { CallSid, CallStatus, hasWebhook: !!discordWebhookUrl });
+      await DiscordConnect(discordWebhookUrl, msg);
+      console.log('✅ Discord notification sent for call status');
+    } else {
+      console.warn("⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured. Discord notification skipped.");
+      Logger.warn('Discord webhook URL not configured - skipping notification', { CallSid, CallStatus });
+    }
 
     res.status(200).send("✅ Call status received");
   } catch (error) {
     console.error("❌ Error in /call-status:", error);
+    Logger.error('Error processing call status webhook', { error: error.message, stack: error.stack });
     res.status(500).send("Server Error");
   }
 });
@@ -807,12 +939,24 @@ if (inviteePhone) {
       let scheduledJobs = [];
       if (inviteePhone && inviteePhone.startsWith("+91")) {
   Logger.info('Skipping India number', { phone: inviteePhone });
-  DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`Skipping India number: ${inviteePhone}` );
+  if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+    await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`Skipping India number: ${inviteePhone}` );
+  }
   return res.status(200).json({ message: 'Skipped India number' });
 }
 
 
       if (inviteePhone && phoneRegex.test(inviteePhone)) {
+        Logger.info('📞 Scheduling reminder call job', {
+          phone: inviteePhone,
+          inviteeName,
+          inviteeEmail,
+          meetingTime: meetingTimeIndia,
+          delayMs: delay,
+          delayMinutes: Math.round(delay / 60000),
+          eventStartISO: payload?.scheduled_event?.start_time
+        });
+
         const job = await callQueue.add(
   'callUser',
   {
@@ -830,6 +974,13 @@ if (inviteePhone) {
   }
 );
 
+        Logger.info('✅ Call job added to queue', {
+          jobId: job.id,
+          phone: inviteePhone,
+          delayMs: delay,
+          scheduledFor: new Date(Date.now() + delay).toISOString()
+        });
+
         // Store the job ID in the booking record
         await CampaignBookingModel.findOneAndUpdate(
           { bookingId: newBooking.bookingId },
@@ -838,8 +989,14 @@ if (inviteePhone) {
 
         scheduledJobs.push(`Client: ${inviteePhone}`);
         Logger.info('Valid phone, scheduled call', { phone: inviteePhone, delayMs: delay, jobId: job.id });
+        
         const scheduledMessage =`Reminder Call Scheduled For ${inviteePhone}-${inviteeName} for meeting scheduled on ${meetingTimeIndia} (IST).Reminder 10 minutes before Start of meeting.`
-        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
+        const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+        if (discordWebhookUrl) {
+          await DiscordConnect(discordWebhookUrl, scheduledMessage);
+        } else {
+          Logger.warn('Discord webhook URL not configured - skipping scheduled call notification');
+        }
       } else {
         Logger.warn('No valid phone number provided by invitee', { phone: inviteePhone });
         await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
@@ -847,8 +1004,13 @@ if (inviteePhone) {
         );
       }
 
-      Logger.info('Scheduled calls summary', { jobs: scheduledJobs });
-      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`✅ Scheduled calls: ${scheduledJobs.join(', ')}` )
+      Logger.info('Scheduled calls summary', { jobs: scheduledJobs, count: scheduledJobs.length });
+      const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+      if (discordWebhookUrl) {
+        await DiscordConnect(discordWebhookUrl, `✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
+      } else {
+        Logger.warn('Discord webhook URL not configured - skipping scheduled calls summary');
+      }
 
       return res.status(200).json({
         message: 'Webhook received & calls scheduled',

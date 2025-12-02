@@ -60,7 +60,9 @@ export default async function TwilioReminder(req, res) {
     res.status(200).type("text/xml").send(twiml.toString());
   } catch (error) {
     console.error("twilio error,", error);
-    DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, error);
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Twilio IVR Error: ${error.message || error}`);
+    }
     // Always send a TwiML error response so Twilio doesn't retry indefinitely
     const VoiceResponse = twilio.twiml.VoiceResponse;
     const errTwiml = new VoiceResponse();

@@ -168,6 +168,13 @@ async function processCallReminder(job) {
   }
 
   try {
+    Logger.info('[Worker] Attempting to create Twilio call', {
+      jobId: job?.id,
+      phone,
+      meetingTime: job.data.meetingTime,
+      inviteeEmail: job.data.inviteeEmail
+    });
+
     const call = await client.calls.create({
       to: phone,
       from: process.env.TWILIO_FROM,
@@ -176,6 +183,15 @@ async function processCallReminder(job) {
       statusCallback: 'https://api.flashfirejobs.com/call-status',
       statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
       method: 'POST',
+    });
+
+    Logger.info('[Worker] ✅ Call initiated successfully', {
+      jobId: job?.id,
+      sid: call?.sid,
+      status: call?.status,
+      to: phone,
+      from: process.env.TWILIO_FROM,
+      callUrl: call?.url
     });
 
     console.log('[Worker] ✅ Call initiated', {
@@ -187,11 +203,18 @@ async function processCallReminder(job) {
     });
 
     // Send Discord notification if configured
-    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+    const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+    if (discordWebhookUrl) {
+      Logger.info('[Worker] Sending Discord notification', { jobId: job?.id, hasWebhook: !!discordWebhookUrl });
       await DiscordConnect(
-        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-        `[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status}`
+        discordWebhookUrl,
+        `[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status} To: ${phone}`
       );
+    } else {
+      Logger.warn('[Worker] ⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured - Discord notification skipped', {
+        jobId: job?.id
+      });
+      console.warn('[Worker] ⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured');
     }
   } catch (error) {
     Logger.error('[Worker] ❌ Twilio call failed', {
