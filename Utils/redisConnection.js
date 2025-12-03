@@ -10,6 +10,14 @@ const REDIS_URL = process.env.REDIS_INTERNAL_URL || process.env.UPSTASH_REDIS_UR
 
 let redisConnection = null;
 
+// Debug logging to see what URL we're getting
+console.log('[Redis] Environment variables check:', {
+  REDIS_INTERNAL_URL: process.env.REDIS_INTERNAL_URL ? 'Set' : 'Not set',
+  UPSTASH_REDIS_URL: process.env.UPSTASH_REDIS_URL ? 'Set' : 'Not set',
+  REDIS_CLOUD_URL: process.env.REDIS_CLOUD_URL ? 'Set' : 'Not set',
+  selectedUrl: REDIS_URL ? REDIS_URL.substring(0, 20) + '...' : 'None'
+});
+
 if (REDIS_URL) {
   try {
     // Check if this is a Render internal URL (no auth required)
@@ -28,22 +36,33 @@ if (REDIS_URL) {
         lazyConnect: false,
       });
     } else {
-      // External URL (Upstash, Render external, etc.) - requires authentication
-      // For Render external URLs, use password-only auth (no username)
+      // External URL - parse and handle based on provider
+      console.log('[Redis] Parsing external URL...');
       const url = new URL(REDIS_URL);
       const protocol = url.protocol; // rediss: or redis:
       const host = url.hostname;
       const port = url.port || '6379';
       const password = url.password;
+      const username = url.username;
       
-      // Check if this is Render external URL (has username in URL)
+      console.log('[Redis] Parsed URL details:', {
+        protocol,
+        host,
+        port,
+        hasPassword: !!password,
+        hasUsername: !!username
+      });
+      
+      // Check if this is a Render external URL
       const isRenderExternal = host.includes('keyvalue.render.com') || host.includes('render.com');
       
-      if (isRenderExternal && url.username) {
-        // Render external URL with username - use password-only auth
-        // Reconstruct URL without username: rediss://:password@host:port
+      if (isRenderExternal) {
+        // Render Redis uses password-only authentication (Redis 5 style)
+        // Strip the username and use only password
+        // Format: rediss://:password@host:port (note the leading colon with empty username)
         const passwordOnlyUrl = `${protocol}//:${password}@${host}:${port}`;
-        console.log('[Redis] Using Render external URL with password-only authentication');
+        console.log('[Redis] Using Render Redis with password-only authentication');
+        console.log('[Redis] Connecting to:', `${protocol}//:***@${host}:${port}`);
         redisConnection = new IORedis(passwordOnlyUrl, {
           maxRetriesPerRequest: null,
           enableReadyCheck: false,
@@ -52,7 +71,8 @@ if (REDIS_URL) {
         });
       } else {
         // Other providers (Upstash, etc.) - use URL as-is
-        console.log('[Redis] Using external Redis URL');
+        console.log('[Redis] Using external Redis URL as-is');
+        console.log('[Redis] Host:', host);
         redisConnection = new IORedis(REDIS_URL, {
           maxRetriesPerRequest: null,
           enableReadyCheck: false,
@@ -62,13 +82,17 @@ if (REDIS_URL) {
       }
     }
 
-    // Suppress auth errors to reduce log spam
+    // Suppress common errors to reduce log spam
     redisConnection.on('error', (err) => {
       const errorMsg = err.message?.toLowerCase() || '';
-      // Only log non-auth errors
+      const errorCode = err.code?.toLowerCase() || '';
+      // Only log significant errors, suppress auth/DNS/retry spam
       if (!errorMsg.includes('auth') && 
           !errorMsg.includes('too many requests') && 
-          !errorMsg.includes('internal error')) {
+          !errorMsg.includes('internal error') &&
+          !errorMsg.includes('eai_again') &&
+          !errorCode.includes('eai_again') &&
+          !errorMsg.includes('enotfound')) {
         console.error('[Redis] Connection error:', err.message);
       }
     });

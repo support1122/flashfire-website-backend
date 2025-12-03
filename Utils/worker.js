@@ -122,7 +122,8 @@ async function processCallReminder(job) {
     type: job?.data?.type || 'call_reminder',
     phone: job?.data?.phone,
     meetingTime: job?.data?.meetingTime,
-    inviteeEmail: job?.data?.inviteeEmail
+    inviteeEmail: job?.data?.inviteeEmail,
+    source: job?.data?.source || 'production'
   };
   console.log('[Worker] Processing job', meta);
 
@@ -167,7 +168,7 @@ async function processCallReminder(job) {
 
   // Pre-call Google Calendar presence check (optional, env-driven)
   const calendarId = process.env.GOOGLE_CALENDAR_ID;
-  const shouldCheck = Boolean(calendarId);
+  const shouldCheck = Boolean(calendarId) && job?.data?.force !== true;
   if (shouldCheck) {
     const present = await isEventPresent({
       calendarId,

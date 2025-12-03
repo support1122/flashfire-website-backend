@@ -432,6 +432,193 @@ app.get("/api/call-system-status", async (req, res) => {
   }
 });
 
+
+app.post("/api/debug/test-call", async (req, res) => {
+  try {
+    const { phone, meetingTime, email } = req.body || {};
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        error: "Missing required field: phone (E.164 format, e.g. +19135551234)",
+      });
+    }
+
+    if (!callQueue) {
+      return res.status(500).json({
+        success: false,
+        error: "callQueue is not initialized. Check Redis connection.",
+      });
+    }
+
+    if (!process.env.TWILIO_FROM || !process.env.TWILIO_ACCOUNT_SID) {
+      return res.status(500).json({
+        success: false,
+        error: "Twilio environment variables are not fully configured.",
+        twilio: {
+          fromNumber: process.env.TWILIO_FROM || "NOT CONFIGURED",
+          accountSid: process.env.TWILIO_ACCOUNT_SID ? "Configured" : "NOT CONFIGURED",
+        },
+      });
+    }
+
+    // Use a simple regex to validate E.164-like numbers
+    const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+    if (!phoneRegex.test(phone)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid phone format. Use E.164 (e.g. +19135551234).",
+      });
+    }
+
+    // Build a fake "meeting time" 10 minutes from now if not provided
+    const eventStart = meetingTime
+      ? DateTime.fromISO(meetingTime)
+      : DateTime.now().plus({ minutes: 10 });
+
+    const meetingTimeIndia = eventStart.setZone("Asia/Kolkata").toFormat("ff");
+
+    // Small delay so you can see the job queued before it fires
+    const delayMs = 5_000;
+
+    const job = await callQueue.add(
+      "callUser",
+      {
+        type: "call_reminder",
+        phone,
+        meetingTime: meetingTimeIndia,
+        inviteeEmail: email || null,
+        eventStartISO: eventStart.toISO(),
+        force: true,        // ⬅ bypass calendar presence check for debug
+        source: "debug_api" // ⬅ mark as coming from debug endpoint
+      },
+      {
+        delay: delayMs,
+        removeOnComplete: true,
+        removeOnFail: 10,
+      }
+    );
+
+    const summary = {
+      jobId: job.id,
+      phone,
+      meetingTimeIST: meetingTimeIndia,
+      delayMs,
+    };
+
+    Logger.info("🧪 Enqueued debug test-call job", summary);
+
+    // Fetch all scheduled calls (waiting and delayed jobs)
+    let allScheduledCalls = [];
+    try {
+      const waitingJobs = await callQueue.getWaiting();
+      const delayedJobs = await callQueue.getDelayed();
+      const activeJobs = await callQueue.getActive();
+      
+      // Create sets of job IDs for quick lookup
+      const delayedJobIds = new Set(delayedJobs.map(j => j.id));
+      const activeJobIds = new Set(activeJobs.map(j => j.id));
+      const waitingJobIds = new Set(waitingJobs.map(j => j.id));
+      
+      // Combine all jobs and remove duplicates by job ID
+      const allJobsMap = new Map();
+      [...waitingJobs, ...delayedJobs, ...activeJobs].forEach((job) => {
+        if (!allJobsMap.has(job.id)) {
+          allJobsMap.set(job.id, job);
+        }
+      });
+      const allJobs = Array.from(allJobsMap.values());
+      
+      allScheduledCalls = allJobs.map((job) => {
+        const jobData = job.data || {};
+        
+        // Calculate scheduled time
+        let scheduledFor = null;
+        if (job.timestamp) {
+          scheduledFor = new Date(job.timestamp + (job.opts?.delay || 0)).toISOString();
+        } else if (job.opts?.delay) {
+          scheduledFor = new Date(Date.now() + job.opts.delay).toISOString();
+        }
+        
+        // Determine status
+        let status = 'unknown';
+        if (activeJobIds.has(job.id)) {
+          status = 'active';
+        } else if (delayedJobIds.has(job.id)) {
+          status = 'delayed';
+        } else if (waitingJobIds.has(job.id)) {
+          status = 'waiting';
+        }
+        
+        return {
+          jobId: job.id,
+          phone: jobData.phone || 'N/A',
+          email: jobData.inviteeEmail || jobData.email || null,
+          meetingTime: jobData.meetingTime || 'N/A',
+          scheduledFor: scheduledFor,
+          scheduledForLocal: scheduledFor ? new Date(scheduledFor).toLocaleString() : 'N/A',
+          status: status,
+          source: jobData.source || jobData.type || 'unknown',
+          delayMs: job.opts?.delay || 0,
+        };
+      }).sort((a, b) => {
+        // Sort by scheduled time (earliest first)
+        if (a.scheduledFor && b.scheduledFor) {
+          return new Date(a.scheduledFor) - new Date(b.scheduledFor);
+        }
+        if (a.scheduledFor && !b.scheduledFor) return -1;
+        if (!a.scheduledFor && b.scheduledFor) return 1;
+        return 0;
+      });
+    } catch (error) {
+      Logger.error("Error fetching scheduled calls", {
+        error: error.message,
+      });
+    }
+
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `🧪 **Debug Test Call Job Created**\n- Phone: ${phone}\n- Meeting Time (IST): ${meetingTimeIndia}\n- Delay: ${Math.round(
+          delayMs / 1000
+        )}s\n- Job ID: ${job.id}`
+      );
+    }
+
+    res.status(200).json({
+      success: true,
+      message: "Debug call job enqueued. Watch Discord and /call-status for logs.",
+      data: summary,
+      allScheduledCalls: {
+        total: allScheduledCalls.length,
+        calls: allScheduledCalls,
+        summary: {
+          waiting: allScheduledCalls.filter(c => c.status === 'waiting').length,
+          delayed: allScheduledCalls.filter(c => c.status === 'delayed').length,
+          active: allScheduledCalls.filter(c => c.status === 'active').length,
+        }
+      },
+    });
+  } catch (error) {
+    Logger.error("Error in /api/debug/test-call", {
+      error: error.message,
+      stack: error.stack,
+    });
+
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `❌ Error in /api/debug/test-call: ${error.message}`
+      );
+    }
+
+    res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+});
+
 // POST handler for /call-status (Twilio webhook)
 app.post("/call-status", async (req, res) => {
   const { CallSid, CallStatus, To, From, AnsweredBy, Timestamp } = req.body;
