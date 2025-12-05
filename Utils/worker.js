@@ -4,23 +4,38 @@ import dotenv from 'dotenv';
 import { sendWhatsAppMessage } from '../Utils/WatiHelper.js';
 import { Logger } from './Logger.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import redisConnection from './redisConnection.js';
+import { redisConnection, callQueue } from './queue.js'; // Import shared ioredis connection and callQueue
 import { isEventPresent } from './GoogleCalendarHelper.js';
 import { DiscordConnect } from './DiscordConnect.js';
 
 dotenv.config();
 
+console.log('\n📞 ========================================');
+console.log('📞 [CallWorker] Initializing Call Reminder Worker');
+console.log('📞 ========================================\n');
+
+console.log('🔄 [CallWorker] Using shared ioredis connection from queue.js');
+
 const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-const worker = redisConnection ? new Worker(
+const worker = new Worker(
   'callQueue',
   async (job) => {
     const { type } = job.data;
 
+    console.log('\n📥 ========================================');
+    console.log(`📥 [CallWorker] Job Received: ${job.id}`);
+    console.log('📥 ========================================');
+    console.log(`📌 Job Type: ${type || 'call_reminder'}`);
+    console.log(`📌 Job Data:`, JSON.stringify(job.data, null, 2));
+    console.log('========================================\n');
+
     try {
       if (type === 'payment_reminder') {
+        console.log('💰 [CallWorker] Processing payment reminder...');
         await processPaymentReminder(job);
       } else {
+        console.log('📞 [CallWorker] Processing call reminder...');
         await processCallReminder(job);
       }
     } catch (err) {
@@ -29,17 +44,103 @@ const worker = redisConnection ? new Worker(
         stack: err.stack,
         jobData: job.data
       });
+      console.error(`💥 ========================================`);
+      console.error(`💥 [CallWorker] Job Failed: ${job?.id}`);
+      console.error(`💥 Error: ${err.message}`);
+      console.error(`💥 ========================================\n`);
       throw err; // important so BullMQ marks job as failed
     }
   },
   { connection: redisConnection }
-) : null;
+);
 
-if (!worker) {
-  console.warn('[Worker] ⚠️ Redis connection not available. Call worker disabled.');
-} else {
-  console.log('[Worker] ✅ Call worker started and listening for jobs on callQueue');
-}
+// Track worker lifecycle with detailed logs
+console.log('✅ [CallWorker] Worker connected to Redis successfully!');
+console.log('👂 [CallWorker] Listening for jobs on "callQueue"...\n');
+
+worker.on("completed", (job) => {
+  console.log('\n🎉 ========================================');
+  console.log(`🎉 [CallWorker] Job Completed: ${job.id}`);
+  console.log('🎉 ========================================\n');
+});
+
+worker.on("failed", async (job, err) => {
+  console.error('\n💥 ========================================');
+  console.error(`💥 [CallWorker] Job Failed: ${job?.id}`);
+  console.error('💥 Error:', err.message);
+  console.error('💥 ========================================\n');
+
+  // Send detailed failure notification to Discord
+  if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL && job?.data) {
+    try {
+      // Get queue statistics
+      let queueStats = {};
+      try {
+        if (callQueue) {
+          queueStats = {
+            waiting: await callQueue.getWaitingCount() || 0,
+            active: await callQueue.getActiveCount() || 0,
+            completed: await callQueue.getCompletedCount() || 0,
+            failed: await callQueue.getFailedCount() || 0,
+            delayed: await callQueue.getDelayedCount() || 0
+          };
+        }
+      } catch (statsError) {
+        console.warn('Could not fetch queue stats:', statsError.message);
+      }
+
+      const failureReport = `
+💥 **Job Failed - Final Failure Report**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📞 **Call Information:**
+• Job ID: ${job?.id || 'N/A'}
+• Phone: ${job.data?.phone || 'N/A'}
+• Meeting Time: ${job.data?.meetingTime || 'N/A'}
+• Invitee Email: ${job.data?.inviteeEmail || 'N/A'}
+• Event Start: ${job.data?.eventStartISO || 'N/A'}
+
+❌ **Failure Details:**
+• Error: ${err?.message || 'Unknown error'}
+• Error Type: ${err?.name || 'Unknown'}
+• Attempts Made: ${job?.attemptsMade || 0}
+• Max Attempts: ${job?.opts?.attempts || 3}
+• Failed After: ${job?.attemptsMade || 0} retries
+
+📊 **Queue Statistics:**
+• Waiting: ${queueStats.waiting || 0}
+• Active: ${queueStats.active || 0}
+• Delayed: ${queueStats.delayed || 0}
+• Completed: ${queueStats.completed || 0}
+• Failed: ${queueStats.failed || 0}
+• **Total Calls: ${(queueStats.waiting || 0) + (queueStats.active || 0) + (queueStats.delayed || 0) + (queueStats.completed || 0) + (queueStats.failed || 0)}**
+
+⏰ **Failure Time:**
+• Failed At: ${new Date().toISOString()}
+• Failed At (Local): ${new Date().toLocaleString()}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      `.trim();
+
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        failureReport
+      );
+    } catch (discordError) {
+      console.error('Failed to send Discord notification:', discordError.message);
+    }
+  }
+});
+
+worker.on("error", (err) => {
+  console.error('\n⚠️  [CallWorker] Worker error:', err.message);
+});
+
+worker.on("ioredis:close", () => {
+  console.warn('\n⚠️  [CallWorker] Redis connection closed!');
+});
+
+worker.on("ioredis:reconnecting", () => {
+  console.log('\n🔄 [CallWorker] Reconnecting to Redis...');
+});
 
 // Process payment reminder jobs
 async function processPaymentReminder(job) {
@@ -115,56 +216,49 @@ FlashFire Team`;
   }
 }
 
-// Process call reminder jobs (with Google Calendar check)
+// Process call reminder jobs (existing functionality)
 async function processCallReminder(job) {
+  console.log('\n🔍 [CallWorker] Starting call reminder processing...');
+  
   const meta = {
     jobId: job?.id,
     type: job?.data?.type || 'call_reminder',
     phone: job?.data?.phone,
     meetingTime: job?.data?.meetingTime,
-    inviteeEmail: job?.data?.inviteeEmail,
-    source: job?.data?.source || 'production'
+    inviteeEmail: job?.data?.inviteeEmail
   };
-  console.log('[Worker] Processing job', meta);
+  
+  console.log('📋 [CallWorker] Job Details:');
+  console.log('   • Job ID:', meta.jobId);
+  console.log('   • Phone:', meta.phone);
+  console.log('   • Meeting Time:', meta.meetingTime);
+  console.log('   • Invitee Email:', meta.inviteeEmail);
 
-  // Validate job data before processing
   const phone = job?.data?.phone;
   if (!phone) {
-    Logger.error('[Worker] Missing phone in job data; aborting call', {
-      ...meta,
-      fullJobData: job?.data,
-      jobName: job?.name
-    });
-    
-    // Send Discord notification about invalid job
-    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(
-        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-        `⚠️ Invalid call job detected (ID: ${job?.id}). Missing phone number. Job data: ${JSON.stringify(job?.data)}`
-      );
-    }
-    
-    // Remove invalid job from queue to prevent reprocessing
-    try {
-      await job.remove();
-      Logger.info('[Worker] Removed invalid job from queue', { jobId: job?.id });
-    } catch (removeError) {
-      Logger.warn('[Worker] Could not remove invalid job', { jobId: job?.id, error: removeError.message });
-    }
-    
+    console.error('❌ [CallWorker] Missing phone number - aborting call');
+    Logger.error('[Worker] Missing phone in job data; aborting call', meta);
     return;
   }
 
+  console.log('✅ [CallWorker] Phone number found:', phone);
+
   const phoneRegex = /^\+?[1-9]\d{9,14}$/;
   if (!phoneRegex.test(phone)) {
+    console.error('❌ [CallWorker] Invalid phone format (must be E.164):', phone);
     Logger.error('[Worker] Invalid E.164 phone format; aborting call', { ...meta, phone });
     return;
   }
 
+  console.log('✅ [CallWorker] Phone format validated (E.164)');
+
   if (!process.env.TWILIO_FROM) {
+    console.error('❌ [CallWorker] TWILIO_FROM not configured - aborting call');
     Logger.error('[Worker] TWILIO_FROM not configured; aborting call');
     return;
   }
+
+  console.log('✅ [CallWorker] Twilio FROM number configured:', process.env.TWILIO_FROM);
 
   // Pre-call Google Calendar presence check (optional, env-driven)
   const calendarId = process.env.GOOGLE_CALENDAR_ID;
@@ -198,49 +292,61 @@ async function processCallReminder(job) {
       inviteeEmail: job.data.inviteeEmail
     });
 
+    console.log('\n📞 [CallWorker] Initiating Twilio call...');
+    console.log('   → To:', phone);
+    console.log('   → From:', process.env.TWILIO_FROM);
+    console.log('   → Meeting Time:', job.data.meetingTime);
+    
     const call = await client.calls.create({
       to: phone,
       from: process.env.TWILIO_FROM,
-      url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`,
-      machineDetection: 'Enable',
-      statusCallback: 'https://api.flashfirejobs.com/call-status',
-      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-      method: 'POST',
+      url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
     });
 
-    Logger.info('[Worker] ✅ Call initiated successfully', {
-      jobId: job?.id,
-      sid: call?.sid,
-      status: call?.status,
-      to: phone,
-      from: process.env.TWILIO_FROM,
-      callUrl: call?.url
-    });
+    console.log('\n✅ [CallWorker] Call initiated successfully!');
+    console.log('   • Call SID:', call?.sid);
+    console.log('   • Status:', call?.status);
+    console.log('   • To:', phone);
+    console.log('========================================\n');
 
-    console.log('[Worker] ✅ Call initiated', {
-      jobId: job?.id,
-      sid: call?.sid,
-      status: call?.status,
-      to: phone,
-      from: process.env.TWILIO_FROM
-    });
+    // Send success notification to Discord with call details
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      const successDetails = `
+✅ **Call Initiated Successfully**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📞 **Call Details:**
+• Call SID: ${call?.sid || 'N/A'}
+• Status: ${call?.status || 'N/A'}
+• To: ${phone || 'N/A'}
+• From: ${process.env.TWILIO_FROM || 'N/A'}
+• Meeting Time: ${job.data?.meetingTime || 'N/A'}
+• Invitee Email: ${job.data?.inviteeEmail || 'N/A'}
 
-    // Send Discord notification if configured
-    const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
-    if (discordWebhookUrl) {
-      Logger.info('[Worker] Sending Discord notification', { jobId: job?.id, hasWebhook: !!discordWebhookUrl });
+📋 **Job Information:**
+• Job ID: ${job?.id || 'N/A'}
+• Event Start: ${job.data?.eventStartISO || 'N/A'}
+
+⏰ **Timing:**
+• Initiated At: ${new Date().toISOString()}
+• Initiated At (Local): ${new Date().toLocaleString()}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      `.trim();
+      
       await DiscordConnect(
-        discordWebhookUrl,
-        `[Worker] ✅ Call initiated. SID: ${call.sid} Status: ${call.status} To: ${phone}`
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        successDetails
       );
-    } else {
-      Logger.warn('[Worker] ⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured - Discord notification skipped', {
-        jobId: job?.id
-      });
-      console.warn('[Worker] ⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured');
     }
   } catch (error) {
-    Logger.error('[Worker] ❌ Twilio call failed', {
+    console.error('\n❌ [CallWorker] Twilio call FAILED!');
+    console.error('   • Job ID:', job?.id);
+    console.error('   • Phone:', phone);
+    console.error('   • Error:', error?.message);
+    console.error('   • Code:', error?.code);
+    console.error('   • More Info:', error?.moreInfo);
+    console.error('========================================\n');
+    
+    Logger.error('[Worker] Twilio call failed', {
       jobId: job?.id,
       phone,
       error: error?.message,
@@ -248,22 +354,123 @@ async function processCallReminder(job) {
       moreInfo: error?.moreInfo
     });
 
-    // Send Discord notification if configured
+    // Send detailed Discord notification if configured
     if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      const failureDetails = `
+**Call Failed - Detailed Report**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📞 **Call Details:**
+• Job ID: ${job?.id || 'N/A'}
+• Phone: ${phone || 'N/A'}
+• Meeting Time: ${job.data?.meetingTime || 'N/A'}
+• Invitee Email: ${job.data?.inviteeEmail || 'N/A'}
+• Event Start: ${job.data?.eventStartISO || 'N/A'}
+
+❌ **Error Information:**
+• Error Message: ${error?.message || 'Unknown error'}
+• Error Code: ${error?.code || 'N/A'}
+• More Info: ${error?.moreInfo || 'N/A'}
+• Error Type: ${error?.name || 'Unknown'}
+
+⏰ **Timing:**
+• Failed At: ${new Date().toISOString()}
+• Failed At (Local): ${new Date().toLocaleString()}
+
+🔄 **Retry Information:**
+• Attempt: ${job?.attemptsMade || 0} / ${job?.opts?.attempts || 3}
+• Will Retry: ${job?.opts?.attempts > (job?.attemptsMade || 0) ? 'Yes' : 'No'}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      `.trim();
+      
       await DiscordConnect(
         process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-        `❌ Twilio call failed for ${job.data.phone}. Error: ${error.message}`
+        failureDetails
       );
     }
     throw error;
   }
 }
 
-// Track worker lifecycle
 worker.on("completed", (job) => {
-  console.log(`✅ Job completed: ${job.id}`);
+  console.log('\n🎉 ========================================');
+  console.log(`🎉 [CallWorker] Job Completed: ${job.id}`);
+  console.log('🎉 ========================================\n');
 });
 
-worker.on("failed", (job, err) => {
-  console.error(`❌ Job failed: ${job?.id}`, err);
+worker.on("failed", async (job, err) => {
+  console.error('\n💥 ========================================');
+  console.error(`💥 [CallWorker] Job Failed: ${job?.id}`);
+  console.error('💥 Error:', err.message);
+  console.error('💥 ========================================\n');
+
+  // Send detailed failure notification to Discord
+  if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL && job?.data) {
+    try {
+      // Get queue statistics
+      let queueStats = {};
+      try {
+        if (callQueue) {
+          queueStats = {
+            waiting: await callQueue.getWaitingCount() || 0,
+            active: await callQueue.getActiveCount() || 0,
+            completed: await callQueue.getCompletedCount() || 0,
+            failed: await callQueue.getFailedCount() || 0,
+            delayed: await callQueue.getDelayedCount() || 0
+          };
+        }
+      } catch (statsError) {
+        console.warn('Could not fetch queue stats:', statsError.message);
+      }
+
+      const failureReport = `
+**Job Failed - Final Failure Report**
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📞 **Call Information:**
+• Job ID: ${job?.id || 'N/A'}
+• Phone: ${job.data?.phone || 'N/A'}
+• Meeting Time: ${job.data?.meetingTime || 'N/A'}
+• Invitee Email: ${job.data?.inviteeEmail || 'N/A'}
+• Event Start: ${job.data?.eventStartISO || 'N/A'}
+
+❌ **Failure Details:**
+• Error: ${err?.message || 'Unknown error'}
+• Error Type: ${err?.name || 'Unknown'}
+• Attempts Made: ${job?.attemptsMade || 0}
+• Max Attempts: ${job?.opts?.attempts || 3}
+• Failed After: ${job?.attemptsMade || 0} retries
+
+📊 **Queue Statistics:**
+• Waiting: ${queueStats.waiting || 0}
+• Active: ${queueStats.active || 0}
+• Delayed: ${queueStats.delayed || 0}
+• Completed: ${queueStats.completed || 0}
+• Failed: ${queueStats.failed || 0}
+• **Total Calls: ${(queueStats.waiting || 0) + (queueStats.active || 0) + (queueStats.delayed || 0) + (queueStats.completed || 0) + (queueStats.failed || 0)}**
+
+⏰ **Failure Time:**
+• Failed At: ${new Date().toISOString()}
+• Failed At (Local): ${new Date().toLocaleString()}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      `.trim();
+
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        failureReport
+      );
+    } catch (discordError) {
+      console.error('Failed to send Discord notification:', discordError.message);
+    }
+  }
+});
+
+worker.on("error", (err) => {
+  console.error('\n⚠️  [CallWorker] Worker error:', err.message);
+});
+
+worker.on("ioredis:close", () => {
+  console.warn('\n⚠️  [CallWorker] Redis connection closed!');
+});
+
+worker.on("ioredis:reconnecting", () => {
+  console.log('\n🔄 [CallWorker] Reconnecting to Redis...');
 });

@@ -238,7 +238,7 @@ import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
 import emailWorker from './Utils/emailWorker.js';
 import whatsappWorker from './Utils/whatsappWorker.js';
 import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs)
-import redisConnection from './Utils/redisConnection.js';
+import { redisConnection } from './Utils/queue.js'; // Import shared ioredis connection
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -644,15 +644,47 @@ app.post("/call-status", async (req, res) => {
       Timestamp
     });
 
+    // Get queue statistics for context
+    let queueStats = {};
+    try {
+      const { callQueue } = await import('./Utils/queue.js');
+      queueStats = {
+        waiting: await callQueue?.getWaitingCount() || 0,
+        active: await callQueue?.getActiveCount() || 0,
+        completed: await callQueue?.getCompletedCount() || 0,
+        failed: await callQueue?.getFailedCount() || 0,
+        delayed: await callQueue?.getDelayedCount() || 0
+      };
+    } catch (statsError) {
+      console.warn('Could not fetch queue stats:', statsError.message);
+    }
+
+    const totalCalls = (queueStats.waiting || 0) + (queueStats.active || 0) + (queueStats.delayed || 0) + (queueStats.completed || 0) + (queueStats.failed || 0);
+
     const msg = `
 📞 **Call Status Update**
-- To: ${To}
-- From: ${From}
-- Status: ${CallStatus}
-- Answered By: ${AnsweredBy || "Unknown"}
-- At: ${Timestamp || new Date().toISOString()}
-SID: ${CallSid}
-    `;
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📞 **Call Details:**
+• To: ${To}
+• From: ${From}
+• Status: ${CallStatus}
+• Answered By: ${AnsweredBy || "Unknown"}
+• Call SID: ${CallSid}
+• Timestamp: ${Timestamp || new Date().toISOString()}
+
+📊 **Queue Statistics:**
+• Waiting: ${queueStats.waiting || 0}
+• Active: ${queueStats.active || 0}
+• Delayed: ${queueStats.delayed || 0}
+• Completed: ${queueStats.completed || 0}
+• Failed: ${queueStats.failed || 0}
+• **Total Calls: ${totalCalls}**
+
+⏰ **Update Time:**
+• Received At: ${new Date().toISOString()}
+• Received At (Local): ${new Date().toLocaleString()}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    `.trim();
 
     // Send Discord notification if configured
     const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
@@ -846,6 +878,9 @@ app.post('/calendly-webhook', async (req, res) => {
           return res.status(200).json({ message: 'Rescheduled but skipped India number' });
         }
 
+        // ✅ Use unique jobId: phone + meeting time to prevent collisions
+        const uniqueJobId = `${inviteePhone}_${newStartTime}`;
+        
         const newJob = await callQueue.add(
           'callUser',
           {
@@ -856,10 +891,15 @@ app.post('/calendly-webhook', async (req, res) => {
             eventStartISO: newStartTime,
           },
           {
-            jobId: inviteePhone,
+            jobId: uniqueJobId,  // ✅ Unique: phone + meeting time
             delay: newDelay,
             removeOnComplete: true,
-            removeOnFail: 100
+            removeOnFail: 100,
+            attempts: 3,  // ✅ Retry failed calls up to 3 times
+            backoff: {
+              type: 'exponential',
+              delay: 60000  // 1 minute, 2 minutes, 4 minutes
+            }
           }
         );
 
@@ -873,11 +913,27 @@ app.post('/calendly-webhook', async (req, res) => {
           { sort: { bookingCreatedAt: -1 } }
         );
 
+        console.log('\n🔁 ========================================');
+        console.log('🔁 [API] Meeting Rescheduled - New Call Job Created!');
+        console.log('🔁 ========================================');
+        console.log('   • New Job ID:', newJob.id);
+        console.log('   • Unique Job ID:', uniqueJobId);
+        console.log('   • Phone:', inviteePhone);
+        console.log('   • Name:', inviteeName);
+        console.log('   • Old Time:', DateTime.fromISO(oldStartTime, { zone: 'utc' }).setZone('Asia/Kolkata').toFormat('ff'));
+        console.log('   • New Time:', newMeetingTimeIndia);
+        console.log('   • New Delay:', Math.round(newDelay / 1000), 'seconds');
+        console.log('   • Will execute at:', new Date(Date.now() + newDelay).toLocaleString());
+        console.log('   • Retry attempts: 3 (exponential backoff)');
+        console.log('========================================\n');
+
         Logger.info('Scheduled NEW reminder call for rescheduled meeting', { 
           phone: inviteePhone, 
           newDelayMs: newDelay,
           newMeetingTime: newMeetingTimeIndia,
-          jobId: newJob.id
+          jobId: newJob.id,
+          uniqueJobId,
+          retryAttempts: 3
         });
 
         const rescheduleMessage = `🔁 **Meeting Rescheduled**
@@ -886,7 +942,9 @@ app.post('/calendly-webhook', async (req, res) => {
 - Old Time: ${DateTime.fromISO(oldStartTime, { zone: 'utc' }).setZone('Asia/Kolkata').toFormat('ff')} (IST)
 - New Time: ${newMeetingTimeIndia} (IST)
 - Reminder Call: Scheduled 10 minutes before new time
-- Job ID: ${newJob.id}`;
+- Job ID: ${newJob.id}
+- Unique ID: ${uniqueJobId}
+- Retries: 3 attempts`;
 
         await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, rescheduleMessage);
       } else {
@@ -906,30 +964,68 @@ app.post('/calendly-webhook', async (req, res) => {
     if (event === "invitee.created") {
       Logger.info('Calendly payload received');
 
+      const inviteeName = payload?.invitee?.name || payload?.name;
+      const inviteeEmail = payload?.invitee?.email || payload?.email;
+      let inviteePhone = payload?.questions_and_answers?.find(q =>
+        q.question.trim().toLowerCase() === 'phone number'
+      )?.answer || null;
+
+      if (inviteePhone) {
+        inviteePhone = inviteePhone.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '');
+      }
+
       // ✅ Calculate meeting start in UTC
       const meetingStart = new Date(payload?.scheduled_event?.start_time);
-      const delay = meetingStart.getTime() - Date.now() - (10 * 60 * 1000);
+      
+      if (isNaN(meetingStart.getTime())) {
+        Logger.error('Invalid meeting start time received from Calendly', {
+          startTime: payload?.scheduled_event?.start_time,
+          inviteeEmail
+        });
+        return res.status(400).json({ 
+          error: 'Invalid meeting start time',
+          message: 'Could not parse meeting start time from Calendly webhook'
+        });
+      }
 
+      const delay = meetingStart.getTime() - Date.now() - (10 * 60 * 1000);
+      
+      const callExecutionTime = new Date(Date.now() + delay);
+      const meetingTimeFormatted = meetingStart.toISOString();
+      const callTimeFormatted = callExecutionTime.toISOString();
+
+      Logger.info('📅 Meeting scheduled - calculating call delay', {
+        inviteeName,
+        inviteeEmail,
+        meetingStart: meetingTimeFormatted,
+        currentTime: new Date().toISOString(),
+        delayMs: delay,
+        delayMinutes: Math.round(delay / 60000),
+        callWillExecuteAt: callTimeFormatted,
+        callWillExecuteInMinutes: Math.round(delay / 60000)
+      });
+
+      // ✅ CRITICAL: Validate delay before scheduling
       if (delay < 0) {
-        Logger.warn('Meeting is too soon to schedule calls', { start: meetingStart.toISOString() });
+        const minutesUntilMeeting = Math.round(-delay / 60000);
+        Logger.warn('⚠️ Meeting is too soon to schedule calls - skipping reminder', { 
+          inviteeName,
+          inviteeEmail,
+          meetingStart: meetingTimeFormatted,
+          delayMs: delay,
+          meetingInMinutes: minutesUntilMeeting
+        });
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+          `⚠️ Meeting too soon for reminder call: ${inviteeName || 'Unknown'} (${inviteeEmail || 'Unknown'}). Meeting in ${minutesUntilMeeting} minutes. Cannot schedule 10-minute reminder.`
+        );
+        // Continue processing booking but skip call scheduling
+        // Don't return - still save booking to database
       }
 
       // ✅ Convert to different time zones
       const meetingStartUTC = DateTime.fromISO(payload?.scheduled_event?.start_time, { zone: 'utc' });
       const meetingTimeUS = meetingStartUTC.setZone('America/New_York').toFormat('ff');
       const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
-
-      // ✅ Extract details
-      const inviteeName = payload?.invitee?.name || payload?.name;
-      const inviteeEmail = payload?.invitee?.email || payload?.email;
-      let inviteePhone = payload?.questions_and_answers?.find(q =>
-  q.question.trim().toLowerCase() === 'phone number'
-)?.answer || null;
-
-if (inviteePhone) {
-  // Remove spaces and any non-digit except leading +
-  inviteePhone = inviteePhone.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '');
-}
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
@@ -1133,77 +1229,98 @@ if (inviteePhone) {
 }
 
 
-      if (inviteePhone && phoneRegex.test(inviteePhone)) {
-        // Validate all required data before adding job
-        if (!inviteePhone || !meetingTimeIndia || !inviteeEmail) {
-          Logger.error('Missing required data for call job', {
+      // ✅ Only schedule call if delay is positive (meeting is in future)
+      if (inviteePhone && phoneRegex.test(inviteePhone) && delay > 0) {
+          // ✅ Use unique jobId: phone + meeting time to prevent collisions
+          const uniqueJobId = `${inviteePhone}_${payload?.scheduled_event?.start_time}`;
+          
+          // ✅ Check if job already exists (idempotency check)
+          const existingJob = await callQueue.getJob(uniqueJobId);
+          if (existingJob) {
+            Logger.warn('Call job already exists - skipping duplicate', {
+              jobId: uniqueJobId,
+              phone: inviteePhone,
+              existingJobState: await existingJob.getState()
+            });
+            scheduledJobs.push(`Client: ${inviteePhone} (job already exists)`);
+          } else {
+            const job = await callQueue.add(
+              'callUser',
+              {
+                phone: inviteePhone,
+                meetingTime: meetingTimeIndia,
+                role: 'client',
+                inviteeEmail,
+                eventStartISO: payload?.scheduled_event?.start_time,
+              },
+              {
+                jobId: uniqueJobId,  // ✅ Unique: phone + meeting time
+                delay,
+                removeOnComplete: true,
+                removeOnFail: 100,
+                attempts: 3,  // ✅ Retry failed calls up to 3 times
+                backoff: {
+                  type: 'exponential',
+                  delay: 60000  // 1 minute, 2 minutes, 4 minutes
+                }
+              }
+            );
+
+            // Store the job ID in the booking record
+            await CampaignBookingModel.findOneAndUpdate(
+              { bookingId: newBooking.bookingId },
+              { reminderCallJobId: job.id.toString() }
+            );
+
+            scheduledJobs.push(`Client: ${inviteePhone}`);
+            
+            // Calculate execution times for verification
+            const callExecutionTime = new Date(Date.now() + delay);
+            const meetingTimeUTC = new Date(payload?.scheduled_event?.start_time);
+            const timeDifference = meetingTimeUTC.getTime() - callExecutionTime.getTime();
+            const minutesDifference = Math.round(timeDifference / 60000);
+
+            console.log('\n📞 ========================================');
+            console.log('📞 [API] Call Reminder Job Scheduled!');
+            console.log('📞 ========================================');
+            console.log('   • Job ID:', job.id);
+            console.log('   • Unique Job ID:', uniqueJobId);
+            console.log('   • Phone:', inviteePhone);
+            console.log('   • Name:', inviteeName);
+            console.log('   • Email:', inviteeEmail);
+            console.log('   • Meeting Time (IST):', meetingTimeIndia);
+            console.log('   • Meeting Time (UTC):', meetingTimeUTC.toISOString());
+            console.log('   • Delay:', Math.round(delay / 1000), 'seconds');
+            console.log('   • Delay:', Math.round(delay / 60000), 'minutes');
+            console.log('   • Call Will Execute At:', callExecutionTime.toISOString());
+            console.log('   • Call Will Execute At (Local):', callExecutionTime.toLocaleString());
+            console.log('   • Time Between Call & Meeting:', minutesDifference, 'minutes');
+            console.log('   • ✅ Expected: Exactly 10 minutes before meeting');
+            console.log('   • Retry attempts: 3 (exponential backoff)');
+            console.log('========================================\n');
+            
+            Logger.info('Valid phone, scheduled call', { 
+              phone: inviteePhone, 
+              delayMs: delay, 
+              jobId: job.id,
+              uniqueJobId,
+              retryAttempts: 3
+            });
+            const scheduledMessage =`📞 Reminder Call Scheduled!\n• Job ID: ${job.id}\n• Unique ID: ${uniqueJobId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reminder: 10 minutes before meeting\n• Retries: 3 attempts`
+            await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
+          }
+        } else if (delay <= 0) {
+          Logger.warn('Skipping call scheduling - meeting too soon or invalid phone', {
             phone: inviteePhone,
-            meetingTime: meetingTimeIndia,
-            email: inviteeEmail
+            delayMs: delay,
+            hasValidPhone: inviteePhone && phoneRegex.test(inviteePhone)
           });
-          await DiscordConnect(
-            process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-            `⚠️ Failed to schedule call - missing required data. Phone: ${inviteePhone || 'missing'}, Email: ${inviteeEmail || 'missing'}, MeetingTime: ${meetingTimeIndia || 'missing'}`
-          );
-          return res.status(500).json({ error: 'Missing required data for call scheduling' });
-        }
-
-        Logger.info('📞 Scheduling reminder call job', {
-          phone: inviteePhone,
-          inviteeName,
-          inviteeEmail,
-          meetingTime: meetingTimeIndia,
-          delayMs: delay,
-          delayMinutes: Math.round(delay / 60000),
-          eventStartISO: payload?.scheduled_event?.start_time
-        });
-
-        const job = await callQueue.add(
-  'callUser',
-  {
-    phone: inviteePhone,
-    meetingTime: meetingTimeIndia, // meetingTimeUS
-    role: 'client',
-    inviteeEmail,
-    eventStartISO: payload?.scheduled_event?.start_time,
-  },
-  {
-     jobId: inviteePhone,   // 🔑 use phone as jobId
-    delay,
-    removeOnComplete: true,  // ✅ deletes job when done
-    removeOnFail: 100        // ✅ keep last 100 failed jobs only
-  }
-);
-
-        Logger.info('✅ Call job added to queue', {
-          jobId: job.id,
-          phone: inviteePhone,
-          delayMs: delay,
-          scheduledFor: new Date(Date.now() + delay).toISOString()
-        });
-
-        // Store the job ID in the booking record
-        await CampaignBookingModel.findOneAndUpdate(
-          { bookingId: newBooking.bookingId },
-          { reminderCallJobId: job.id.toString() }
-        );
-
-        scheduledJobs.push(`Client: ${inviteePhone}`);
-        Logger.info('Valid phone, scheduled call', { phone: inviteePhone, delayMs: delay, jobId: job.id });
-        
-        const scheduledMessage =`Reminder Call Scheduled For ${inviteePhone}-${inviteeName} for meeting scheduled on ${meetingTimeIndia} (IST).Reminder 10 minutes before Start of meeting.`
-        const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
-        if (discordWebhookUrl) {
-          await DiscordConnect(discordWebhookUrl, scheduledMessage);
         } else {
-          Logger.warn('Discord webhook URL not configured - skipping scheduled call notification');
+          Logger.warn('No valid phone number provided by invitee', { phone: inviteePhone });
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+            `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
+          );
         }
-      } else {
-        Logger.warn('No valid phone number provided by invitee', { phone: inviteePhone });
-        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-          `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
-        );
-      }
 
       Logger.info('Scheduled calls summary', { jobs: scheduledJobs, count: scheduledJobs.length });
       const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;

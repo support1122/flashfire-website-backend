@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import WatiService from './WatiService.js';
 import { WhatsAppCampaignModel } from '../Schema_Models/WhatsAppCampaign.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import redisConnection from './redisConnection.js';
+import { redisConnection } from './queue.js'; // Import shared ioredis connection
 
 dotenv.config();
 
@@ -48,6 +48,18 @@ async function sendWhatsAppMessage(mobileNumber, templateName, parameters, campa
     }
 }
 
+console.log('\n📱 ========================================');
+console.log('📱 [WhatsAppWorker] Initializing WhatsApp Worker');
+console.log('📱 ========================================\n');
+
+const REDIS_URL = process.env.REDIS_CLOUD_URL;
+if (!REDIS_URL) {
+  console.error('❌ [WhatsAppWorker] REDIS_CLOUD_URL not configured!');
+  console.warn('⚠️  [WhatsAppWorker] WhatsApp worker disabled');
+} else {
+  console.log('🔄 [WhatsAppWorker] Connecting to Redis:', REDIS_URL.substring(0, 30) + '...');
+}
+
 let whatsappWorker;
 
 // ONLY create worker if Redis connection is available
@@ -59,6 +71,14 @@ if (!redisConnection) {
         whatsappWorker = new Worker(
         'whatsappQueue',
         async (job) => {
+            console.log('\n📥 ========================================');
+            console.log(`📥 [WhatsAppWorker] Job Received: ${job.id}`);
+            console.log('📥 ========================================');
+            console.log(`📌 Campaign ID: ${job.data.campaignId}`);
+            console.log(`📌 Send Day: ${job.data.sendDay}`);
+            console.log(`📌 Template: ${job.data.templateName}`);
+            console.log(`📌 Recipients: ${job.data.recipientMobiles?.length || 0}`);
+            console.log('========================================\n');
         const {
             campaignId,
             sendDay,
@@ -191,11 +211,37 @@ if (!redisConnection) {
     );
 
         whatsappWorker.on('completed', (job) => {
-            console.log(`[WhatsAppWorker] Job ${job.id} completed successfully`);
+            console.log(`\n🎉 ========================================`);
+            console.log(`🎉 [WhatsAppWorker] Job Completed: ${job.id}`);
+            console.log(`🎉 ========================================\n`);
         });
 
         whatsappWorker.on('failed', (job, err) => {
-            console.error(`[WhatsAppWorker] Job ${job.id} failed:`, err.message);
+            console.error(`\n💥 ========================================`);
+            console.error(`💥 [WhatsAppWorker] Job Failed: ${job?.id}`);
+            console.error(`💥 Error: ${err.message}`);
+            console.error(`💥 ========================================\n`);
+        });
+
+        whatsappWorker.on('active', (job) => {
+            console.log(`⚡ [WhatsAppWorker] Job Active: ${job.id}`);
+        });
+
+        whatsappWorker.on('stalled', (jobId) => {
+            console.warn(`⚠️ [WhatsAppWorker] Job Stalled: ${jobId}`);
+        });
+
+        whatsappWorker.on('error', (err) => {
+            console.error('❌ [WhatsAppWorker] Worker error:', err.message);
+        });
+
+        whatsappWorker.on('ready', () => {
+            console.log('✅ [WhatsAppWorker] Worker connected to Redis successfully!');
+            console.log('👂 [WhatsAppWorker] Listening for jobs on "whatsappQueue"...');
+        });
+
+        whatsappWorker.on('close', () => {
+            console.warn('⚠️ [WhatsAppWorker] Worker connection closed');
         });
 
         console.log('[WhatsAppWorker] ✅ WhatsApp worker started and listening for jobs');
