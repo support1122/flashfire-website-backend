@@ -88,13 +88,13 @@ export default async function CreateScheduledEmailCampaign(req, res) {
             campaign.logs.push({
                 timestamp: new Date(),
                 level: 'error',
-                message: 'Queue service unavailable. UPSTASH_REDIS_URL not configured.'
+                message: 'Queue service unavailable. REDIS_CLOUD_URL not configured.'
             });
             await campaign.save();
             
             return res.status(503).json({
                 success: false,
-                message: 'Email campaign created but queue service is unavailable. Please configure UPSTASH_REDIS_URL.'
+                message: 'Email campaign created but queue service is unavailable. Please configure REDIS_CLOUD_URL.'
             });
         }
 

@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import WatiService from '../Utils/WatiService.js';
 import { WhatsAppCampaignModel } from '../Schema_Models/WhatsAppCampaign.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import redisConnection from '../Utils/redisConnection.js';
+import { redisConnection } from '../Utils/queue.js'; // Import shared ioredis connection
 
 dotenv.config();
 
@@ -14,8 +14,9 @@ if (redisConnection) {
   whatsappQueue = new Queue('whatsappQueue', {
     connection: redisConnection,
   });
+  console.log('✅ [WhatsAppController] WhatsAppQueue connected to Redis using ioredis');
 } else {
-  console.warn('[WhatsAppController] ⚠️ Redis connection not available. Queue unavailable.');
+  console.warn('[WhatsAppController] ⚠️ REDIS_CLOUD_URL not configured. Queue unavailable.');
 }
 
 // ==================== GET WATI TEMPLATES ====================

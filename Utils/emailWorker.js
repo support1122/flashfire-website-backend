@@ -4,7 +4,7 @@ import sgMail from '@sendgrid/mail';
 import { ScheduledEmailCampaignModel } from '../Schema_Models/ScheduledEmailCampaign.js';
 import { EmailCampaignModel } from '../Schema_Models/EmailCampaign.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import redisConnection from './redisConnection.js';
+import { redisConnection } from './queue.js'; // Import shared ioredis connection
 
 dotenv.config();
 
@@ -48,6 +48,18 @@ async function sendEmail(email, templateId, domainName, templateName) {
     }
 }
 
+console.log('\n📧 ========================================');
+console.log('📧 [EmailWorker] Initializing Email Worker');
+console.log('📧 ========================================\n');
+
+const REDIS_URL = process.env.REDIS_CLOUD_URL;
+if (!REDIS_URL) {
+  console.error('❌ [EmailWorker] REDIS_CLOUD_URL not configured!');
+  console.warn('⚠️  [EmailWorker] Email worker disabled');
+} else {
+  console.log('🔄 [EmailWorker] Connecting to Redis:', REDIS_URL.substring(0, 30) + '...');
+}
+
 let emailWorker;
 
 // ONLY create worker if Redis connection is available
@@ -69,7 +81,14 @@ if (!redisConnection) {
             recipientEmails
         } = job.data;
 
-        console.log(`[EmailWorker] Processing job ${job.id} for campaign ${campaignId}, day ${sendDay}`);
+        console.log('\n📥 ========================================');
+        console.log(`📥 [EmailWorker] Job Received: ${job.id}`);
+        console.log('📥 ========================================');
+        console.log(`📌 Campaign ID: ${campaignId}`);
+        console.log(`📌 Send Day: ${sendDay}`);
+        console.log(`📌 Template: ${templateName}`);
+        console.log(`📌 Recipients: ${recipientEmails?.length || 0}`);
+        console.log('========================================\n');
 
         const campaign = await ScheduledEmailCampaignModel.findById(campaignId);
         if (!campaign) {
@@ -273,6 +292,40 @@ if (!redisConnection) {
                     console.error(`[EmailWorker] Error updating campaign after failure:`, error.message);
                 });
             }
+        });
+
+        emailWorker.on('completed', (job) => {
+            console.log(`\n🎉 ========================================`);
+            console.log(`🎉 [EmailWorker] Job Completed: ${job.id}`);
+            console.log(`🎉 ========================================\n`);
+        });
+
+        emailWorker.on('failed', (job, err) => {
+            console.error(`\n💥 ========================================`);
+            console.error(`💥 [EmailWorker] Job Failed: ${job?.id}`);
+            console.error(`💥 Error: ${err.message}`);
+            console.error(`💥 ========================================\n`);
+        });
+
+        emailWorker.on('active', (job) => {
+            console.log(`⚡ [EmailWorker] Job Active: ${job.id}`);
+        });
+
+        emailWorker.on('stalled', (jobId) => {
+            console.warn(`⚠️ [EmailWorker] Job Stalled: ${jobId}`);
+        });
+
+        emailWorker.on('error', (err) => {
+            console.error('❌ [EmailWorker] Worker error:', err.message);
+        });
+
+        emailWorker.on('ready', () => {
+            console.log('✅ [EmailWorker] Worker connected to Redis successfully!');
+            console.log('👂 [EmailWorker] Listening for jobs on "emailQueue"...');
+        });
+
+        emailWorker.on('close', () => {
+            console.warn('⚠️ [EmailWorker] Worker connection closed');
         });
 
         console.log('[EmailWorker] ✅ Email worker started and listening for jobs');
