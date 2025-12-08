@@ -12,6 +12,7 @@ export default async function GetEmailCampaigns(req, res) {
             .limit(limit)
             .lean();
 
+            
         const total = await EmailCampaignModel.countDocuments();
 
         const formattedCampaigns = campaigns.map(campaign => ({

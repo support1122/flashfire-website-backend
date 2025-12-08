@@ -13,6 +13,7 @@ import UpdateScheduledEmailCampaignStatus from "./Controllers/UpdateScheduledEma
 import GetUserCampaigns from "./Controllers/GetUserCampaigns.js";
 import GetCampaignDetails from "./Controllers/GetCampaignDetails.js";
 import ResendEmailCampaign from "./Controllers/ResendEmailCampaign.js";
+import { saveEmailTemplate, getEmailTemplates, deleteEmailTemplate } from "./Controllers/EmailTemplateController.js";
 import EmployerForm from "./Controllers/EmployerForm.js";
 import TwilioReminder from "./Controllers/TwilioReminder.js";
 import twilio from 'twilio';
@@ -56,6 +57,22 @@ import {
   getScheduledWhatsAppCampaigns,
   sendWhatsAppCampaignNow
 } from "./Controllers/WhatsAppCampaignController.js";
+// Workflow Controllers
+import {
+  createWorkflow,
+  getAllWorkflows,
+  getWorkflowById,
+  updateWorkflow,
+  deleteWorkflow,
+  processScheduledWorkflows
+} from "./Controllers/WorkflowController.js";
+// Workflow Log Controllers
+import {
+  getWorkflowLogs,
+  getWorkflowLogById,
+  getWorkflowLogStats,
+  sendWorkflowLogNow
+} from "./Controllers/WorkflowLogController.js";
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -103,6 +120,11 @@ export default function Routes(app) {
   app.get('/api/email-campaigns/user/:email', GetUserCampaigns);
   app.get('/api/email-campaigns/:campaignId/details/:userEmail', GetCampaignDetails);
   app.post('/api/email-campaign/resend', ResendEmailCampaign);
+  
+  // Email Template Routes
+  app.post('/api/email-templates', saveEmailTemplate);
+  app.get('/api/email-templates', getEmailTemplates);
+  app.delete('/api/email-templates/:templateId', deleteEmailTemplate);
   
   // WhatsApp Campaign Routes
   app.get('/api/whatsapp-campaigns/templates', getWatiTemplates);
@@ -189,6 +211,20 @@ export default function Routes(app) {
   app.post('/api/whatsapp/send-message', sendMessage); // Send WhatsApp message
   app.get('/api/whatsapp/test', testConnection); // Test WhatsApp connection
   app.post('/api/whatsapp/send-simple', sendSimpleMessage); // Send simple WhatsApp message (mobile + message only)
+
+  // ==================== WORKFLOW ROUTES ====================
+  app.post('/api/workflows', createWorkflow); // Create new workflow
+  app.get('/api/workflows', getAllWorkflows); // Get all workflows
+  app.get('/api/workflows/:workflowId', getWorkflowById); // Get workflow by ID
+  app.put('/api/workflows/:workflowId', updateWorkflow); // Update workflow
+  app.delete('/api/workflows/:workflowId', deleteWorkflow); // Delete workflow
+  app.post('/api/workflows/process-scheduled', processScheduledWorkflows); // Process scheduled workflows (cron job)
+
+  // ==================== WORKFLOW LOG ROUTES ====================
+  app.get('/api/workflow-logs', getWorkflowLogs); // Get workflow logs with pagination
+  app.get('/api/workflow-logs/stats', getWorkflowLogStats); // Get workflow log statistics
+  app.get('/api/workflow-logs/:logId', getWorkflowLogById); // Get workflow log by ID
+  app.post('/api/workflow-logs/:logId/send-now', sendWorkflowLogNow); // Send workflow log email immediately
 
   // // Handle Gather result
   // app.post("/twilio/response", (req, res) => {

@@ -16,6 +16,34 @@ console.log('📞 ========================================\n');
 
 console.log('🔄 [CallWorker] Using shared ioredis connection from queue.js');
 
+// Check Redis eviction policy when Redis is ready
+if (redisConnection) {
+  redisConnection.once('ready', async () => {
+    try {
+      const maxmemoryPolicy = await redisConnection.config('GET', 'maxmemory-policy');
+      const policy = maxmemoryPolicy[1];
+      
+      if (policy && policy !== 'noeviction') {
+        console.warn('\n⚠️  IMPORTANT! Eviction policy is', policy, '. It should be "noeviction"');
+        console.warn('⚠️  This can cause job data loss. Set maxmemory-policy to noeviction in Redis config.');
+        
+        // Try to set it to noeviction (may fail if Redis is read-only or requires admin)
+        try {
+          await redisConnection.config('SET', 'maxmemory-policy', 'noeviction');
+          console.log('✅ Successfully set Redis eviction policy to "noeviction"');
+        } catch (setError) {
+          console.warn('⚠️  Could not set eviction policy automatically:', setError.message);
+          console.warn('⚠️  Please set maxmemory-policy=noeviction in your Redis configuration\n');
+        }
+      } else {
+        console.log('✅ Redis eviction policy is correctly set to "noeviction"');
+      }
+    } catch (error) {
+      console.warn('⚠️  Could not check Redis eviction policy:', error.message);
+    }
+  });
+}
+
 const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 const worker = new Worker(
@@ -220,11 +248,15 @@ FlashFire Team`;
 async function processCallReminder(job) {
   console.log('\n🔍 [CallWorker] Starting call reminder processing...');
   
+  // Support both 'phone' and 'phoneNumber' fields for backward compatibility
+  const phone = job?.data?.phone || job?.data?.phoneNumber;
+  const meetingTime = job?.data?.meetingTime || job?.data?.announceTimeText;
+  
   const meta = {
     jobId: job?.id,
     type: job?.data?.type || 'call_reminder',
-    phone: job?.data?.phone,
-    meetingTime: job?.data?.meetingTime,
+    phone: phone,
+    meetingTime: meetingTime,
     inviteeEmail: job?.data?.inviteeEmail
   };
   
@@ -233,10 +265,11 @@ async function processCallReminder(job) {
   console.log('   • Phone:', meta.phone);
   console.log('   • Meeting Time:', meta.meetingTime);
   console.log('   • Invitee Email:', meta.inviteeEmail);
+  console.log('   • Raw Job Data:', JSON.stringify(job.data, null, 2));
 
-  const phone = job?.data?.phone;
   if (!phone) {
     console.error('❌ [CallWorker] Missing phone number - aborting call');
+    console.error('   • Available fields:', Object.keys(job?.data || {}));
     Logger.error('[Worker] Missing phone in job data; aborting call', meta);
     return;
   }
@@ -285,22 +318,24 @@ async function processCallReminder(job) {
   }
 
   try {
+    const meetingTimeForCall = meetingTime || job.data.meetingTime || job.data.announceTimeText || 'your meeting';
+    
     Logger.info('[Worker] Attempting to create Twilio call', {
       jobId: job?.id,
       phone,
-      meetingTime: job.data.meetingTime,
+      meetingTime: meetingTimeForCall,
       inviteeEmail: job.data.inviteeEmail
     });
-
+    
     console.log('\n📞 [CallWorker] Initiating Twilio call...');
     console.log('   → To:', phone);
     console.log('   → From:', process.env.TWILIO_FROM);
-    console.log('   → Meeting Time:', job.data.meetingTime);
+    console.log('   → Meeting Time:', meetingTimeForCall);
     
     const call = await client.calls.create({
       to: phone,
       from: process.env.TWILIO_FROM,
-      url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(job.data.meetingTime)}`
+      url: `https://api.flashfirejobs.com/twilio-ivr?meetingTime=${encodeURIComponent(meetingTimeForCall)}`
     });
 
     console.log('\n✅ [CallWorker] Call initiated successfully!');
