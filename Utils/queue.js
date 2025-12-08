@@ -44,7 +44,7 @@ if (!REDIS_URL) {
   redisConnection.on('ready', async () => {
     console.log('✅ [CallQueue] ioredis ready to accept commands');
     
-    // Check and warn about Redis eviction policy
+    // Check and warn about Redis eviction policy (skip if no permissions)
     try {
       const maxmemoryPolicy = await redisConnection.config('GET', 'maxmemory-policy');
       const policy = maxmemoryPolicy[1];
@@ -65,7 +65,15 @@ if (!REDIS_URL) {
         console.log('✅ Redis eviction policy is correctly set to "noeviction"');
       }
     } catch (error) {
-      console.warn('⚠️  Could not check Redis eviction policy:', error.message);
+      // Handle permission errors gracefully (common with managed Redis services)
+      if (error.message && (error.message.includes('NOPERM') || error.message.includes('permission') || error.message.includes('not allowed'))) {
+        // Silently skip - managed Redis services don't allow config commands for regular users
+        // This is expected behavior and not an error
+        console.log('ℹ️  [CallQueue] Redis eviction policy check skipped (managed Redis service - no admin permissions)');
+      } else {
+        // Only warn for unexpected errors
+        console.warn('⚠️  Could not check Redis eviction policy:', error.message);
+      }
     }
   });
 

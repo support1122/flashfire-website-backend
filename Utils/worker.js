@@ -16,7 +16,7 @@ console.log('📞 ========================================\n');
 
 console.log('🔄 [CallWorker] Using shared ioredis connection from queue.js');
 
-// Check Redis eviction policy when Redis is ready
+// Check Redis eviction policy when Redis is ready (skip if no permissions)
 if (redisConnection) {
   redisConnection.once('ready', async () => {
     try {
@@ -39,7 +39,15 @@ if (redisConnection) {
         console.log('✅ Redis eviction policy is correctly set to "noeviction"');
       }
     } catch (error) {
-      console.warn('⚠️  Could not check Redis eviction policy:', error.message);
+      // Handle permission errors gracefully (common with managed Redis services)
+      if (error.message && (error.message.includes('NOPERM') || error.message.includes('permission') || error.message.includes('not allowed'))) {
+        // Silently skip - managed Redis services don't allow config commands for regular users
+        // This is expected behavior and not an error
+        console.log('ℹ️  [CallWorker] Redis eviction policy check skipped (managed Redis service - no admin permissions)');
+      } else {
+        // Only warn for unexpected errors
+        console.warn('⚠️  Could not check Redis eviction policy:', error.message);
+      }
     }
   });
 }
