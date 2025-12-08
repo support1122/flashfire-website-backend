@@ -3,6 +3,7 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
 import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
+import { triggerWorkflow } from './WorkflowController.js';
 
 // ==================== SAVE CALENDLY BOOKING WITH UTM ====================
 export const saveCalendlyBooking = async (bookingData) => {
@@ -234,10 +235,33 @@ export const getAllBookings = async (req, res) => {
     if (utmSource) query.utmSource = utmSource;
     if (status) query.bookingStatus = status;
 
-    // Fetch ALL bookings without pagination for better performance
+    // Optimize query: Limit to last 5000 bookings and only fetch needed fields
     // Sort by scheduledEventStartTime (meeting time) first, then bookingCreatedAt
+    // Note: Using inclusion projection only (cannot mix inclusion/exclusion in MongoDB)
     const bookings = await CampaignBookingModel.find(query)
+      .select({
+        bookingId: 1,
+        campaignId: 1,
+        utmSource: 1,
+        utmMedium: 1,
+        utmCampaign: 1,
+        utmContent: 1,
+        utmTerm: 1,
+        clientName: 1,
+        clientEmail: 1,
+        clientPhone: 1,
+        calendlyMeetLink: 1,
+        scheduledEventStartTime: 1,
+        scheduledEventEndTime: 1,
+        bookingCreatedAt: 1,
+        bookingStatus: 1,
+        meetingNotes: 1,
+        anythingToKnow: 1
+        // Excluded large fields: scheduledWorkflows, paymentReminders, questionsAndAnswers
+        // These are not included in the projection, so they won't be fetched
+      })
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
+      .limit(5000) // Limit to prevent huge queries
       .lean(); // Use lean() for better performance
 
     const total = bookings.length;
@@ -331,10 +355,25 @@ export const updateBookingStatus = async (req, res) => {
       });
     }
 
+    // Trigger workflows for specific status changes
+    const workflowTriggerStatuses = ['completed', 'canceled', 'rescheduled', 'no-show'];
+    if (workflowTriggerStatuses.includes(status)) {
+      try {
+        const workflowResult = await triggerWorkflow(bookingId, status);
+        if (workflowResult.success && workflowResult.triggered) {
+          console.log(`✅ Workflows triggered for booking ${bookingId} with status ${status}`);
+        }
+      } catch (workflowError) {
+        console.error('Error triggering workflows:', workflowError);
+        // Don't fail the status update if workflow trigger fails
+      }
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Booking status updated successfully',
-      data: booking
+      data: booking,
+      workflowTriggered: workflowTriggerStatuses.includes(status)
     });
 
   } catch (error) {

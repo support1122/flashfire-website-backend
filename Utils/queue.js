@@ -41,8 +41,32 @@ if (!REDIS_URL) {
     console.log('✅ [CallQueue] ioredis connected successfully');
   });
 
-  redisConnection.on('ready', () => {
+  redisConnection.on('ready', async () => {
     console.log('✅ [CallQueue] ioredis ready to accept commands');
+    
+    // Check and warn about Redis eviction policy
+    try {
+      const maxmemoryPolicy = await redisConnection.config('GET', 'maxmemory-policy');
+      const policy = maxmemoryPolicy[1];
+      
+      if (policy && policy !== 'noeviction') {
+        console.warn('⚠️  IMPORTANT! Eviction policy is', policy, '. It should be "noeviction"');
+        console.warn('⚠️  This can cause job data loss. Set maxmemory-policy to noeviction in Redis config.');
+        
+        // Try to set it to noeviction (may fail if Redis is read-only or requires admin)
+        try {
+          await redisConnection.config('SET', 'maxmemory-policy', 'noeviction');
+          console.log('✅ Successfully set Redis eviction policy to "noeviction"');
+        } catch (setError) {
+          console.warn('⚠️  Could not set eviction policy automatically:', setError.message);
+          console.warn('⚠️  Please set maxmemory-policy=noeviction in your Redis configuration');
+        }
+      } else {
+        console.log('✅ Redis eviction policy is correctly set to "noeviction"');
+      }
+    } catch (error) {
+      console.warn('⚠️  Could not check Redis eviction policy:', error.message);
+    }
   });
 
   redisConnection.on('error', (err) => {

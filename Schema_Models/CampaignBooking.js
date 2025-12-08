@@ -182,7 +182,6 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
-  // Reminder call job ID
   reminderCallJobId: {
     type: String,
     default: null
@@ -190,7 +189,65 @@ export const CampaignBookingSchema = new mongoose.Schema({
   meetingNotes: {
     type: String,
     default: null
-  }
+  },
+  scheduledWorkflows: [{
+    workflowId: {
+      type: String,
+      required: true
+    },
+    step: {
+      channel: {
+        type: String,
+        enum: ['email', 'whatsapp'],
+        required: true
+      },
+      daysAfter: {
+        type: Number,
+        required: true
+      },
+      templateId: {
+        type: String,
+        required: true
+      },
+      templateName: {
+        type: String,
+        default: null
+      },
+      domainName: {
+        type: String,
+        default: null
+      },
+      senderEmail: {
+        type: String,
+        default: null
+      },
+      order: {
+        type: Number,
+        default: 0
+      }
+    },
+    scheduledFor: {
+      type: Date,
+      required: true
+    },
+    status: {
+      type: String,
+      enum: ['scheduled', 'executed', 'failed'],
+      default: 'scheduled'
+    },
+    executedAt: {
+      type: Date,
+      default: null
+    },
+    error: {
+      type: String,
+      default: null
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }]
 }, {
   timestamps: true
 });

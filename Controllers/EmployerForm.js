@@ -11,6 +11,7 @@ export default async function EmployerForm(req, res) {
   } catch (error) {
     console.error('Error submitting employer form:', error);
     res.status(500).json({ error: 'Internal server error' });
+    
   }
 };
 
