@@ -489,6 +489,7 @@ export const rescheduleBooking = async (req, res) => {
             'callUser',
             {
               phone,
+              phoneNumber: phone, // Include both for compatibility with all workers
               meetingTime: meetingTimeIndia,
               role: 'client',
               inviteeEmail: booking.clientEmail,
