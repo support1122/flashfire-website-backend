@@ -4,10 +4,9 @@ import dotenv from 'dotenv';
 import { sendWhatsAppMessage } from '../Utils/WatiHelper.js';
 import { Logger } from './Logger.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { callQueue, getRedisUrl, createRedisOptions } from './queue.js'; // Import getRedisUrl and createRedisOptions
+import { callQueue, getRedisUrl, createRedisOptions, createRedisClient } from './queue.js'; // Import getRedisUrl and createRedisOptions
 import { isEventPresent } from './GoogleCalendarHelper.js';
 import { DiscordConnect } from './DiscordConnect.js';
-import Redis from 'ioredis';
 
 dotenv.config();
 
@@ -21,55 +20,42 @@ let workerConnection = null;
 
 if (redisUrl) {
   console.log('🔄 [CallWorker] Creating dedicated Redis connection...');
-  
-  // Check if URL uses SSL (rediss://)
-  const isSSL = redisUrl.startsWith('rediss://');
-  if (isSSL) {
-    console.log('🔒 [CallWorker] Detected SSL/TLS Redis connection (rediss://)');
-  }
-  
-  const redisOptions = createRedisOptions();
-  
-  // Configure TLS for SSL connections
-  if (isSSL) {
-    redisOptions.tls = {
-      rejectUnauthorized: false // Allow self-signed certificates (common in managed Redis services)
-    };
-  }
 
-  workerConnection = new Redis(redisUrl, redisOptions);
+  workerConnection = createRedisClient(redisUrl, 'CallWorker');
 
-  workerConnection.on('connect', () => console.log('✅ [CallWorker] Dedicated Redis connection established'));
-  workerConnection.on('ready', () => console.log('✅ [CallWorker] ioredis ready to accept commands'));
-  workerConnection.on('error', (err) => console.error('❌ [CallWorker] Redis error:', err.message));
-  workerConnection.on('close', () => console.warn('⚠️  [CallWorker] Redis connection closed!'));
-  workerConnection.on('reconnecting', (delay) => console.log(`🔄 [CallWorker] Redis reconnecting in ${delay}ms...`));
+  if (workerConnection) {
+    workerConnection.on('connect', () => console.log('✅ [CallWorker] Dedicated Redis connection established'));
+    workerConnection.on('ready', () => console.log('✅ [CallWorker] ioredis ready to accept commands'));
+    workerConnection.on('error', (err) => console.error('❌ [CallWorker] Redis error:', err.message));
+    workerConnection.on('close', () => console.warn('⚠️  [CallWorker] Redis connection closed!'));
+    workerConnection.on('reconnecting', (delay) => console.log(`🔄 [CallWorker] Redis reconnecting in ${delay}ms...`));
 
-  workerConnection.once('ready', async () => {
-    try {
-      const maxmemoryPolicy = await workerConnection.config('GET', 'maxmemory-policy');
-      const policy = maxmemoryPolicy[1];
+    workerConnection.once('ready', async () => {
+      try {
+        const maxmemoryPolicy = await workerConnection.config('GET', 'maxmemory-policy');
+        const policy = maxmemoryPolicy[1];
 
-      if (policy && policy !== 'noeviction') {
-        console.warn('\n⚠️  IMPORTANT! Eviction policy is', policy, '. It should be "noeviction"');
+        if (policy && policy !== 'noeviction') {
+          console.warn('\n⚠️  IMPORTANT! Eviction policy is', policy, '. It should be "noeviction"');
 
-        try {
-          await workerConnection.config('SET', 'maxmemory-policy', 'noeviction');
-          console.log('✅ Successfully set Redis eviction policy to "noeviction"');
-        } catch (setError) {
-          console.warn('⚠️  Could not set eviction policy automatically:', setError.message);
+          try {
+            await workerConnection.config('SET', 'maxmemory-policy', 'noeviction');
+            console.log('✅ Successfully set Redis eviction policy to "noeviction"');
+          } catch (setError) {
+            console.warn('⚠️  Could not set eviction policy automatically:', setError.message);
+          }
+        } else {
+          console.log('✅ Redis eviction policy is correctly set to "noeviction"');
         }
-      } else {
-        console.log('✅ Redis eviction policy is correctly set to "noeviction"');
+      } catch (error) {
+        if (error.message && (error.message.includes('NOPERM') || error.message.includes('permission') || error.message.includes('not allowed'))) {
+          console.log('ℹ️  [CallWorker] Redis eviction policy check skipped (managed Redis service - no admin permissions)');
+        } else {
+          console.warn('⚠️  Could not check Redis eviction policy:', error.message);
+        }
       }
-    } catch (error) {
-      if (error.message && (error.message.includes('NOPERM') || error.message.includes('permission') || error.message.includes('not allowed'))) {
-        console.log('ℹ️  [CallWorker] Redis eviction policy check skipped (managed Redis service - no admin permissions)');
-      } else {
-        console.warn('⚠️  Could not check Redis eviction policy:', error.message);
-      }
-    }
-  });
+    });
+  }
 }
 
 const client = Twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
