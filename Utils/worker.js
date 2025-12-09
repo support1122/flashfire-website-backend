@@ -4,9 +4,10 @@ import dotenv from 'dotenv';
 import { sendWhatsAppMessage } from '../Utils/WatiHelper.js';
 import { Logger } from './Logger.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { redisConnection, callQueue } from './queue.js'; // Import shared ioredis connection and callQueue
+import { callQueue, getRedisUrl } from './queue.js'; // Import getRedisUrl
 import { isEventPresent } from './GoogleCalendarHelper.js';
 import { DiscordConnect } from './DiscordConnect.js';
+import Redis from 'ioredis';
 
 dotenv.config();
 
@@ -14,38 +15,42 @@ console.log('\n📞 ========================================');
 console.log('📞 [CallWorker] Initializing Call Reminder Worker');
 console.log('📞 ========================================\n');
 
-console.log('🔄 [CallWorker] Using shared ioredis connection from queue.js');
+// Create dedicated Redis connection for this worker
+const redisUrl = getRedisUrl();
+let workerConnection = null;
 
-// Check Redis eviction policy when Redis is ready (skip if no permissions)
-if (redisConnection) {
-  redisConnection.once('ready', async () => {
+if (redisUrl) {
+  console.log('🔄 [CallWorker] Creating dedicated Redis connection...');
+  workerConnection = new Redis(redisUrl, {
+    maxRetriesPerRequest: null,
+    retryStrategy: (times) => Math.min(times * 50, 2000),
+    reconnectOnError: (err) => !err.message.includes('READONLY')
+  });
+
+  workerConnection.on('connect', () => console.log('✅ [CallWorker] Dedicated Redis connection established'));
+  workerConnection.on('error', (err) => console.error('❌ [CallWorker] Redis error:', err.message));
+
+  workerConnection.once('ready', async () => {
     try {
-      const maxmemoryPolicy = await redisConnection.config('GET', 'maxmemory-policy');
+      const maxmemoryPolicy = await workerConnection.config('GET', 'maxmemory-policy');
       const policy = maxmemoryPolicy[1];
-      
+
       if (policy && policy !== 'noeviction') {
         console.warn('\n⚠️  IMPORTANT! Eviction policy is', policy, '. It should be "noeviction"');
-        console.warn('⚠️  This can cause job data loss. Set maxmemory-policy to noeviction in Redis config.');
-        
-        // Try to set it to noeviction (may fail if Redis is read-only or requires admin)
+
         try {
-          await redisConnection.config('SET', 'maxmemory-policy', 'noeviction');
+          await workerConnection.config('SET', 'maxmemory-policy', 'noeviction');
           console.log('✅ Successfully set Redis eviction policy to "noeviction"');
         } catch (setError) {
           console.warn('⚠️  Could not set eviction policy automatically:', setError.message);
-          console.warn('⚠️  Please set maxmemory-policy=noeviction in your Redis configuration\n');
         }
       } else {
         console.log('✅ Redis eviction policy is correctly set to "noeviction"');
       }
     } catch (error) {
-      // Handle permission errors gracefully (common with managed Redis services)
       if (error.message && (error.message.includes('NOPERM') || error.message.includes('permission') || error.message.includes('not allowed'))) {
-        // Silently skip - managed Redis services don't allow config commands for regular users
-        // This is expected behavior and not an error
         console.log('ℹ️  [CallWorker] Redis eviction policy check skipped (managed Redis service - no admin permissions)');
       } else {
-        // Only warn for unexpected errors
         console.warn('⚠️  Could not check Redis eviction policy:', error.message);
       }
     }
@@ -87,7 +92,7 @@ const worker = new Worker(
       throw err; // important so BullMQ marks job as failed
     }
   },
-  { connection: redisConnection }
+  { connection: workerConnection }
 );
 
 // Track worker lifecycle with detailed logs
@@ -181,7 +186,7 @@ worker.on("ioredis:reconnecting", () => {
 // Process payment reminder jobs
 async function processPaymentReminder(job) {
   const { bookingId, clientName, clientPhone, paymentLink, reminderDays } = job.data;
-  
+
   Logger.info(`Processing payment reminder job for ${clientName}`, {
     jobId: job.id,
     bookingId,
@@ -207,16 +212,16 @@ Best regards,
 FlashFire Team`;
 
   const result = await sendWhatsAppMessage(clientPhone, message);
-  
+
   if (result.success) {
     // Update payment reminder status in database
     await CampaignBookingModel.findOneAndUpdate(
-      { 
+      {
         bookingId,
         'paymentReminders.jobId': job.id.toString()
       },
-      { 
-        $set: { 
+      {
+        $set: {
           'paymentReminders.$.status': 'sent',
           'paymentReminders.$.sentAt': new Date()
         }
@@ -231,12 +236,12 @@ FlashFire Team`;
   } else {
     // Update payment reminder status to failed
     await CampaignBookingModel.findOneAndUpdate(
-      { 
+      {
         bookingId,
         'paymentReminders.jobId': job.id.toString()
       },
-      { 
-        $set: { 
+      {
+        $set: {
           'paymentReminders.$.status': 'failed'
         }
       }
@@ -255,11 +260,11 @@ FlashFire Team`;
 // Process call reminder jobs (existing functionality)
 async function processCallReminder(job) {
   console.log('\n🔍 [CallWorker] Starting call reminder processing...');
-  
+
   // Support both 'phone' and 'phoneNumber' fields for backward compatibility
   const phone = job?.data?.phone || job?.data?.phoneNumber;
   const meetingTime = job?.data?.meetingTime || job?.data?.announceTimeText;
-  
+
   const meta = {
     jobId: job?.id,
     type: job?.data?.type || 'call_reminder',
@@ -267,7 +272,7 @@ async function processCallReminder(job) {
     meetingTime: meetingTime,
     inviteeEmail: job?.data?.inviteeEmail
   };
-  
+
   console.log('📋 [CallWorker] Job Details:');
   console.log('   • Job ID:', meta.jobId);
   console.log('   • Phone:', meta.phone);
@@ -327,19 +332,19 @@ async function processCallReminder(job) {
 
   try {
     const meetingTimeForCall = meetingTime || job.data.meetingTime || job.data.announceTimeText || 'your meeting';
-    
+
     Logger.info('[Worker] Attempting to create Twilio call', {
       jobId: job?.id,
       phone,
       meetingTime: meetingTimeForCall,
       inviteeEmail: job.data.inviteeEmail
     });
-    
+
     console.log('\n📞 [CallWorker] Initiating Twilio call...');
     console.log('   → To:', phone);
     console.log('   → From:', process.env.TWILIO_FROM);
     console.log('   → Meeting Time:', meetingTimeForCall);
-    
+
     const call = await client.calls.create({
       to: phone,
       from: process.env.TWILIO_FROM,
@@ -374,7 +379,7 @@ async function processCallReminder(job) {
 • Initiated At (Local): ${new Date().toLocaleString()}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       `.trim();
-      
+
       await DiscordConnect(
         process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
         successDetails
@@ -388,7 +393,7 @@ async function processCallReminder(job) {
     console.error('   • Code:', error?.code);
     console.error('   • More Info:', error?.moreInfo);
     console.error('========================================\n');
-    
+
     Logger.error('[Worker] Twilio call failed', {
       jobId: job?.id,
       phone,
@@ -424,7 +429,7 @@ async function processCallReminder(job) {
 • Will Retry: ${job?.opts?.attempts > (job?.attemptsMade || 0) ? 'Yes' : 'No'}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
       `.trim();
-      
+
       await DiscordConnect(
         process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
         failureDetails
