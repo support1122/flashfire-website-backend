@@ -4,7 +4,7 @@ import dotenv from 'dotenv';
 import { sendWhatsAppMessage } from '../Utils/WatiHelper.js';
 import { Logger } from './Logger.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { callQueue, getRedisUrl } from './queue.js'; // Import getRedisUrl
+import { callQueue, getRedisUrl, createRedisOptions } from './queue.js'; // Import getRedisUrl and createRedisOptions
 import { isEventPresent } from './GoogleCalendarHelper.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import Redis from 'ioredis';
@@ -21,14 +21,29 @@ let workerConnection = null;
 
 if (redisUrl) {
   console.log('🔄 [CallWorker] Creating dedicated Redis connection...');
-  workerConnection = new Redis(redisUrl, {
-    maxRetriesPerRequest: null,
-    retryStrategy: (times) => Math.min(times * 50, 2000),
-    reconnectOnError: (err) => !err.message.includes('READONLY')
-  });
+  
+  // Check if URL uses SSL (rediss://)
+  const isSSL = redisUrl.startsWith('rediss://');
+  if (isSSL) {
+    console.log('🔒 [CallWorker] Detected SSL/TLS Redis connection (rediss://)');
+  }
+  
+  const redisOptions = createRedisOptions();
+  
+  // Configure TLS for SSL connections
+  if (isSSL) {
+    redisOptions.tls = {
+      rejectUnauthorized: false // Allow self-signed certificates (common in managed Redis services)
+    };
+  }
+
+  workerConnection = new Redis(redisUrl, redisOptions);
 
   workerConnection.on('connect', () => console.log('✅ [CallWorker] Dedicated Redis connection established'));
+  workerConnection.on('ready', () => console.log('✅ [CallWorker] ioredis ready to accept commands'));
   workerConnection.on('error', (err) => console.error('❌ [CallWorker] Redis error:', err.message));
+  workerConnection.on('close', () => console.warn('⚠️  [CallWorker] Redis connection closed!'));
+  workerConnection.on('reconnecting', (delay) => console.log(`🔄 [CallWorker] Redis reconnecting in ${delay}ms...`));
 
   workerConnection.once('ready', async () => {
     try {
