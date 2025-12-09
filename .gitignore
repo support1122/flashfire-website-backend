@@ -8,3 +8,4 @@ google-service-key.json
 .env.backup
 .env.cleaned
 env
+.env.o

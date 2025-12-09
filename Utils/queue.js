@@ -41,14 +41,14 @@ const createRedisClient = (urlStr, name = 'Redis') => {
   try {
     const url = new URL(urlStr);
     const host = url.hostname;
+    const port = url.port || 6379;
     const isSSL = url.protocol === 'rediss:';
 
-    // Check if this is a Render external URL
-    const isRenderExternal = host.includes('keyvalue.render.com') || host.includes('render.com');
+    // Check if this is a Render Redis URL
+    const isRender = host.includes('keyvalue.render.com') || host.includes('render.com');
 
     const options = createRedisOptions();
 
-    // Check if URL uses SSL (rediss://)
     if (isSSL) {
       console.log(`🔒 [${name}] Detected SSL/TLS Redis connection (rediss://)`);
       options.tls = {
@@ -56,18 +56,20 @@ const createRedisClient = (urlStr, name = 'Redis') => {
       };
     }
 
-    let connectionUrl = urlStr;
-
-    // Fix for Render Redis: It requires password-only auth (no username)
-    // But standard URLs usually look like rediss://username:password@...
-    // We strip the username to make it rediss://:password@...
-    if (isRenderExternal && url.username) {
-      console.log(`🔧 [${name}] Detected Render Redis - stripping username for compatibility`);
-      url.username = '';
-      connectionUrl = url.toString();
+    if (isRender && url.username && url.password) {
+      console.log(`🔧 [${name}] Detected Render Redis - using ACL authentication (username + password)`);
+      
+      options.host = host;
+      options.port = parseInt(port);
+      options.username = url.username; // Redis 6+ ACL username
+      options.password = url.password;
+      
+      console.log(`📡 [${name}] Connecting to ${host}:${port} with user: ${url.username}`);
+      
+      return new Redis(options);
     }
 
-    return new Redis(connectionUrl, options);
+    return new Redis(urlStr, options);
   } catch (error) {
     console.error(`❌ [${name}] Invalid Redis URL provided:`, error.message);
     return null;
