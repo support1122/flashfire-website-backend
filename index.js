@@ -239,6 +239,7 @@ import emailWorker from './Utils/emailWorker.js';
 import whatsappWorker from './Utils/whatsappWorker.js';
 import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs)
 import { redisConnection } from './Utils/queue.js'; // Import shared ioredis connection
+import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js'; // MongoDB-based scheduler
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -717,38 +718,43 @@ app.post('/calendly-webhook', async (req, res) => {
       )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
       const inviteeEmail = payload?.invitee?.email || payload?.email;
 
-      // Remove old reminder call job - Get jobId from database
-      if (inviteeEmail) {
+      // Remove old reminder call job from BOTH schedulers
+      if (inviteeEmail || inviteePhone) {
         try {
           const existingBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
             .sort({ bookingCreatedAt: -1 });
           
-          if (existingBooking?.reminderCallJobId) {
-            const oldJobId = existingBooking.reminderCallJobId;
-            const oldJob = await callQueue.getJob(oldJobId);
-            
-            if (oldJob) {
-              await oldJob.remove();
-              Logger.info('Removed reminder call job from queue', { 
-                jobId: oldJobId, 
-                phone: inviteePhone 
-              });
-              await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-                `🗑️ Removed reminder call job for canceled meeting. Email: ${inviteeEmail}, Phone: ${inviteePhone}`
-              );
-            } else {
-              Logger.warn('Job not found in queue (may have already executed)', { 
-                jobId: oldJobId, 
-                phone: inviteePhone 
-              });
-            }
-          } else {
-            Logger.warn('No reminderCallJobId found in database for this booking', { 
-              email: inviteeEmail 
+          // Cancel in MongoDB scheduler (PRIMARY)
+          if (inviteePhone && existingBooking?.bookingCreatedAt) {
+            const cancelResult = await cancelCall({
+              phoneNumber: inviteePhone,
+              meetingStartISO: existingBooking.bookingCreatedAt
             });
+            if (cancelResult.success) {
+              Logger.info('Cancelled call in MongoDB scheduler', { callId: cancelResult.callId });
+            }
           }
+          
+          // Cancel in BullMQ scheduler (BACKUP)
+          if (existingBooking?.reminderCallJobId && callQueue) {
+            const oldJobId = existingBooking.reminderCallJobId;
+            try {
+              const oldJob = await callQueue.getJob(oldJobId);
+              if (oldJob) {
+                await oldJob.remove();
+                Logger.info('Removed call job from BullMQ', { jobId: oldJobId });
+              }
+            } catch (bullmqError) {
+              Logger.warn('Could not remove BullMQ job (may not exist)', { error: bullmqError.message });
+            }
+          }
+          
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+            `🗑️ **Call Cancelled**\nEmail: ${inviteeEmail}\nPhone: ${inviteePhone}\nReason: Meeting cancelled`
+          );
+          
         } catch (error) {
-          Logger.error('Failed to remove call job', { 
+          Logger.error('Failed to cancel call job', { 
             error: error.message, 
             phone: inviteePhone,
             email: inviteeEmail 
@@ -1233,86 +1239,108 @@ app.post('/calendly-webhook', async (req, res) => {
 
       // ✅ Only schedule call if delay is positive (meeting is in future)
       if (inviteePhone && phoneRegex.test(inviteePhone) && delay > 0) {
-          // ✅ Use unique jobId: phone + meeting time to prevent collisions
-          const uniqueJobId = `${inviteePhone}_${payload?.scheduled_event?.start_time}`;
           
-          // ✅ Check if job already exists (idempotency check)
-          const existingJob = await callQueue.getJob(uniqueJobId);
-          if (existingJob) {
-            Logger.warn('Call job already exists - skipping duplicate', {
-              jobId: uniqueJobId,
-              phone: inviteePhone,
-              existingJobState: await existingJob.getState()
-            });
-            scheduledJobs.push(`Client: ${inviteePhone} (job already exists)`);
+          // ============================================================
+          // 🔥 PRIMARY: MongoDB-based Scheduler (RELIABLE - No Redis issues)
+          // ============================================================
+          const mongoResult = await scheduleCall({
+            phoneNumber: inviteePhone,
+            meetingStartISO: payload?.scheduled_event?.start_time,
+            meetingTime: meetingTimeIndia,
+            inviteeName,
+            inviteeEmail,
+            source: 'calendly',
+            metadata: {
+              bookingId: newBooking?.bookingId,
+              eventUri: payload?.scheduled_event?.uri
+            }
+          });
+
+          if (mongoResult.success) {
+            console.log('✅ [MongoDB Scheduler] Call scheduled successfully:', mongoResult.callId);
+            scheduledJobs.push(`Client: ${inviteePhone} (MongoDB)`);
+            
+            // Update booking with call ID
+            if (newBooking?.bookingId) {
+              await CampaignBookingModel.findOneAndUpdate(
+                { bookingId: newBooking.bookingId },
+                { reminderCallJobId: mongoResult.callId }
+              );
+            }
           } else {
-            const job = await callQueue.add(
-              'callUser',
-              {
-                phone: inviteePhone,
-                phoneNumber: inviteePhone, // Include both for compatibility with all workers
-                meetingTime: meetingTimeIndia,
-                role: 'client',
-                inviteeEmail,
-                eventStartISO: payload?.scheduled_event?.start_time,
-              },
-              {
-                jobId: uniqueJobId,  // ✅ Unique: phone + meeting time
-                delay,
-                removeOnComplete: true,
-                removeOnFail: 100,
-                attempts: 3,  // ✅ Retry failed calls up to 3 times
-                backoff: {
-                  type: 'exponential',
-                  delay: 60000  // 1 minute, 2 minutes, 4 minutes
-                }
-              }
-            );
-
-            // Store the job ID in the booking record
-            await CampaignBookingModel.findOneAndUpdate(
-              { bookingId: newBooking.bookingId },
-              { reminderCallJobId: job.id.toString() }
-            );
-
-            scheduledJobs.push(`Client: ${inviteePhone}`);
-            
-            // Calculate execution times for verification
-            const callExecutionTime = new Date(Date.now() + delay);
-            const meetingTimeUTC = new Date(payload?.scheduled_event?.start_time);
-            const timeDifference = meetingTimeUTC.getTime() - callExecutionTime.getTime();
-            const minutesDifference = Math.round(timeDifference / 60000);
-
-            console.log('\n📞 ========================================');
-            console.log('📞 [API] Call Reminder Job Scheduled!');
-            console.log('📞 ========================================');
-            console.log('   • Job ID:', job.id);
-            console.log('   • Unique Job ID:', uniqueJobId);
-            console.log('   • Phone:', inviteePhone);
-            console.log('   • Name:', inviteeName);
-            console.log('   • Email:', inviteeEmail);
-            console.log('   • Meeting Time (IST):', meetingTimeIndia);
-            console.log('   • Meeting Time (UTC):', meetingTimeUTC.toISOString());
-            console.log('   • Delay:', Math.round(delay / 1000), 'seconds');
-            console.log('   • Delay:', Math.round(delay / 60000), 'minutes');
-            console.log('   • Call Will Execute At:', callExecutionTime.toISOString());
-            console.log('   • Call Will Execute At (Local):', callExecutionTime.toLocaleString());
-            console.log('   • Time Between Call & Meeting:', minutesDifference, 'minutes');
-            console.log('   • ✅ Expected: Exactly 10 minutes before meeting');
-            console.log('   • Retry attempts: 3 (exponential backoff)');
-            console.log('========================================\n');
-            
-            Logger.info('Valid phone, scheduled call', { 
-              phone: inviteePhone, 
-              delayMs: delay, 
-              jobId: job.id,
-              uniqueJobId,
-              retryAttempts: 3
-            });
-            const scheduledMessage =`📞 Reminder Call Scheduled!\n• Job ID: ${job.id}\n• Unique ID: ${uniqueJobId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reminder: 10 minutes before meeting\n• Retries: 3 attempts`
-            await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
+            console.warn('⚠️ [MongoDB Scheduler] Failed to schedule:', mongoResult.error);
           }
-        } else if (delay <= 0) {
+
+          // ============================================================
+          // 🔄 BACKUP: BullMQ Scheduler (if Redis is available)
+          // ============================================================
+          try {
+            const uniqueJobId = `${inviteePhone}_${payload?.scheduled_event?.start_time}`;
+            
+            // Check if BullMQ job already exists
+            const existingJob = callQueue ? await callQueue.getJob(uniqueJobId) : null;
+            if (existingJob) {
+              Logger.info('BullMQ job already exists - skipping', { jobId: uniqueJobId });
+            } else if (callQueue) {
+              const job = await callQueue.add(
+                'callUser',
+                {
+                  phone: inviteePhone,
+                  phoneNumber: inviteePhone,
+                  meetingTime: meetingTimeIndia,
+                  role: 'client',
+                  inviteeEmail,
+                  eventStartISO: payload?.scheduled_event?.start_time,
+                },
+                {
+                  jobId: uniqueJobId,
+                  delay,
+                  removeOnComplete: true,
+                  removeOnFail: 100,
+                  attempts: 3,
+                  backoff: { type: 'exponential', delay: 60000 }
+                }
+              );
+              console.log('✅ [BullMQ Backup] Also scheduled in BullMQ:', job.id);
+            }
+          } catch (bullmqError) {
+            console.warn('⚠️ [BullMQ Backup] Failed (MongoDB will handle it):', bullmqError.message);
+          }
+            
+          // Calculate execution times for verification
+          const callExecutionTime = new Date(Date.now() + delay);
+          const meetingTimeUTC = new Date(payload?.scheduled_event?.start_time);
+          const timeDifference = meetingTimeUTC.getTime() - callExecutionTime.getTime();
+          const minutesDifference = Math.round(timeDifference / 60000);
+
+          console.log('\n📞 ========================================');
+          console.log('📞 [API] Call Reminder Scheduled!');
+          console.log('📞 ========================================');
+          console.log('   • MongoDB Call ID:', mongoResult.callId);
+          console.log('   • Phone:', inviteePhone);
+          console.log('   • Name:', inviteeName);
+          console.log('   • Email:', inviteeEmail);
+          console.log('   • Meeting Time (IST):', meetingTimeIndia);
+          console.log('   • Meeting Time (UTC):', meetingTimeUTC.toISOString());
+          console.log('   • Delay:', Math.round(delay / 60000), 'minutes');
+          console.log('   • Call Will Execute At:', callExecutionTime.toISOString());
+          console.log('   • Time Between Call & Meeting:', minutesDifference, 'minutes');
+          console.log('   • ✅ Primary: MongoDB Scheduler (RELIABLE)');
+          console.log('   • 🔄 Backup: BullMQ (if Redis works)');
+          console.log('========================================\n');
+            
+          Logger.info('Call scheduled via MongoDB scheduler', { 
+            phone: inviteePhone, 
+            delayMinutes: Math.round(delay / 60000), 
+            callId: mongoResult.callId,
+            retryAttempts: 3
+          });
+          
+          // Send Discord notification
+          const scheduledMessage = `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reminder: 10 minutes before meeting\n• Primary: MongoDB Scheduler ✅\n• Backup: BullMQ 🔄`;
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
+          
+      } else if (delay <= 0) {
           Logger.warn('Skipping call scheduling - meeting too soon or invalid phone', {
             phone: inviteePhone,
             delayMs: delay,
@@ -1400,10 +1428,36 @@ if (!PORT) throw new Error('❌ process.env.PORT is not set. This is required fo
 
 app.listen(PORT || 4001, () => {
   console.log('✅ Server is live at port:', PORT || 4001);
+  
+  // Start MongoDB-based Call Scheduler (RELIABLE ALTERNATIVE TO BULLMQ)
+  // This polls MongoDB every 30 seconds to find and execute due calls
+  console.log('🚀 [Server] Starting MongoDB-based Call Scheduler...');
+  startScheduler();
 });
 
 // Initialize GeoIP after server startup
 initGeoIp();
+
+// -------------------- Scheduler API Endpoints --------------------
+// Get scheduler stats
+app.get('/api/scheduler/stats', async (req, res) => {
+  try {
+    const stats = await getSchedulerStats();
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get upcoming calls
+app.get('/api/scheduler/upcoming', async (req, res) => {
+  try {
+    const calls = await getUpcomingCalls(20);
+    res.json({ success: true, calls });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 
 
