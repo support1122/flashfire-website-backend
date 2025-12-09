@@ -486,6 +486,7 @@ app.post("/api/debug/test-call", async (req, res) => {
       {
         type: "call_reminder",
         phone,
+        phoneNumber: phone, // Include both for compatibility with all workers
         meetingTime: meetingTimeIndia,
         inviteeEmail: email || null,
         eventStartISO: eventStart.toISO(),
@@ -885,6 +886,7 @@ app.post('/calendly-webhook', async (req, res) => {
           'callUser',
           {
             phone: inviteePhone,
+            phoneNumber: inviteePhone, // Include both for compatibility with all workers
             meetingTime: newMeetingTimeIndia,
             role: 'client',
             inviteeEmail,
@@ -1248,6 +1250,7 @@ app.post('/calendly-webhook', async (req, res) => {
               'callUser',
               {
                 phone: inviteePhone,
+                phoneNumber: inviteePhone, // Include both for compatibility with all workers
                 meetingTime: meetingTimeIndia,
                 role: 'client',
                 inviteeEmail,
