@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import WatiService from './WatiService.js';
 import { WhatsAppCampaignModel } from '../Schema_Models/WhatsAppCampaign.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { getRedisUrl } from './queue.js'; // Import helper
+import { getRedisUrl, createRedisOptions } from './queue.js'; // Import helper
 import Redis from 'ioredis';
 
 dotenv.config();
@@ -62,15 +62,29 @@ if (!REDIS_URL) {
     console.warn('⚠️  [WhatsAppWorker] WhatsApp worker disabled');
 } else {
     console.log('🔄 [WhatsAppWorker] Creating dedicated Redis connection...');
+    
+    // Check if URL uses SSL (rediss://)
+    const isSSL = REDIS_URL.startsWith('rediss://');
+    if (isSSL) {
+        console.log('🔒 [WhatsAppWorker] Detected SSL/TLS Redis connection (rediss://)');
+    }
+    
+    const redisOptions = createRedisOptions();
+    
+    // Configure TLS for SSL connections
+    if (isSSL) {
+        redisOptions.tls = {
+            rejectUnauthorized: false // Allow self-signed certificates (common in managed Redis services)
+        };
+    }
 
-    workerConnection = new Redis(REDIS_URL, {
-        maxRetriesPerRequest: null,
-        retryStrategy: (times) => Math.min(times * 50, 2000),
-        reconnectOnError: (err) => !err.message.includes('READONLY')
-    });
+    workerConnection = new Redis(REDIS_URL, redisOptions);
 
     workerConnection.on('connect', () => console.log('✅ [WhatsAppWorker] Dedicated Redis connection established'));
+    workerConnection.on('ready', () => console.log('✅ [WhatsAppWorker] ioredis ready to accept commands'));
     workerConnection.on('error', (err) => console.error('❌ [WhatsAppWorker] Redis error:', err.message));
+    workerConnection.on('close', () => console.warn('⚠️  [WhatsAppWorker] Redis connection closed'));
+    workerConnection.on('reconnecting', (delay) => console.log(`🔄 [WhatsAppWorker] Redis reconnecting in ${delay}ms...`));
 }
 
 // ONLY create worker if Connection is available

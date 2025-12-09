@@ -12,6 +12,27 @@ const getRedisUrl = () => {
   return null;
 };
 
+// Helper function to create Redis connection options with SSL/TLS support
+const createRedisOptions = () => {
+  const baseOptions = {
+    maxRetriesPerRequest: null, // Required by BullMQ
+    retryStrategy: (times) => {
+      const delay = Math.min(times * 50, 2000);
+      return delay;
+    },
+    reconnectOnError: (err) => {
+      const targetError = 'READONLY';
+      if (err.message.includes(targetError)) {
+        console.error('❌ [Redis] Redis is in readonly mode');
+        return false;
+      }
+      return true;
+    }
+  };
+
+  return baseOptions;
+};
+
 const REDIS_URL = getRedisUrl();
 
 let redisConnection = null;
@@ -24,27 +45,30 @@ if (!REDIS_URL) {
   console.warn('⚠️  [CallQueue] Queue features will be disabled without Redis');
 } else {
   console.log('🔄 [CallQueue] Creating shared ioredis connection (producer)...');
+  
+  // Check if URL uses SSL (rediss://)
+  const isSSL = REDIS_URL.startsWith('rediss://');
+  if (isSSL) {
+    console.log('🔒 [CallQueue] Detected SSL/TLS Redis connection (rediss://)');
+  }
 
-  const redisOptions = {
-    maxRetriesPerRequest: null, // Required by BullMQ
-    retryStrategy: (times) => {
-      const delay = Math.min(times * 50, 2000);
-      return delay;
-    },
-    reconnectOnError: (err) => {
-      const targetError = 'READONLY';
-      if (err.message.includes(targetError)) {
-        console.error('❌ [CallQueue] Redis is in readonly mode');
-        return false;
-      }
-      return true;
-    }
-  };
+  const redisOptions = createRedisOptions();
+  
+  // ioredis automatically handles rediss:// URLs and enables TLS
+  // But we can explicitly configure TLS for better compatibility
+  if (isSSL) {
+    redisOptions.tls = {
+      rejectUnauthorized: false // Allow self-signed certificates (common in managed Redis services)
+    };
+  }
 
   redisConnection = new Redis(REDIS_URL, redisOptions);
 
   redisConnection.on('connect', () => console.log('✅ [CallQueue] Shared Redis connection established'));
+  redisConnection.on('ready', () => console.log('✅ [CallQueue] ioredis ready to accept commands'));
   redisConnection.on('error', (err) => console.error('❌ [CallQueue] Shared Redis error:', err.message));
+  redisConnection.on('close', () => console.warn('⚠️  [CallQueue] ioredis connection closed'));
+  redisConnection.on('reconnecting', (delay) => console.log(`🔄 [CallQueue] ioredis reconnecting in ${delay}ms...`));
 
   // Initialize Queues with the shared connection
   callQueue = new Queue('callQueue', { connection: redisConnection });
@@ -54,4 +78,4 @@ if (!REDIS_URL) {
   console.log('✅ [CallQueue] Queues initialized');
 }
 
-export { redisConnection, callQueue, emailQueue, whatsappQueue, getRedisUrl };
+export { redisConnection, callQueue, emailQueue, whatsappQueue, getRedisUrl, createRedisOptions };
