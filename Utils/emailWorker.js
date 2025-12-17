@@ -26,11 +26,28 @@ async function checkUserHasBooking(email) {
     }
 }
 
-async function sendEmail(email, templateId, domainName, templateName) {
+async function sendEmail(email, templateId, domainName, templateName, customSenderEmail = null) {
     try {
+        // Determine sender email with priority:
+        // 1. Custom senderEmail passed to function
+        // 2. If domainName is provided, construct: elizabeth@${domainName}
+        // 3. Default: elizabeth@flashfirehq.com
+        // 4. Fallback to env variable
+        let finalSenderEmail;
+        if (customSenderEmail) {
+            finalSenderEmail = customSenderEmail;
+        } else {
+            const stepDomainName = domainName || process.env.DOMAIN_NAME || null;
+            if (stepDomainName) {
+                finalSenderEmail = `elizabeth@${stepDomainName}`;
+            } else {
+                finalSenderEmail = process.env.SENDER_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'elizabeth@flashfirehq.com';
+            }
+        }
+
         const msg = {
             to: email,
-            from: senderEmail,
+            from: finalSenderEmail,
             templateId: templateId,
             dynamicTemplateData: {
                 domain: domainName
@@ -94,7 +111,8 @@ if (!workerConnection) {
                     templateName,
                     domainName,
                     templateId,
-                    recipientEmails
+                    recipientEmails,
+                    senderEmail: jobSenderEmail
                 } = job.data;
 
                 console.log('\n📥 ========================================');
@@ -186,7 +204,7 @@ if (!workerConnection) {
                         continue;
                     }
 
-                    const sendResult = await sendEmail(trimmedEmail, templateId, domainName, templateName);
+                    const sendResult = await sendEmail(trimmedEmail, templateId, domainName, templateName, jobSenderEmail);
 
                     if (sendResult.success) {
                         results.successful.push({

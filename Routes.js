@@ -1,10 +1,13 @@
 
 import VerifyInterestedClient from "./Middlewares/VerifyInterestedClient.js";
+import { getDashboardData, sendNow, renderDashboard } from "./Controllers/DashboardController.js";
 import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
 import Signup from "./Controllers/Signup.js";
 import GetUsersWithoutBookings from "./Controllers/GetUsersWithoutBookings.js";
 import GetUsersWithoutBookingsDetailed from "./Controllers/GetUsersWithoutBookingsDetailed.js";
+import GetUsersWithoutBookingsPaginated from "./Controllers/GetUsersWithoutBookingsPaginated.js";
+import DeleteUserRecords from "./Controllers/DeleteUserRecords.js";
 import SendEmailCampaign from "./Controllers/SendEmailCampaign.js";
 import GetEmailCampaigns from "./Controllers/GetEmailCampaigns.js";
 import CreateScheduledEmailCampaign from "./Controllers/CreateScheduledEmailCampaign.js";
@@ -31,6 +34,8 @@ import {
 } from "./Controllers/CampaignController.js";
 import {
   getAllBookings,
+  getAllBookingsPaginated,
+  getMeetingsBookedToday,
   getBookingById,
   updateBookingStatus,
   getBookingsByEmail,
@@ -158,6 +163,8 @@ export default function Routes(app) {
   app.post('/signup', Signup);
   app.get('/api/users/without-bookings', GetUsersWithoutBookings);
   app.get('/api/users/without-bookings/detailed', GetUsersWithoutBookingsDetailed);
+  app.get('/api/users/without-bookings/paginated', GetUsersWithoutBookingsPaginated);
+  app.delete('/api/users/delete/:email', DeleteUserRecords);
   app.post('/api/email-campaign/send', SendEmailCampaign);
   app.post('/api/email-campaign/scheduled', CreateScheduledEmailCampaign);
   app.get('/api/email-campaigns', GetEmailCampaigns);
@@ -199,7 +206,9 @@ export default function Routes(app) {
 
   // Booking Management
   app.post('/api/campaign-bookings/manual', createBookingManually); // Create booking manually
-  app.get('/api/campaign-bookings', getAllBookings); // Get all bookings
+  app.get('/api/campaign-bookings', getAllBookings); // Get all bookings (legacy)
+  app.get('/api/campaign-bookings/paginated', getAllBookingsPaginated); // Get paginated bookings with filters
+  app.get('/api/campaign-bookings/today', getMeetingsBookedToday); // Get meetings booked today
   app.get('/api/campaign-bookings/debug/all', async (req, res) => {
     // DEBUG ENDPOINT - Shows ALL bookings with full details
     try {
@@ -271,6 +280,10 @@ export default function Routes(app) {
   app.get('/api/workflow-logs/stats', getWorkflowLogStats); // Get workflow log statistics
   app.get('/api/workflow-logs/:logId', getWorkflowLogById); // Get workflow log by ID
   app.post('/api/workflow-logs/:logId/send-now', sendWorkflowLogNow); // Send workflow log email immediately
+
+  app.get('/details', renderDashboard);
+  app.get('/api/dashboard/data', getDashboardData);
+  app.post('/api/dashboard/send-now', sendNow);
 
   // // Handle Gather result
   // app.post("/twilio/response", (req, res) => {

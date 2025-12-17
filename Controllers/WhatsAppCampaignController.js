@@ -231,49 +231,46 @@ export const createWhatsAppCampaign = async (req, res) => {
         });
       }
 
-      try {
-        for (const day of sendDays) {
-          const scheduledDate = new Date();
-          scheduledDate.setDate(scheduledDate.getDate() + day);
-          
-          // Schedule for 10 AM IST
-          scheduledDate.setHours(10, 0, 0, 0);
+      const { getIST730PM } = await import('../Utils/cronScheduler.js');
+      
+      const now = new Date();
+      let earliestScheduledDate = null;
 
-          const delay = day === 0 ? 0 : scheduledDate.getTime() - Date.now();
+      for (const day of sendDays) {
+        const targetDate = new Date(now);
+        targetDate.setDate(targetDate.getDate() + day);
+        const scheduledDate = getIST730PM(targetDate);
 
-          await whatsappQueue.add(
-            `whatsapp-campaign-${campaign.campaignId}-day-${day}`,
-            {
-              campaignId: campaign.campaignId,
-              sendDay: day,
-              scheduledDate,
-              templateName,
-              parameters,
-              recipientMobiles: uniqueMobiles
-            },
-            {
-              jobId: `${campaign.campaignId}-day-${day}`,
-              delay: delay > 0 ? delay : 0,
-              removeOnComplete: true,
-              removeOnFail: false
-            }
-          );
+        if (!earliestScheduledDate || scheduledDate < earliestScheduledDate) {
+          earliestScheduledDate = scheduledDate;
         }
-      } catch (queueError) {
-        console.error('Failed to add jobs to queue:', queueError.message);
-        campaign.status = 'FAILED';
-        campaign.errorMessage = 'Queue service unavailable. Please configure Redis.';
-        await campaign.save();
-        
-        return res.status(503).json({
-          success: false,
-          message: 'WhatsApp campaign created but queue service is unavailable. Please contact support.',
-          campaign: {
-            campaignId: campaign.campaignId,
-            status: campaign.status
+
+        for (const mobile of uniqueMobiles) {
+          const existingStatus = campaign.messageStatuses.find(
+            m => m.mobileNumber === mobile && m.sendDay === day
+          );
+
+          if (!existingStatus) {
+            campaign.messageStatuses.push({
+              mobileNumber: mobile,
+              status: day === 0 ? 'pending' : 'scheduled',
+              sendDay: day,
+              scheduledSendDate: scheduledDate
+            });
+          } else {
+            existingStatus.scheduledSendDate = scheduledDate;
+            if (day === 0) {
+              existingStatus.status = 'pending';
+            } else {
+              existingStatus.status = 'scheduled';
+            }
           }
-        });
+        }
       }
+
+      campaign.scheduledFor = earliestScheduledDate;
+      campaign.status = 'SCHEDULED';
+      await campaign.save();
 
       return res.status(201).json({
         success: true,
@@ -437,44 +434,12 @@ export const sendWhatsAppCampaignNow = async (req, res) => {
 
     console.log(`Sending campaign ${campaignId} Day ${nextDay} to ${mobilesToSend.length} recipients`);
 
-    // Check if queue is available
-    if (!whatsappQueue) {
-      return res.status(503).json({
-        success: false,
-        message: 'Queue service unavailable. UPSTASH_REDIS_URL not configured.'
-      });
-    }
-
-    // Add job to queue immediately
-    try {
-      await whatsappQueue.add(
-        `whatsapp-campaign-${campaignId}-day-${nextDay}-manual`,
-        {
-          campaignId: campaign.campaignId,
-          sendDay: nextDay,
-          scheduledDate: new Date(),
-          templateName: campaign.templateName,
-          parameters: campaign.parameters || [],
-          recipientMobiles: mobilesToSend
-        },
-        {
-          jobId: `${campaignId}-day-${nextDay}-manual-${Date.now()}`,
-          removeOnComplete: true,
-          removeOnFail: false
-        }
-      );
-
-      // Update campaign status
-      campaign.status = 'IN_PROGRESS';
-      await campaign.save();
-    } catch (queueError) {
-      console.error('Failed to add job to queue:', queueError.message);
-      return res.status(503).json({
-        success: false,
-        message: 'Queue service unavailable. Please configure Redis to send messages.',
-        error: queueError.message
-      });
-    }
+    const { executeWhatsAppCampaign } = await import('../Utils/cronScheduler.js');
+    
+    campaign.status = 'IN_PROGRESS';
+    await campaign.save();
+    
+    await executeWhatsAppCampaign(campaign);
 
     return res.status(200).json({
       success: true,
