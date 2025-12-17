@@ -83,6 +83,9 @@ import { createBullBoard } from '@bull-board/api';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 import { ExpressAdapter } from '@bull-board/express';
 import { callQueue, emailQueue, whatsappQueue, redisConnection } from './Utils/queue.js';
+import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
+import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
+import { requireCrmAdmin, requireCrmUser } from './Middlewares/CrmAuth.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -173,6 +176,17 @@ export default function Routes(app) {
   app.get('/api/email-campaigns/user/:email', GetUserCampaigns);
   app.get('/api/email-campaigns/:campaignId/details/:userEmail', GetCampaignDetails);
   app.post('/api/email-campaign/resend', ResendEmailCampaign);
+
+  // ==================== CRM AUTH (OTP) + ADMIN ====================
+  app.post('/api/crm/admin/login', crmAdminLogin);
+  app.get('/api/crm/admin/users', requireCrmAdmin, listCrmUsers);
+  app.post('/api/crm/admin/users', requireCrmAdmin, createCrmUser);
+  app.put('/api/crm/admin/users/:id', requireCrmAdmin, updateCrmUser);
+  app.delete('/api/crm/admin/users/:id', requireCrmAdmin, deleteCrmUser);
+
+  app.post('/api/crm/auth/request-otp', requestCrmOtp);
+  app.post('/api/crm/auth/verify-otp', verifyCrmOtp);
+  app.get('/api/crm/auth/me', requireCrmUser, crmMe);
   
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);

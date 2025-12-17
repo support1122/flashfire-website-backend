@@ -32,5 +32,10 @@ export const DiscordConnect = async (url,message) => {
   }
 };
 
+// Convenience wrapper for meet/webhook notifications (avoids importing the server entry file and causing circular deps)
+export const DiscordConnectForMeet = async (message) => {
+  return DiscordConnect(process.env.DISCORD_MEET_WEB_HOOK_URL, message);
+};
+
 // Usage
 
