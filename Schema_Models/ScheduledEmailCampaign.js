@@ -17,6 +17,10 @@ export const ScheduledEmailCampaignSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    senderEmail: {
+        type: String,
+        default: null
+    },
     recipientEmails: [{
         type: String,
         required: true

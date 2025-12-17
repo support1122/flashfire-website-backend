@@ -1426,11 +1426,12 @@ Connection();
 const PORT = process.env.PORT;
 if (!PORT) throw new Error('❌ process.env.PORT is not set. This is required for Render deployment.');
 
-app.listen(PORT || 4001, () => {
+app.listen(PORT || 4001, async () => {
   console.log('✅ Server is live at port:', PORT || 4001);
   
-  // Start MongoDB-based Call Scheduler (RELIABLE ALTERNATIVE TO BULLMQ)
-  // This polls MongoDB every 30 seconds to find and execute due calls
+  const { startCronScheduler } = await import('./Utils/cronScheduler.js');
+  startCronScheduler();
+  
   console.log('🚀 [Server] Starting MongoDB-based Call Scheduler...');
   startScheduler();
 });

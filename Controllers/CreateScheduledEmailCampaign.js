@@ -1,25 +1,23 @@
 import { ScheduledEmailCampaignModel } from '../Schema_Models/ScheduledEmailCampaign.js';
-import { emailQueue } from '../Utils/queue.js';
+import { getIST730PM } from '../Utils/cronScheduler.js';
 import { DateTime } from 'luxon';
 
-const SEND_TIME_HOUR = 19;
-const SEND_TIME_MINUTE = 30;
-
 const DAY_GAPS = [0, 4, 3, 7, 14];
+const IST_TIMEZONE = 'Asia/Kolkata';
 
 function calculateSendDates(startDate) {
     const dates = [];
-    let currentDate = DateTime.fromJSDate(startDate).setZone('America/New_York');
+    let currentDate = DateTime.fromJSDate(startDate).setZone(IST_TIMEZONE);
     
     let cumulativeDays = 0;
     for (let i = 0; i < DAY_GAPS.length; i++) {
         cumulativeDays += DAY_GAPS[i];
-        const sendDate = currentDate.plus({ days: cumulativeDays })
-            .set({ hour: SEND_TIME_HOUR, minute: SEND_TIME_MINUTE, second: 0, millisecond: 0 });
+        const targetDate = currentDate.plus({ days: cumulativeDays });
+        const sendDate = getIST730PM(targetDate.toJSDate());
         
         dates.push({
             day: cumulativeDays,
-            scheduledDate: sendDate.toJSDate(),
+            scheduledDate: sendDate,
             status: 'pending',
             sentCount: 0,
             failedCount: 0,
@@ -33,7 +31,7 @@ function calculateSendDates(startDate) {
 
 export default async function CreateScheduledEmailCampaign(req, res) {
     try {
-        const { templateName, domainName, templateId, emailIds } = req.body;
+        const { templateName, domainName, templateId, emailIds, senderEmail: requestSenderEmail } = req.body;
 
         if (!templateName || !domainName || !templateId || !emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
             return res.status(400).json({
@@ -80,70 +78,8 @@ export default async function CreateScheduledEmailCampaign(req, res) {
             }]
         });
 
-        await campaign.save();
-
-        // Check if queue is available
-        if (!emailQueue) {
-            campaign.status = 'failed';
-            campaign.logs.push({
-                timestamp: new Date(),
-                level: 'error',
-                message: 'Queue service unavailable. REDIS_CLOUD_URL not configured.'
-            });
-            await campaign.save();
-            
-            return res.status(503).json({
-                success: false,
-                message: 'Email campaign created but queue service is unavailable. Please configure REDIS_CLOUD_URL.'
-            });
-        }
-
-        for (let i = 0; i < sendSchedule.length; i++) {
-            const scheduleItem = sendSchedule[i];
-            const delay = scheduleItem.scheduledDate.getTime() - Date.now();
-            
-            if (delay < 0) {
-                campaign.logs.push({
-                    timestamp: new Date(),
-                    level: 'warning',
-                    message: `Send date ${scheduleItem.day} is in the past, skipping`,
-                    details: { day: scheduleItem.day, scheduledDate: scheduleItem.scheduledDate }
-                });
-                continue;
-            }
-
-            const job = await emailQueue.add(
-                'send-scheduled-emails',
-                {
-                    campaignId: campaign._id.toString(),
-                    sendDay: scheduleItem.day,
-                    scheduledDate: scheduleItem.scheduledDate,
-                    templateName,
-                    domainName,
-                    templateId,
-                    recipientEmails: uniqueEmails
-                },
-                {
-                    delay,
-                    attempts: 3,
-                    backoff: {
-                        type: 'exponential',
-                        delay: 60000
-                    }
-                }
-            );
-
-            campaign.sendSchedule[i].jobIds.push(job.id);
-            campaign.logs.push({
-                timestamp: new Date(),
-                level: 'info',
-                message: `Scheduled email job created for day ${scheduleItem.day}`,
-                details: {
-                    jobId: job.id,
-                    scheduledDate: scheduleItem.scheduledDate,
-                    delayMs: delay
-                }
-            });
+        if (requestSenderEmail) {
+            campaign.senderEmail = requestSenderEmail;
         }
 
         await campaign.save();

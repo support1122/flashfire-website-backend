@@ -226,7 +226,164 @@ export const saveCalendlyBooking = async (bookingData) => {
   }
 };
 
-// ==================== GET ALL BOOKINGS ====================
+export const getAllBookingsPaginated = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      status,
+      utmSource,
+      search,
+      fromDate,
+      toDate,
+      type = 'all'
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    let query = {};
+
+    if (status && status !== 'all') {
+      query.bookingStatus = status;
+    }
+
+    if (utmSource && utmSource !== 'all') {
+      query.utmSource = utmSource;
+    }
+
+    if (fromDate || toDate) {
+      query.scheduledEventStartTime = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        query.scheduledEventStartTime.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        query.scheduledEventStartTime.$lte = to;
+      }
+    }
+
+    if (search) {
+      query.$or = [
+        { clientName: { $regex: search, $options: 'i' } },
+        { clientEmail: { $regex: search, $options: 'i' } },
+        { utmSource: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    query.scheduledEventStartTime = query.scheduledEventStartTime || { $exists: true, $ne: null };
+
+    const total = await CampaignBookingModel.countDocuments(query);
+
+    const bookings = await CampaignBookingModel.find(query)
+      .select({
+        bookingId: 1,
+        campaignId: 1,
+        utmSource: 1,
+        utmMedium: 1,
+        utmCampaign: 1,
+        utmContent: 1,
+        utmTerm: 1,
+        clientName: 1,
+        clientEmail: 1,
+        clientPhone: 1,
+        calendlyMeetLink: 1,
+        scheduledEventStartTime: 1,
+        scheduledEventEndTime: 1,
+        bookingCreatedAt: 1,
+        bookingStatus: 1,
+        meetingNotes: 1,
+        anythingToKnow: 1,
+        reminderCallJobId: 1,
+        paymentReminders: 1,
+        rescheduledCount: 1,
+        whatsappReminderSent: 1
+      })
+      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      data: bookings,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum)
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching paginated bookings:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch bookings',
+      error: error.message
+    });
+  }
+};
+
+export const getMeetingsBookedToday = async (req, res) => {
+  try {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+
+    const query = {
+      scheduledEventStartTime: {
+        $gte: today,
+        $lt: tomorrow
+      }
+    };
+
+    const bookings = await CampaignBookingModel.find(query)
+      .select({
+        bookingId: 1,
+        campaignId: 1,
+        utmSource: 1,
+        utmMedium: 1,
+        utmCampaign: 1,
+        clientName: 1,
+        clientEmail: 1,
+        clientPhone: 1,
+        calendlyMeetLink: 1,
+        scheduledEventStartTime: 1,
+        scheduledEventEndTime: 1,
+        bookingCreatedAt: 1,
+        bookingStatus: 1,
+        meetingNotes: 1,
+        anythingToKnow: 1,
+        reminderCallJobId: 1,
+        paymentReminders: 1,
+        rescheduledCount: 1,
+        whatsappReminderSent: 1
+      })
+      .sort({ scheduledEventStartTime: 1 })
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      data: bookings,
+      count: bookings.length
+    });
+
+  } catch (error) {
+    console.error('Error fetching meetings booked today:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch meetings booked today',
+      error: error.message
+    });
+  }
+};
+
 export const getAllBookings = async (req, res) => {
   try {
     const { utmSource, status } = req.query;
@@ -235,9 +392,6 @@ export const getAllBookings = async (req, res) => {
     if (utmSource) query.utmSource = utmSource;
     if (status) query.bookingStatus = status;
 
-    // Optimize query: Limit to last 5000 bookings and only fetch needed fields
-    // Sort by scheduledEventStartTime (meeting time) first, then bookingCreatedAt
-    // Note: Using inclusion projection only (cannot mix inclusion/exclusion in MongoDB)
     const bookings = await CampaignBookingModel.find(query)
       .select({
         bookingId: 1,
@@ -257,12 +411,10 @@ export const getAllBookings = async (req, res) => {
         bookingStatus: 1,
         meetingNotes: 1,
         anythingToKnow: 1
-        // Excluded large fields: scheduledWorkflows, paymentReminders, questionsAndAnswers
-        // These are not included in the projection, so they won't be fetched
       })
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
-      .limit(5000) // Limit to prevent huge queries
-      .lean(); // Use lean() for better performance
+      .limit(5000)
+      .lean();
 
     const total = bookings.length;
 

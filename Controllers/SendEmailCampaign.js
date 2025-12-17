@@ -10,7 +10,7 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 export default async function SendEmailCampaign(req, res) {
     try {
         
-        const { domainName, templateName, templateId, emailIds } = req.body;
+        const { domainName, templateName, templateId, emailIds, senderEmail: requestSenderEmail } = req.body;
 
         if (!domainName || !templateId || !emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
             return res.status(400).json({
@@ -19,7 +19,23 @@ export default async function SendEmailCampaign(req, res) {
             });
         }
 
-        const senderEmail = process.env.SENDER_EMAIL || process.env.SENDGRID_FROM_EMAIL;
+        // Determine sender email with priority:
+        // 1. Explicit senderEmail from request
+        // 2. If domainName is provided, construct: elizabeth@${domainName}
+        // 3. Default: elizabeth@flashfirehq.com
+        // 4. Fallback to env variable
+        let senderEmail;
+        if (requestSenderEmail) {
+            senderEmail = requestSenderEmail;
+        } else {
+            const stepDomainName = domainName || process.env.DOMAIN_NAME || null;
+            if (stepDomainName) {
+                senderEmail = `elizabeth@${stepDomainName}`;
+            } else {
+                senderEmail = process.env.SENDER_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'elizabeth@flashfirehq.com';
+            }
+        }
+
         if (!senderEmail) {
             return res.status(500).json({
                 success: false,

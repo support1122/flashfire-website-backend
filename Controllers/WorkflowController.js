@@ -297,17 +297,12 @@ export const triggerWorkflow = async (bookingId, action) => {
       errors: []
     };
 
-    // Process each workflow
+    const { calculateScheduledDate } = await import('../Utils/cronScheduler.js');
+
     for (const workflow of workflows) {
       for (const step of workflow.steps) {
         try {
-          // Calculate execution time
-          const executionDate = new Date();
-          executionDate.setDate(executionDate.getDate() + step.daysAfter);
-
-          // Schedule or execute immediately
           if (step.daysAfter === 0) {
-            // Execute immediately
             await executeWorkflowStep(step, booking, workflow.workflowId, workflow.name, triggerAction);
             results.workflowsTriggered.push({
               workflowId: workflow.workflowId,
@@ -317,8 +312,7 @@ export const triggerWorkflow = async (bookingId, action) => {
               executedAt: new Date()
             });
           } else {
-            // Schedule for later (store in booking or use a job queue)
-            // For now, we'll store scheduled workflow executions
+            const executionDate = calculateScheduledDate(new Date(), step.daysAfter);
             await scheduleWorkflowStep(bookingId, step, workflow.workflowId, executionDate, booking, workflow.name, triggerAction);
             results.workflowsTriggered.push({
               workflowId: workflow.workflowId,
@@ -366,24 +360,13 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
   
   try {
     if (step.channel === 'email') {
-      // Use domainName from step if provided, otherwise fallback to env or default
-      const domainName = step.domainName || process.env.DOMAIN_NAME || 'flashfirejobs.com';
+      const domainName = step.domainName || 'flashfiremails.com';
 
-      // Determine sender email with priority:
-      // 1. Explicit senderEmail from step
-      // 2. If domainName is provided, construct: elizabeth@${domainName}
-      // 3. Default: elizabeth@flashfirehq.com
-      // 4. Fallback to env variable
       let senderEmail;
       if (step.senderEmail) {
         senderEmail = step.senderEmail;
       } else {
-        const stepDomainName = step.domainName || process.env.DOMAIN_NAME || null;
-        if (stepDomainName) {
-          senderEmail = `elizabeth@${stepDomainName}`;
-        } else {
-          senderEmail = process.env.SENDER_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'elizabeth@flashfirehq.com';
-        }
+        senderEmail = process.env.SENDER_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'elizabeth@flashfirehq.com';
       }
 
       if (!senderEmail) {

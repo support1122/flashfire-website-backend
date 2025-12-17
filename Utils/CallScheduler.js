@@ -202,7 +202,7 @@ async function makeCall(scheduledCall) {
 /**
  * Process due calls - called by the polling mechanism
  */
-async function processDueCalls() {
+export async function processDueCalls() {
   try {
     const now = new Date();
 
