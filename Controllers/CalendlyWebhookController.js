@@ -1,7 +1,7 @@
 import { Logger } from '../Utils/Logger.js';
 import { sendNoShowReminder } from '../Utils/WatiHelper.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { DiscordConnectForMeet } from '../index.js';
+import { DiscordConnectForMeet } from '../Utils/DiscordConnect.js';
 
 /**
  * Handle Calendly webhook events
