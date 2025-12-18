@@ -274,6 +274,9 @@ app.use(express.urlencoded({ extended: false }));
 const sentDiscordFingerprints = new Map();
 const DISCORD_DEDUP_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
+const callStatusUpdates = new Map(); // Key: CallSid, Value: Array of status updates
+const CALL_STATUS_TIMEOUT_MS = 2 * 60 * 1000; // 2 minutes timeout to send combined message
+
 function normalizeString(value) {
   if (value === null || value === undefined) return '';
   return String(value).trim().toLowerCase();
@@ -621,6 +624,105 @@ app.post("/api/debug/test-call", async (req, res) => {
   }
 });
 
+function formatTimestamp(timestamp) {
+  let formattedTimestamp;
+  if (timestamp) {
+    try {
+      const timestampDate = new Date(timestamp);
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const day = days[timestampDate.getUTCDay()];
+      const date = String(timestampDate.getUTCDate()).padStart(2, '0');
+      const month = months[timestampDate.getUTCMonth()];
+      const year = timestampDate.getUTCFullYear();
+      const hours = String(timestampDate.getUTCHours()).padStart(2, '0');
+      const minutes = String(timestampDate.getUTCMinutes()).padStart(2, '0');
+      const seconds = String(timestampDate.getUTCSeconds()).padStart(2, '0');
+      formattedTimestamp = `${day}, ${date} ${month} ${year} ${hours}:${minutes}:${seconds} +0000`;
+    } catch (e) {
+      const now = new Date();
+      const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+      const day = days[now.getUTCDay()];
+      const date = String(now.getUTCDate()).padStart(2, '0');
+      const month = months[now.getUTCMonth()];
+      const year = now.getUTCFullYear();
+      const hours = String(now.getUTCHours()).padStart(2, '0');
+      const minutes = String(now.getUTCMinutes()).padStart(2, '0');
+      const seconds = String(now.getUTCSeconds()).padStart(2, '0');
+      formattedTimestamp = `${day}, ${date} ${month} ${year} ${hours}:${minutes}:${seconds} +0000`;
+    }
+  } else {
+    const now = new Date();
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const day = days[now.getUTCDay()];
+    const date = String(now.getUTCDate()).padStart(2, '0');
+    const month = months[now.getUTCMonth()];
+    const year = now.getUTCFullYear();
+    const hours = String(now.getUTCHours()).padStart(2, '0');
+    const minutes = String(now.getUTCMinutes()).padStart(2, '0');
+    const seconds = String(now.getUTCSeconds()).padStart(2, '0');
+    formattedTimestamp = `${day}, ${date} ${month} ${year} ${hours}:${minutes}:${seconds} +0000`;
+  }
+  return formattedTimestamp;
+}
+
+async function sendCombinedCallStatus(callSid, updates) {
+  if (!updates || updates.length === 0) return;
+
+  updates.sort((a, b) => {
+    const timeA = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+    const timeB = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+    return timeA - timeB;
+  });
+
+  let combinedMsg = '';
+  updates.forEach((update, index) => {
+    const formattedTime = formatTimestamp(update.timestamp);
+    combinedMsg += `🚨 App Update: 
+📞 Call Status Update
+To: ${update.to || 'Unknown'}
+From: ${update.from || 'Unknown'}
+Status: ${update.status || 'Unknown'}
+Answered By: ${update.answeredBy || 'Unknown'}
+At: ${formattedTime}
+SID: ${callSid || 'Unknown'}`;
+    
+    if (index < updates.length - 1) {
+      combinedMsg += '\n\n';
+    }
+  });
+
+  const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+  if (discordWebhookUrl) {
+    try {
+      await DiscordConnect(discordWebhookUrl, combinedMsg);
+      console.log(`✅ Combined Discord notification sent for call ${callSid} with ${updates.length} status updates`);
+      Logger.info('Combined call status sent to Discord', { 
+        callSid, 
+        statusCount: updates.length,
+        hasWebhook: !!discordWebhookUrl 
+      });
+    } catch (error) {
+      console.error(`❌ Error sending combined Discord notification:`, error);
+      Logger.error('Error sending combined call status to Discord', { 
+        error: error.message, 
+        callSid 
+      });
+    }
+  } else {
+    console.warn("⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured. Discord notification skipped.");
+    Logger.warn('Discord webhook URL not configured - skipping notification', { callSid });
+  }
+
+  callStatusUpdates.delete(callSid);
+  if (callStatusUpdates.has(callSid + '_timeout')) {
+    clearTimeout(callStatusUpdates.get(callSid + '_timeout'));
+    callStatusUpdates.delete(callSid + '_timeout');
+  }
+}
+
 // POST handler for /call-status (Twilio webhook)
 app.post("/call-status", async (req, res) => {
   const { CallSid, CallStatus, To, From, AnsweredBy, Timestamp } = req.body;
@@ -646,57 +748,45 @@ app.post("/call-status", async (req, res) => {
       Timestamp
     });
 
-    // Get queue statistics for context
-    let queueStats = {};
-    try {
-      const { callQueue } = await import('./Utils/queue.js');
-      queueStats = {
-        waiting: await callQueue?.getWaitingCount() || 0,
-        active: await callQueue?.getActiveCount() || 0,
-        completed: await callQueue?.getCompletedCount() || 0,
-        failed: await callQueue?.getFailedCount() || 0,
-        delayed: await callQueue?.getDelayedCount() || 0
-      };
-    } catch (statsError) {
-      console.warn('Could not fetch queue stats:', statsError.message);
+    if (!CallSid) {
+      console.warn('⚠️ Call status update received without CallSid');
+      return res.status(200).send("✅ Call status received (no CallSid)");
     }
 
-    const totalCalls = (queueStats.waiting || 0) + (queueStats.active || 0) + (queueStats.delayed || 0) + (queueStats.completed || 0) + (queueStats.failed || 0);
+    if (!callStatusUpdates.has(CallSid)) {
+      callStatusUpdates.set(CallSid, []);
+    }
 
-    const msg = `
-📞 **Call Status Update**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📞 **Call Details:**
-• To: ${To}
-• From: ${From}
-• Status: ${CallStatus}
-• Answered By: ${AnsweredBy || "Unknown"}
-• Call SID: ${CallSid}
-• Timestamp: ${Timestamp || new Date().toISOString()}
+    const statusUpdate = {
+      status: CallStatus,
+      to: To,
+      from: From,
+      answeredBy: AnsweredBy,
+      timestamp: Timestamp || new Date().toISOString()
+    };
 
-📊 **Queue Statistics:**
-• Waiting: ${queueStats.waiting || 0}
-• Active: ${queueStats.active || 0}
-• Delayed: ${queueStats.delayed || 0}
-• Completed: ${queueStats.completed || 0}
-• Failed: ${queueStats.failed || 0}
-• **Total Calls: ${totalCalls}**
+    callStatusUpdates.get(CallSid).push(statusUpdate);
 
-⏰ **Update Time:**
-• Received At: ${new Date().toISOString()}
-• Received At (Local): ${new Date().toLocaleString()}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    `.trim();
+    const terminalStatuses = ['completed', 'failed', 'busy', 'no-answer', 'canceled'];
+    const isTerminalStatus = terminalStatuses.includes(CallStatus?.toLowerCase());
 
-    // Send Discord notification if configured
-    const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
-    if (discordWebhookUrl) {
-      Logger.info('Sending call status to Discord', { CallSid, CallStatus, hasWebhook: !!discordWebhookUrl });
-      await DiscordConnect(discordWebhookUrl, msg);
-      console.log('✅ Discord notification sent for call status');
+    if (isTerminalStatus) {
+      const updates = callStatusUpdates.get(CallSid);
+      await sendCombinedCallStatus(CallSid, updates);
     } else {
-      console.warn("⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured. Discord notification skipped.");
-      Logger.warn('Discord webhook URL not configured - skipping notification', { CallSid, CallStatus });
+      if (callStatusUpdates.has(CallSid + '_timeout')) {
+        clearTimeout(callStatusUpdates.get(CallSid + '_timeout'));
+      }
+
+      const timeoutId = setTimeout(async () => {
+        const updates = callStatusUpdates.get(CallSid);
+        if (updates && updates.length > 0) {
+          await sendCombinedCallStatus(CallSid, updates);
+        }
+        callStatusUpdates.delete(CallSid + '_timeout');
+      }, CALL_STATUS_TIMEOUT_MS);
+
+      callStatusUpdates.set(CallSid + '_timeout', timeoutId);
     }
 
     res.status(200).send("✅ Call status received");

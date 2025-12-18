@@ -245,17 +245,9 @@ export async function processDueCalls() {
             }
           );
 
-          // Send success notification
-          if (DISCORD_WEBHOOK) {
-            await DiscordConnect(DISCORD_WEBHOOK,
-              `✅ **Call Completed (MongoDB Scheduler)**\n` +
-              `📞 Phone: ${call.phoneNumber}\n` +
-              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
-              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
-              `📆 Meeting: ${call.meetingTime}\n` +
-              `🎫 Twilio SID: ${result.twilioCallSid}`
-            );
-          }
+          // Note: Discord notification is now sent via Twilio webhook status updates
+          // The /call-status endpoint will send all status updates (initiated, ringing, in-progress, completed)
+          // in the new boilerplate format, so we don't need a separate notification here
         } else {
           // Check if we should retry
           const updatedCall = await ScheduledCallModel.findById(call._id);
