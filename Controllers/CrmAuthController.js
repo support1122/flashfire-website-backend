@@ -65,6 +65,7 @@ export async function verifyCrmOtp(req, res) {
   try {
     const email = normalizeEmail(req.body?.email);
     const otp = String(req.body?.otp || '').trim();
+    const rememberMe = Boolean(req.body?.rememberMe);
 
     if (!email || !isValidEmail(email)) return res.status(400).json({ success: false, error: 'Invalid email' });
     if (!/^\d{6}$/.test(otp)) return res.status(400).json({ success: false, error: 'Invalid OTP' });
@@ -89,6 +90,8 @@ export async function verifyCrmOtp(req, res) {
       return res.status(403).json({ success: false, error: 'User not authorized' });
     }
 
+    const expiresIn = rememberMe ? '30d' : '7d';
+
     const token = jwt.sign(
       {
         role: 'crm_user',
@@ -97,7 +100,7 @@ export async function verifyCrmOtp(req, res) {
         permissions: user.permissions || [],
       },
       getCrmJwtSecret(),
-      { expiresIn: '7d' }
+      { expiresIn }
     );
 
     return res.status(200).json({

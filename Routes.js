@@ -16,7 +16,7 @@ import UpdateScheduledEmailCampaignStatus from "./Controllers/UpdateScheduledEma
 import GetUserCampaigns from "./Controllers/GetUserCampaigns.js";
 import GetCampaignDetails from "./Controllers/GetCampaignDetails.js";
 import ResendEmailCampaign from "./Controllers/ResendEmailCampaign.js";
-import { saveEmailTemplate, getEmailTemplates, deleteEmailTemplate } from "./Controllers/EmailTemplateController.js";
+import { saveEmailTemplate, getEmailTemplates, deleteEmailTemplate, updateEmailTemplateFields } from "./Controllers/EmailTemplateController.js";
 import EmployerForm from "./Controllers/EmployerForm.js";
 import TwilioReminder from "./Controllers/TwilioReminder.js";
 import twilio from 'twilio';
@@ -191,6 +191,7 @@ export default function Routes(app) {
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);
   app.get('/api/email-templates', getEmailTemplates);
+  app.put('/api/email-templates/fields', updateEmailTemplateFields);
   app.delete('/api/email-templates/:templateId', deleteEmailTemplate);
   
   // WhatsApp Campaign Routes
