@@ -3,7 +3,7 @@ import { EmailTemplateModel } from '../Schema_Models/EmailTemplate.js';
 // ==================== SAVE EMAIL TEMPLATE ====================
 export const saveEmailTemplate = async (req, res) => {
   try {
-    const { templateId, templateName, domainName } = req.body;
+    const { templateId, templateName, domainName, senderEmail, senderName } = req.body;
 
     if (!templateId || !templateName || !domainName) {
       return res.status(400).json({
@@ -21,6 +21,12 @@ export const saveEmailTemplate = async (req, res) => {
     if (existingTemplate) {
       // Update existing template
       existingTemplate.templateName = templateName.trim();
+      if (senderEmail !== undefined) {
+        existingTemplate.senderEmail = senderEmail?.trim() || undefined;
+      }
+      if (senderName !== undefined) {
+        existingTemplate.senderName = senderName?.trim() || undefined;
+      }
       existingTemplate.updatedAt = new Date();
       await existingTemplate.save();
 
@@ -35,7 +41,9 @@ export const saveEmailTemplate = async (req, res) => {
     const template = new EmailTemplateModel({
       templateId: templateId.trim(),
       templateName: templateName.trim(),
-      domainName: domainName.trim()
+      domainName: domainName.trim(),
+      senderEmail: senderEmail?.trim() || undefined,
+      senderName: senderName?.trim() || undefined
     });
 
     await template.save();
@@ -79,6 +87,8 @@ export const getEmailTemplates = async (req, res) => {
         name: template.templateName,
         domainName: template.domainName,
         templateId: template.templateId,
+        senderEmail: template.senderEmail,
+        senderName: template.senderName,
         createdAt: template.createdAt
       }))
     });
@@ -88,6 +98,55 @@ export const getEmailTemplates = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch email templates',
+      error: error.message
+    });
+  }
+};
+
+export const updateEmailTemplateFields = async (req, res) => {
+  try {
+    const { templateId, domainName, senderEmail, senderName } = req.body;
+
+    if (!templateId || !domainName) {
+      return res.status(400).json({
+        success: false,
+        message: 'Template ID and Domain Name are required'
+      });
+    }
+
+    const template = await EmailTemplateModel.findOne({
+      templateId: templateId.trim(),
+      domainName: domainName.trim()
+    });
+
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        message: 'Template not found'
+      });
+    }
+
+    // Update only domainName, senderEmail, and senderName (not templateName)
+    if (senderEmail !== undefined) {
+      template.senderEmail = senderEmail?.trim() || undefined;
+    }
+    if (senderName !== undefined) {
+      template.senderName = senderName?.trim() || undefined;
+    }
+    template.updatedAt = new Date();
+    await template.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Email template fields updated successfully',
+      data: template
+    });
+
+  } catch (error) {
+    console.error('Error updating email template fields:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update email template fields',
       error: error.message
     });
   }

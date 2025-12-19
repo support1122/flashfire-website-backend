@@ -17,6 +17,14 @@ export const EmailTemplateSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  senderEmail: {
+    type: String,
+    trim: true
+  },
+  senderName: {
+    type: String,
+    trim: true
+  },
   createdAt: {
     type: Date,
     default: Date.now
