@@ -384,6 +384,82 @@ export const getMeetingsBookedToday = async (req, res) => {
   }
 };
 
+export const getMeetingsByDate = async (req, res) => {
+  try {
+    const { date } = req.query;
+    
+    if (!date) {
+      return res.status(400).json({
+        success: false,
+        message: 'Date parameter is required (format: YYYY-MM-DD)'
+      });
+    }
+
+    // Parse the date and set time boundaries
+    const selectedDate = new Date(date);
+    selectedDate.setHours(0, 0, 0, 0);
+    const nextDay = new Date(selectedDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+
+    const query = {
+      scheduledEventStartTime: {
+        $gte: selectedDate,
+        $lt: nextDay
+      }
+    };
+
+    const bookings = await CampaignBookingModel.find(query)
+      .select({
+        bookingId: 1,
+        campaignId: 1,
+        utmSource: 1,
+        utmMedium: 1,
+        utmCampaign: 1,
+        clientName: 1,
+        clientEmail: 1,
+        clientPhone: 1,
+        calendlyMeetLink: 1,
+        scheduledEventStartTime: 1,
+        scheduledEventEndTime: 1,
+        bookingCreatedAt: 1,
+        bookingStatus: 1,
+        meetingNotes: 1,
+        anythingToKnow: 1,
+        reminderCallJobId: 1,
+        paymentReminders: 1,
+        rescheduledCount: 1,
+        whatsappReminderSent: 1
+      })
+      .sort({ scheduledEventStartTime: 1 })
+      .lean();
+
+    // Calculate breakdown by status
+    const breakdown = {
+      booked: bookings.filter(b => b.bookingStatus === 'scheduled' || !b.bookingStatus).length,
+      cancelled: bookings.filter(b => b.bookingStatus === 'canceled').length,
+      noShow: bookings.filter(b => b.bookingStatus === 'no-show').length,
+      completed: bookings.filter(b => b.bookingStatus === 'completed').length,
+      rescheduled: bookings.filter(b => b.bookingStatus === 'rescheduled').length,
+      total: bookings.length
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: bookings,
+      count: bookings.length,
+      breakdown
+    });
+
+  } catch (error) {
+    console.error('Error fetching meetings by date:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch meetings by date',
+      error: error.message
+    });
+  }
+};
+
 export const getAllBookings = async (req, res) => {
   try {
     const { utmSource, status } = req.query;
