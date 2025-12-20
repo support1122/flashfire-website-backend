@@ -36,6 +36,7 @@ import {
   getAllBookings,
   getAllBookingsPaginated,
   getMeetingsBookedToday,
+  getMeetingsByDate,
   getBookingById,
   updateBookingStatus,
   getBookingsByEmail,
@@ -224,6 +225,7 @@ export default function Routes(app) {
   app.get('/api/campaign-bookings', getAllBookings); // Get all bookings (legacy)
   app.get('/api/campaign-bookings/paginated', getAllBookingsPaginated); // Get paginated bookings with filters
   app.get('/api/campaign-bookings/today', getMeetingsBookedToday); // Get meetings booked today
+  app.get('/api/campaign-bookings/by-date', getMeetingsByDate); // Get meetings by date
   app.get('/api/campaign-bookings/debug/all', async (req, res) => {
     // DEBUG ENDPOINT - Shows ALL bookings with full details
     try {
