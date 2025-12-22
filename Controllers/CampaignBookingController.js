@@ -386,25 +386,35 @@ export const getMeetingsBookedToday = async (req, res) => {
 
 export const getMeetingsByDate = async (req, res) => {
   try {
-    const { date } = req.query;
+    const { date, fromDate, toDate } = req.query;
     
-    if (!date) {
+    // Support both single date and date range
+    let startDate, endDate;
+    
+    if (fromDate && toDate) {
+      // Date range mode
+      startDate = new Date(fromDate);
+      startDate.setHours(0, 0, 0, 0);
+      endDate = new Date(toDate);
+      endDate.setHours(23, 59, 59, 999);
+    } else if (date) {
+      // Single date mode (backward compatibility)
+      startDate = new Date(date);
+      startDate.setHours(0, 0, 0, 0);
+      endDate = new Date(startDate);
+      endDate.setDate(endDate.getDate() + 1);
+      endDate.setHours(0, 0, 0, 0);
+    } else {
       return res.status(400).json({
         success: false,
-        message: 'Date parameter is required (format: YYYY-MM-DD)'
+        message: 'Either date parameter (YYYY-MM-DD) or fromDate and toDate parameters (YYYY-MM-DD) are required'
       });
     }
 
-    // Parse the date and set time boundaries
-    const selectedDate = new Date(date);
-    selectedDate.setHours(0, 0, 0, 0);
-    const nextDay = new Date(selectedDate);
-    nextDay.setDate(nextDay.getDate() + 1);
-
     const query = {
       scheduledEventStartTime: {
-        $gte: selectedDate,
-        $lt: nextDay
+        $gte: startDate,
+        $lte: endDate
       }
     };
 
@@ -447,7 +457,8 @@ export const getMeetingsByDate = async (req, res) => {
       success: true,
       data: bookings,
       count: bookings.length,
-      breakdown
+      breakdown,
+      dateRange: fromDate && toDate ? { fromDate, toDate } : { date }
     });
 
   } catch (error) {

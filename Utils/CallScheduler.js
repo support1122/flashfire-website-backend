@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
+import { scheduleWhatsAppReminder } from './WhatsAppReminderScheduler.js';
+import { DateTime } from 'luxon';
 
 dotenv.config();
 
@@ -36,7 +38,9 @@ export async function scheduleCall({
   inviteeName = null,
   inviteeEmail = null,
   source = 'calendly',
-  metadata = {}
+  metadata = {},
+  meetingLink = null,
+  rescheduleLink = null
 }) {
   try {
     // Validate phone number
@@ -103,6 +107,37 @@ export async function scheduleCall({
         `⏳ In: ${delayMinutes} minutes\n` +
         `🔖 Source: ${source}`
       );
+    }
+
+    // Also schedule WhatsApp reminder 5 minutes before meeting
+    try {
+      // Format meeting date and time for WhatsApp template
+      const meetingStart = new Date(meetingStartISO);
+      const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
+      const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('EEEE, MMMM d, yyyy');
+      const meetingTimeFormatted = meetingStartUTC.setZone('America/New_York').toFormat('h:mm a');
+
+      const whatsappResult = await scheduleWhatsAppReminder({
+        phoneNumber,
+        meetingStartISO,
+        meetingTime: meetingTimeFormatted,
+        meetingDate: meetingDateFormatted,
+        clientName: inviteeName,
+        clientEmail: inviteeEmail,
+        meetingLink: meetingLink || metadata?.meetingLink || null,
+        rescheduleLink: rescheduleLink || metadata?.rescheduleLink || null,
+        source,
+        metadata
+      });
+
+      if (whatsappResult.success) {
+        console.log('✅ [CallScheduler] WhatsApp reminder also scheduled:', whatsappResult.reminderId);
+      } else {
+        console.warn('⚠️ [CallScheduler] Failed to schedule WhatsApp reminder:', whatsappResult.error);
+      }
+    } catch (whatsappError) {
+      console.error('❌ [CallScheduler] Error scheduling WhatsApp reminder:', whatsappError.message);
+      // Don't fail the call scheduling if WhatsApp reminder fails
     }
 
     return { 
