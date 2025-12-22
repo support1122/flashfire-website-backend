@@ -248,12 +248,59 @@ export async function processDueCalls() {
           // Send success notification
           if (DISCORD_WEBHOOK) {
             await DiscordConnect(DISCORD_WEBHOOK,
-              `✅ **Call Completed (MongoDB Scheduler)**\n` +
-              `📞 Phone: ${call.phoneNumber}\n` +
+              // `✅ **Call Completed (MongoDB Scheduler)**\n` +
+              // `📞 Phone: ${call.phoneNumber}\n` +
+              // `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              // `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              // `📆 Meeting: ${call.meetingTime}\n` +
+              // `🎫 Twilio SID: ${result.twilioCallSid}`
+
+              `✅ **Call Status Update (MongoDB Scheduler)**\n` +
+              ` what's app message sent to ${call.phoneNumber} for meeting scheduled at ${call.meetingTime} \n` +
+              `🚨 App Update: initiated\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
               `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: initiated\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
               `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
               `📆 Meeting: ${call.meetingTime}\n` +
-              `🎫 Twilio SID: ${result.twilioCallSid}`
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
+              `🚨 App Update:ringing\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
+              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: ringing\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
+              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              `📆 Meeting: ${call.meetingTime}\n` +
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
+              `🚨 App Update:answered\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
+              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: answered\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
+              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              `📆 Meeting: ${call.meetingTime}\n` +
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
+              `🚨 App Update:completed\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
+              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: completed\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
+              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              `📆 Meeting: ${call.meetingTime}\n` +
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`
             );
           }
         } else {
