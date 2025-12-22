@@ -3,6 +3,8 @@ import dotenv from 'dotenv';
 import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
+import { scheduleWhatsAppReminder } from './WhatsAppReminderScheduler.js';
+import { DateTime } from 'luxon';
 
 dotenv.config();
 
@@ -36,7 +38,9 @@ export async function scheduleCall({
   inviteeName = null,
   inviteeEmail = null,
   source = 'calendly',
-  metadata = {}
+  metadata = {},
+  meetingLink = null,
+  rescheduleLink = null
 }) {
   try {
     // Validate phone number
@@ -103,6 +107,37 @@ export async function scheduleCall({
         `⏳ In: ${delayMinutes} minutes\n` +
         `🔖 Source: ${source}`
       );
+    }
+
+    // Also schedule WhatsApp reminder 5 minutes before meeting
+    try {
+      // Format meeting date and time for WhatsApp template
+      const meetingStart = new Date(meetingStartISO);
+      const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
+      const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('EEEE, MMMM d, yyyy');
+      const meetingTimeFormatted = meetingStartUTC.setZone('America/New_York').toFormat('h:mm a');
+
+      const whatsappResult = await scheduleWhatsAppReminder({
+        phoneNumber,
+        meetingStartISO,
+        meetingTime: meetingTimeFormatted,
+        meetingDate: meetingDateFormatted,
+        clientName: inviteeName,
+        clientEmail: inviteeEmail,
+        meetingLink: meetingLink || metadata?.meetingLink || null,
+        rescheduleLink: rescheduleLink || metadata?.rescheduleLink || null,
+        source,
+        metadata
+      });
+
+      if (whatsappResult.success) {
+        console.log('✅ [CallScheduler] WhatsApp reminder also scheduled:', whatsappResult.reminderId);
+      } else {
+        console.warn('⚠️ [CallScheduler] Failed to schedule WhatsApp reminder:', whatsappResult.error);
+      }
+    } catch (whatsappError) {
+      console.error('❌ [CallScheduler] Error scheduling WhatsApp reminder:', whatsappError.message);
+      // Don't fail the call scheduling if WhatsApp reminder fails
     }
 
     return { 
@@ -248,12 +283,59 @@ export async function processDueCalls() {
           // Send success notification
           if (DISCORD_WEBHOOK) {
             await DiscordConnect(DISCORD_WEBHOOK,
-              `✅ **Call Completed (MongoDB Scheduler)**\n` +
-              `📞 Phone: ${call.phoneNumber}\n` +
+              // `✅ **Call Completed (MongoDB Scheduler)**\n` +
+              // `📞 Phone: ${call.phoneNumber}\n` +
+              // `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              // `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              // `📆 Meeting: ${call.meetingTime}\n` +
+              // `🎫 Twilio SID: ${result.twilioCallSid}`
+
+              `✅ **Call Status Update (MongoDB Scheduler)**\n` +
+              ` what's app message sent to ${call.phoneNumber} for meeting scheduled at ${call.meetingTime} \n` +
+              `🚨 App Update: initiated\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
               `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: initiated\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
               `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
               `📆 Meeting: ${call.meetingTime}\n` +
-              `🎫 Twilio SID: ${result.twilioCallSid}`
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
+              `🚨 App Update:ringing\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
+              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: ringing\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
+              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              `📆 Meeting: ${call.meetingTime}\n` +
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
+              `🚨 App Update:answered\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
+              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: answered\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
+              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              `📆 Meeting: ${call.meetingTime}\n` +
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
+              `🚨 App Update:completed\n` +
+              `📞 To: ${call.phoneNumber}\n` +
+              `👤 From: +14722138424\n` +
+              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
+              `👤 Status: completed\n` +
+              `👤 Answered By: Unknown\n` +
+              `👤 Call SID: ${result.twilioCallSid}\n` +
+              `👤 Timestamp: ${new Date().toISOString()}\n` +
+              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
+              `📆 Meeting: ${call.meetingTime}\n` +
+              `🎫 Twilio SID: ${result.twilioCallSid}\n`
             );
           }
         } else {

@@ -240,6 +240,7 @@ import whatsappWorker from './Utils/whatsappWorker.js';
 import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs)
 import { redisConnection } from './Utils/queue.js'; // Import shared ioredis connection
 import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js'; // MongoDB-based scheduler
+import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderScheduler.js'; // WhatsApp reminder scheduler
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -885,7 +886,34 @@ app.post('/calendly-webhook', async (req, res) => {
           return res.status(200).json({ message: 'Rescheduled but skipped India number' });
         }
 
-        // ✅ Use unique jobId: phone + meeting time to prevent collisions
+        const newMeetLink = payload?.new_invitee?.scheduled_event?.location?.join_url || 
+                           payload?.old_invitee?.scheduled_event?.location?.join_url || 
+                           'Not Provided';
+        const rescheduleLink = payload?.new_invitee?.reschedule_url || 
+                              payload?.old_invitee?.reschedule_url || 
+                              'https://calendly.com/flashfirejobs';
+
+        // Schedule MongoDB call (primary) - this will also schedule WhatsApp reminder
+        const mongoRescheduleResult = await scheduleCall({
+          phoneNumber: inviteePhone,
+          meetingStartISO: newStartTime,
+          meetingTime: newMeetingTimeIndia,
+          inviteeName,
+          inviteeEmail,
+          source: 'reschedule',
+          meetingLink: newMeetLink !== 'Not Provided' ? newMeetLink : null,
+          rescheduleLink: rescheduleLink,
+          metadata: {
+            rescheduledFrom: oldStartTime,
+            rescheduledTo: newStartTime
+          }
+        });
+
+        if (mongoRescheduleResult.success) {
+          console.log('✅ [MongoDB Scheduler] Rescheduled call and WhatsApp reminder scheduled:', mongoRescheduleResult.callId);
+        }
+
+        // ✅ Use unique jobId: phone + meeting time to prevent collisions (BullMQ backup)
         const uniqueJobId = `${inviteePhone}_${newStartTime}`;
         
         const newJob = await callQueue.add(
@@ -915,7 +943,7 @@ app.post('/calendly-webhook', async (req, res) => {
         await CampaignBookingModel.findOneAndUpdate(
           { clientEmail: inviteeEmail },
           { 
-            reminderCallJobId: newJob.id.toString(),
+            reminderCallJobId: mongoRescheduleResult.callId || newJob.id.toString(),
             bookingStatus: 'scheduled'  // Reset to scheduled after successful reschedule
           },
           { sort: { bookingCreatedAt: -1 } }
@@ -1243,6 +1271,8 @@ app.post('/calendly-webhook', async (req, res) => {
           // ============================================================
           // 🔥 PRIMARY: MongoDB-based Scheduler (RELIABLE - No Redis issues)
           // ============================================================
+          const meetingLink = meetLink && meetLink !== 'Not Provided' ? meetLink : null;
+          const rescheduleLink = payload?.old_invitee?.reschedule_url || payload?.new_invitee?.reschedule_url || 'https://calendly.com/flashfirejobs';
           const mongoResult = await scheduleCall({
             phoneNumber: inviteePhone,
             meetingStartISO: payload?.scheduled_event?.start_time,
@@ -1250,6 +1280,8 @@ app.post('/calendly-webhook', async (req, res) => {
             inviteeName,
             inviteeEmail,
             source: 'calendly',
+            meetingLink: meetingLink,
+            rescheduleLink: rescheduleLink,
             metadata: {
               bookingId: newBooking?.bookingId,
               eventUri: payload?.scheduled_event?.uri
@@ -1434,6 +1466,7 @@ app.listen(PORT || 4001, async () => {
   
   console.log('🚀 [Server] Starting MongoDB-based Call Scheduler...');
   startScheduler();
+  startWhatsAppReminderScheduler(); // Start WhatsApp reminder scheduler
 });
 
 // Initialize GeoIP after server startup
