@@ -104,8 +104,31 @@ export const CampaignBookingSchema = new mongoose.Schema({
   // Status tracking
   bookingStatus: {
     type: String,
-    enum: ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'ignored'],
+    enum: ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'ignored', 'paid'],
     default: 'scheduled'
+  },
+  paymentPlan: {
+    name: {
+      type: String,
+      enum: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'],
+      default: null
+    },
+    price: {
+      type: Number,
+      default: null
+    },
+    currency: {
+      type: String,
+      default: 'USD'
+    },
+    displayPrice: {
+      type: String,
+      default: null
+    },
+    selectedAt: {
+      type: Date,
+      default: null
+    }
   },
   // Sync status
   syncedToMicroservice: {
@@ -232,7 +255,7 @@ export const CampaignBookingSchema = new mongoose.Schema({
     },
     status: {
       type: String,
-      enum: ['scheduled', 'executed', 'failed'],
+      enum: ['scheduled', 'executed', 'failed', 'cancelled'],
       default: 'scheduled'
     },
     executedAt: {

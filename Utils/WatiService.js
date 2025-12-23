@@ -11,6 +11,18 @@ class WatiService {
     this.apiBaseUrl = process.env.WATI_API_BASE_URL?.replace(/\/$/, '') || '';
     this.apiToken = process.env.WATI_API_TOKEN || '';
     this.channelNumber = process.env.WATI_CHANNEL_NUMBER || '';
+    this.tenantId = process.env.WATI_TENANT_ID || '';
+    // Try to infer tenantId if not provided but present in base URL (e.g., .../1033833)
+    if (!this.tenantId) {
+      const match = this.apiBaseUrl.match(/\/(\d{5,})$/);
+      if (match) {
+        this.tenantId = match[1];
+      }
+    }
+    // Last-resort fallback if user has explicitly stated tenant id
+    if (!this.tenantId && process.env.WATI_TENANT_FALLBACK) {
+      this.tenantId = process.env.WATI_TENANT_FALLBACK;
+    }
 
     if (!this.apiBaseUrl || !this.apiToken) {
       console.warn('⚠️ WATI_API_BASE_URL and WATI_API_TOKEN must be configured');
@@ -158,31 +170,48 @@ class WatiService {
       // Normalize mobile number - remove + and any non-digits
       const mobile = mobileNumber.replace(/\D/g, '');
 
-      const url = `${this.apiBaseUrl}/api/v2/sendTemplateMessage?whatsappNumber=${mobile}`;
+      const basePath = this.tenantId
+        ? `${this.apiBaseUrl}/${this.tenantId}/api/v2/sendTemplateMessage`
+        : `${this.apiBaseUrl}/api/v2/sendTemplateMessage`;
+      const url = `${basePath}?whatsappNumber=${mobile}`;
 
       // Normalize channel number: digits only, ensure starts with '91'
-      let digitsOnly = this.channelNumber.replace(/\D/g, '');
-      if (!digitsOnly.startsWith('91')) {
+      let digitsOnly = this.channelNumber ? this.channelNumber.replace(/\D/g, '') : '';
+      if (digitsOnly && !digitsOnly.startsWith('91')) {
         digitsOnly = `91${digitsOnly}`;
       }
+
+      const formattedParameters = (parameters || []).map((value, idx) => ({
+        name: `${idx + 1}`,
+        value
+      }));
 
       const messageData = {
         template_name: templateName,
         broadcast_name: `Campaign_${campaignId}_${templateName}`,
-        channel_number: parseInt(digitsOnly),
-        parameters: parameters || []
+        ...(digitsOnly ? { channel_number: parseInt(digitsOnly) } : {}),
+        parameters: formattedParameters
       };
 
       console.log('📤 Sending WATI message:', {
         url,
         mobile,
         templateName,
-        parametersCount: parameters.length
+        parametersCount: formattedParameters.length,
+        hasTenant: !!this.tenantId,
+        payload: messageData
       });
 
       const response = await axios.post(url, messageData, {
         headers: this.headers,
         timeout: 15000
+      });
+
+      console.log('📥 WATI response:', {
+        status: response.status,
+        result: response.data?.result,
+        message: response.data?.message,
+        data: response.data
       });
 
       if (response.status >= 200 && response.status < 300) {
@@ -205,7 +234,13 @@ class WatiService {
         };
       }
     } catch (error) {
-      console.error('❌ Error sending WATI message:', error.message);
+      console.error('❌ Error sending WATI message:', error.message, {
+        responseStatus: error.response?.status,
+        responseData: error.response?.data,
+        responseText: error.response?.data ? JSON.stringify(error.response.data) : '',
+        url: error.config?.url,
+        requestPayload: error.config?.data
+      });
       return {
         success: false,
         error: error.response?.data?.message || error.message

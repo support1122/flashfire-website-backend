@@ -118,7 +118,7 @@ export async function scheduleWhatsAppReminder({
 }
 
 /**
- * Cancel a scheduled WhatsApp reminder
+ * Cancel a scheduled WhatsApp reminder by phoneNumber and meetingStartISO
  */
 export async function cancelWhatsAppReminder({ phoneNumber, meetingStartISO }) {
   try {
@@ -140,6 +140,76 @@ export async function cancelWhatsAppReminder({ phoneNumber, meetingStartISO }) {
     }
   } catch (error) {
     console.error('❌ [WhatsAppReminderScheduler] Error cancelling reminder:', error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Cancel all scheduled WhatsApp reminders for a client (by email or phoneNumber)
+ * Used when booking status changes to "paid" or "canceled"
+ */
+export async function cancelWhatsAppRemindersForClient({ clientEmail = null, phoneNumber = null, meetingStartISO = null }) {
+  try {
+    const query = {
+      status: { $in: ['pending', 'processing'] } // Only cancel pending or processing reminders
+    };
+
+    // Build query based on available parameters
+    if (clientEmail) {
+      query.clientEmail = clientEmail.toLowerCase().trim();
+    }
+    if (phoneNumber) {
+      query.phoneNumber = phoneNumber;
+    }
+    if (meetingStartISO) {
+      query.meetingStartISO = new Date(meetingStartISO);
+    }
+
+    // Find all matching reminders
+    const reminders = await ScheduledWhatsAppReminderModel.find(query);
+
+    if (reminders.length === 0) {
+      console.log('ℹ️ [WhatsAppReminderScheduler] No pending reminders found to cancel for client:', { clientEmail, phoneNumber });
+      return { success: true, cancelledCount: 0, message: 'No reminders found' };
+    }
+
+    // Cancel all matching reminders
+    const updateResult = await ScheduledWhatsAppReminderModel.updateMany(
+      query,
+      { 
+        status: 'cancelled',
+        errorMessage: 'Cancelled: Booking status changed to paid'
+      }
+    );
+
+    const cancelledCount = updateResult.modifiedCount;
+
+    console.log(`✅ [WhatsAppReminderScheduler] Cancelled ${cancelledCount} reminder(s) for client:`, { clientEmail, phoneNumber });
+
+    // Send Discord notification if reminders were cancelled
+    if (cancelledCount > 0 && DISCORD_WEBHOOK) {
+      await DiscordConnect(DISCORD_WEBHOOK,
+        `🚫 **WhatsApp Reminders Cancelled**\n` +
+        `📧 Email: ${clientEmail || 'Unknown'}\n` +
+        `📞 Phone: ${phoneNumber || 'Unknown'}\n` +
+        `❌ Cancelled: ${cancelledCount} reminder(s)\n` +
+        `📝 Reason: Booking status changed to paid`
+      );
+    }
+
+    return { 
+      success: true, 
+      cancelledCount,
+      reminderIds: reminders.map(r => r.reminderId)
+    };
+
+  } catch (error) {
+    console.error('❌ [WhatsAppReminderScheduler] Error cancelling reminders for client:', error);
+    Logger.error('[WhatsAppReminderScheduler] Error cancelling reminders for client', { 
+      error: error.message, 
+      clientEmail, 
+      phoneNumber 
+    });
     return { success: false, error: error.message };
   }
 }
@@ -386,6 +456,7 @@ export async function getUpcomingWhatsAppReminders(limit = 20) {
 export default {
   scheduleWhatsAppReminder,
   cancelWhatsAppReminder,
+  cancelWhatsAppRemindersForClient,
   startWhatsAppReminderScheduler,
   stopWhatsAppReminderScheduler,
   getWhatsAppReminderSchedulerStats,
