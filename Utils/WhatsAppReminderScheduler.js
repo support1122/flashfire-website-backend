@@ -92,14 +92,13 @@ export async function scheduleWhatsAppReminder({
 
     if (DISCORD_WEBHOOK) {
       await DiscordConnect(DISCORD_WEBHOOK, 
-        `📱 **WhatsApp Reminder Scheduled (MongoDB)**\n` +
-        `📞 Phone: ${phoneNumber}\n` +
-        `👤 Name: ${clientName || 'Unknown'}\n` +
-        `📧 Email: ${clientEmail || 'Unknown'}\n` +
-        `⏰ Reminder at: ${reminderTime.toISOString()}\n` +
-        `📆 Meeting: ${meetingDate} at ${meetingTime}\n` +
-        `⏳ In: ${delayMinutes} minutes\n` +
-        `🔖 Source: ${source}`
+        `⏰ WA reminder scheduled (${source})\n` +
+        `📞 ${phoneNumber} • ${clientName || 'Unknown'}\n` +
+        `📧 ${clientEmail || 'Unknown'}\n` +
+        `🗓️ ${meetingDate} @ ${meetingTime}\n` +
+        `➡️ reminder at ${reminderTime.toISOString()}\n` +
+        `🔗 join: ${meetingLink || 'n/a'} | resched: ${finalRescheduleLink || 'n/a'}\n` +
+        `⏳ in ${delayMinutes}m`
       );
     }
 
@@ -317,15 +316,12 @@ export async function processDueWhatsAppReminders() {
           // Send success notification to Discord
           if (DISCORD_WEBHOOK) {
             await DiscordConnect(DISCORD_WEBHOOK,
-              `✅ **WhatsApp Reminder Sent (MongoDB Scheduler)**\n` +
-              `📱 WhatsApp message sent to ${reminder.phoneNumber} for meeting scheduled at ${reminder.meetingTime}\n` +
-              `👤 Name: ${reminder.clientName || 'Unknown'}\n` +
-              `📧 Email: ${reminder.clientEmail || 'Unknown'}\n` +
-              `📆 Meeting: ${reminder.meetingDate} at ${reminder.meetingTime}\n` +
-              `🔗 Meeting Link: ${reminder.meetingLink || 'Not Provided'}\n` +
-              `📱 Template: flashfire_appointment_reminder\n` +
-              `🎫 Reminder ID: ${reminder.reminderId}\n` +
-              `⏰ Sent at: ${new Date().toISOString()}`
+              `✅ WA reminder sent\n` +
+              `📞 ${reminder.phoneNumber} • ${reminder.clientName || 'Unknown'}\n` +
+              `📧 ${reminder.clientEmail || 'Unknown'}\n` +
+              `🗓️ ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
+              `🔗 join: ${reminder.meetingLink || 'n/a'} | resched: ${reminder.rescheduleLink || 'n/a'}\n` +
+              `⏰ ${new Date().toISOString()}`
             );
           }
         } else {
@@ -345,13 +341,12 @@ export async function processDueWhatsAppReminders() {
             // Send failure notification
             if (DISCORD_WEBHOOK) {
               await DiscordConnect(DISCORD_WEBHOOK,
-                `❌ **WhatsApp Reminder Failed (MongoDB Scheduler)**\n` +
-                `📞 Phone: ${reminder.phoneNumber}\n` +
-                `👤 Name: ${reminder.clientName || 'Unknown'}\n` +
-                `📧 Email: ${reminder.clientEmail || 'Unknown'}\n` +
-                `📆 Meeting: ${reminder.meetingTime}\n` +
-                `❗ Error: ${result.error}\n` +
-                `🔄 Attempts: ${updatedReminder.attempts}/${updatedReminder.maxAttempts}`
+                `❌ WA reminder failed\n` +
+                `📞 ${reminder.phoneNumber} • ${reminder.clientName || 'Unknown'}\n` +
+                `📧 ${reminder.clientEmail || 'Unknown'}\n` +
+                `🗓️ ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
+                `⚠️ ${result.error}\n` +
+                `🔄 ${updatedReminder.attempts}/${updatedReminder.maxAttempts}`
               );
             }
           } else {

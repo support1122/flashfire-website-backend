@@ -1,4 +1,5 @@
 import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
+import { ScheduledWhatsAppReminderModel } from '../Schema_Models/ScheduledWhatsAppReminder.js';
 import { WorkflowLogModel } from '../Schema_Models/WorkflowLog.js';
 import { ScheduledEmailCampaignModel } from '../Schema_Models/ScheduledEmailCampaign.js';
 import { WhatsAppCampaignModel } from '../Schema_Models/WhatsAppCampaign.js';
@@ -104,6 +105,30 @@ export async function getDashboardData(req, res) {
 
       stats = { scheduled, inProgress, completed, failed, total };
       data = { campaigns, pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) } };
+    }
+
+    if (category === 'whatsapp-reminders') {
+      const query = status ? { status } : {};
+      const [reminders, total] = await Promise.all([
+        ScheduledWhatsAppReminderModel.find(query)
+          .sort({ scheduledFor: -1 })
+          .skip(skip)
+          .limit(limitNum)
+          .lean(),
+        ScheduledWhatsAppReminderModel.countDocuments(query)
+      ]);
+
+      const [pending, processing, completed, failed, cancelled, skipped] = await Promise.all([
+        ScheduledWhatsAppReminderModel.countDocuments({ status: 'pending' }),
+        ScheduledWhatsAppReminderModel.countDocuments({ status: 'processing' }),
+        ScheduledWhatsAppReminderModel.countDocuments({ status: 'completed' }),
+        ScheduledWhatsAppReminderModel.countDocuments({ status: 'failed' }),
+        ScheduledWhatsAppReminderModel.countDocuments({ status: 'cancelled' }),
+        ScheduledWhatsAppReminderModel.countDocuments({ status: 'skipped' })
+      ]);
+
+      stats = { pending, processing, completed, failed, cancelled, skipped, total };
+      data = { reminders, pagination: { page: pageNum, limit: limitNum, total, pages: Math.ceil(total / limitNum) } };
     }
 
     return res.json({ success: true, category, stats, data });
@@ -377,6 +402,7 @@ export async function renderDashboard(req, res) {
             <a href="/details?category=workflows" class="tab ${category === 'workflows' ? 'active' : ''}">📧 Workflows</a>
             <a href="/details?category=email-campaigns" class="tab ${category === 'email-campaigns' ? 'active' : ''}">✉️ Email Campaigns</a>
             <a href="/details?category=whatsapp-campaigns" class="tab ${category === 'whatsapp-campaigns' ? 'active' : ''}">💬 WhatsApp Campaigns</a>
+            <a href="/details?category=whatsapp-reminders" class="tab ${category === 'whatsapp-reminders' ? 'active' : ''}">⏰ WA Reminders</a>
         </div>
 
         <div id="stats"></div>
@@ -421,6 +447,7 @@ export async function renderDashboard(req, res) {
             if (cat === 'workflows') filters.push(['', 'All'], ['scheduled', 'Scheduled'], ['executed', 'Executed'], ['failed', 'Failed']);
             if (cat === 'email-campaigns') filters.push(['', 'All'], ['active', 'Active'], ['completed', 'Completed'], ['failed', 'Failed']);
             if (cat === 'whatsapp-campaigns') filters.push(['', 'All'], ['SCHEDULED', 'Scheduled'], ['IN_PROGRESS', 'In Progress'], ['COMPLETED', 'Completed'], ['FAILED', 'Failed']);
+            if (cat === 'whatsapp-reminders') filters.push(['', 'All'], ['pending', 'Pending'], ['processing', 'Processing'], ['completed', 'Completed'], ['failed', 'Failed'], ['cancelled', 'Cancelled'], ['skipped', 'Skipped']);
 
             const filtersHtml = '<div class="filters">' + filters.map(([val, label]) => 
                 \`<a href="/details?category=\${cat}&status=\${val}" class="filter-btn \${status === val ? 'active' : ''}">\${label}</a>\`
@@ -495,6 +522,24 @@ export async function renderDashboard(req, res) {
                         <td>\${campaign.failedCount || 0}</td>
                         <td><span class="badge \${campaign.status}">\${campaign.status}</span></td>
                         <td><button class="btn btn-primary" onclick="sendNow('whatsapp-campaign', '\${campaign.campaignId}')">Send Now</button></td>
+                    </tr>\`;
+                });
+            }
+
+            if (cat === 'whatsapp-reminders') {
+                tableHtml += '<th>Phone</th><th>Name</th><th>Email</th><th>Status</th><th>Meeting</th><th>Reminder Time</th><th>Attempts</th><th>Source</th></tr></thead><tbody>';
+                data.reminders.forEach(reminder => {
+                    const scheduledDate = reminder.scheduledFor ? new Date(reminder.scheduledFor).toLocaleString() : '';
+                    const meetingDate = reminder.meetingStartISO ? new Date(reminder.meetingStartISO).toLocaleString() : '';
+                    tableHtml += \`<tr>
+                        <td>\${reminder.phoneNumber}</td>
+                        <td>\${reminder.clientName || 'N/A'}</td>
+                        <td>\${reminder.clientEmail || 'N/A'}</td>
+                        <td><span class="badge \${reminder.status?.toUpperCase() || ''}">\${reminder.status || ''}</span></td>
+                        <td>\${meetingDate}</td>
+                        <td>\${scheduledDate}</td>
+                        <td>\${reminder.attempts || 0}/\${reminder.maxAttempts || 3}</td>
+                        <td>\${reminder.source || ''}</td>
                     </tr>\`;
                 });
             }

@@ -50,7 +50,10 @@ class WatiService {
    */
   async getTemplates() {
     try {
-      const url = `${this.apiBaseUrl}/api/v1/getMessageTemplates`;
+      const basePath = this.tenantId
+        ? `${this.apiBaseUrl}/${this.tenantId}/api/v1/getMessageTemplates`
+        : `${this.apiBaseUrl}/api/v1/getMessageTemplates`;
+      const url = basePath;
       const response = await axios.get(url, { 
         headers: this.headers,
         timeout: 10000
