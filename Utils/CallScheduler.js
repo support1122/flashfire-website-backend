@@ -291,7 +291,7 @@ export async function processDueCalls() {
               // `🎫 Twilio SID: ${result.twilioCallSid}`
 
               `✅ **Call Status Update (MongoDB Scheduler)**\n` +
-              ` what's app message sent to ${call.phoneNumber} for meeting scheduled at ${call.meetingTime} \n` +
+              // ` what's app message sent to ${call.phoneNumber} for meeting scheduled at ${call.meetingTime} \n` +
               `🚨 App Update: initiated\n` +
               `📞 To: ${call.phoneNumber}\n` +
               `👤 From: +14722138424\n` +

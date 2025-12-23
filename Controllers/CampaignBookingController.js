@@ -4,6 +4,16 @@ import { UserModel } from '../Schema_Models/User.js';
 import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
 import { triggerWorkflow } from './WorkflowController.js';
+import { cancelWhatsAppRemindersForClient } from '../Utils/WhatsAppReminderScheduler.js';
+import { cancelCall } from '../Utils/CallScheduler.js';
+import { Logger } from '../Utils/Logger.js';
+
+const PLAN_CATALOG = {
+  PRIME: { price: 119, currency: 'USD', displayPrice: '$119' },
+  IGNITE: { price: 199, currency: 'USD', displayPrice: '$199' },
+  PROFESSIONAL: { price: 349, currency: 'USD', displayPrice: '$349' },
+  EXECUTIVE: { price: 599, currency: 'USD', displayPrice: '$599' },
+};
 
 // ==================== SAVE CALENDLY BOOKING WITH UTM ====================
 export const saveCalendlyBooking = async (bookingData) => {
@@ -236,7 +246,8 @@ export const getAllBookingsPaginated = async (req, res) => {
       search,
       fromDate,
       toDate,
-      type = 'all'
+      type = 'all',
+      planName
     } = req.query;
 
     const pageNum = parseInt(page);
@@ -244,6 +255,7 @@ export const getAllBookingsPaginated = async (req, res) => {
     const skip = (pageNum - 1) * limitNum;
 
     let query = {};
+    const normalizedPlanName = planName ? String(planName).toUpperCase() : null;
 
     if (status && status !== 'all') {
       query.bookingStatus = status;
@@ -251,6 +263,10 @@ export const getAllBookingsPaginated = async (req, res) => {
 
     if (utmSource && utmSource !== 'all') {
       query.utmSource = utmSource;
+    }
+
+    if (normalizedPlanName && normalizedPlanName !== 'ALL') {
+      query['paymentPlan.name'] = normalizedPlanName;
     }
 
     if (fromDate || toDate) {
@@ -296,6 +312,7 @@ export const getAllBookingsPaginated = async (req, res) => {
         scheduledEventEndTime: 1,
         bookingCreatedAt: 1,
         bookingStatus: 1,
+      paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1,
         reminderCallJobId: 1,
@@ -358,6 +375,7 @@ export const getMeetingsBookedToday = async (req, res) => {
         scheduledEventEndTime: 1,
         bookingCreatedAt: 1,
         bookingStatus: 1,
+      paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1,
         reminderCallJobId: 1,
@@ -433,6 +451,7 @@ export const getMeetingsByDate = async (req, res) => {
         scheduledEventEndTime: 1,
         bookingCreatedAt: 1,
         bookingStatus: 1,
+      paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1,
         reminderCallJobId: 1,
@@ -473,11 +492,15 @@ export const getMeetingsByDate = async (req, res) => {
 
 export const getAllBookings = async (req, res) => {
   try {
-    const { utmSource, status } = req.query;
+    const { utmSource, status, planName } = req.query;
 
     let query = {};
+    const normalizedPlanName = planName ? String(planName).toUpperCase() : null;
     if (utmSource) query.utmSource = utmSource;
     if (status) query.bookingStatus = status;
+    if (normalizedPlanName) {
+      query['paymentPlan.name'] = normalizedPlanName;
+    }
 
     const bookings = await CampaignBookingModel.find(query)
       .select({
@@ -496,6 +519,7 @@ export const getAllBookings = async (req, res) => {
         scheduledEventEndTime: 1,
         bookingCreatedAt: 1,
         bookingStatus: 1,
+        paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1
       })
@@ -570,9 +594,9 @@ export const getBookingById = async (req, res) => {
 export const updateBookingStatus = async (req, res) => {
   try {
     const { bookingId } = req.params;
-    const { status } = req.body;
+    const { status, plan } = req.body;
 
-    const validStatuses = ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show'];
+    const validStatuses = ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid', 'ignored'];
 
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
@@ -581,17 +605,215 @@ export const updateBookingStatus = async (req, res) => {
       });
     }
 
-    const booking = await CampaignBookingModel.findOneAndUpdate(
-      { bookingId },
-      { bookingStatus: status },
-      { new: true }
-    );
-
-    if (!booking) {
+    // Get booking before update to access client details
+    const existingBooking = await CampaignBookingModel.findOne({ bookingId });
+    if (!existingBooking) {
       return res.status(404).json({
         success: false,
         message: 'Booking not found'
       });
+    }
+
+    let paymentPlanUpdate = null;
+
+    if (status === 'paid') {
+      const normalizedPlanName = plan?.name ? String(plan.name).toUpperCase() : null;
+      if (!normalizedPlanName || !PLAN_CATALOG[normalizedPlanName]) {
+        return res.status(400).json({
+          success: false,
+          message: 'A valid plan is required when marking a booking as paid'
+        });
+      }
+
+      const catalogPlan = PLAN_CATALOG[normalizedPlanName];
+      paymentPlanUpdate = {
+        name: normalizedPlanName,
+        price: plan?.price ?? catalogPlan.price,
+        currency: plan?.currency || catalogPlan.currency,
+        displayPrice: plan?.displayPrice || catalogPlan.displayPrice,
+        selectedAt: new Date()
+      };
+    }
+
+    const updatePayload = {
+      bookingStatus: status
+    };
+
+    if (paymentPlanUpdate) {
+      updatePayload.paymentPlan = paymentPlanUpdate;
+    }
+
+    // Update booking status
+    const booking = await CampaignBookingModel.findOneAndUpdate(
+      { bookingId },
+      { $set: updatePayload },
+      { new: true }
+    );
+
+    // If status changed to "paid", cancel all scheduled reminders for this client
+    if (status === 'paid') {
+      try {
+        const cancellationResults = {
+          whatsappReminders: { cancelled: 0 },
+          callReminders: { cancelled: 0 },
+          paymentReminders: { cancelled: 0 },
+          scheduledWorkflows: { cancelled: 0 }
+        };
+
+        // Cancel WhatsApp reminders
+        if (existingBooking.clientEmail || existingBooking.clientPhone) {
+          const whatsappResult = await cancelWhatsAppRemindersForClient({
+            clientEmail: existingBooking.clientEmail,
+            phoneNumber: existingBooking.clientPhone,
+            meetingStartISO: existingBooking.scheduledEventStartTime
+          });
+
+          if (whatsappResult.success && whatsappResult.cancelledCount > 0) {
+            cancellationResults.whatsappReminders.cancelled = whatsappResult.cancelledCount;
+            Logger.info('WhatsApp reminders cancelled for paid booking', {
+              bookingId,
+              clientEmail: existingBooking.clientEmail,
+              cancelledCount: whatsappResult.cancelledCount
+            });
+          }
+        }
+
+        // Cancel call reminders (if reminderCallJobId exists)
+        if (existingBooking.reminderCallJobId && callQueue) {
+          try {
+            const callJob = await callQueue.getJob(existingBooking.reminderCallJobId);
+            if (callJob) {
+              await callJob.remove();
+              cancellationResults.callReminders.cancelled = 1;
+              Logger.info('Call reminder job cancelled for paid booking', {
+                bookingId,
+                jobId: existingBooking.reminderCallJobId
+              });
+            }
+          } catch (callError) {
+            Logger.warn('Could not cancel call reminder job (may not exist)', {
+              bookingId,
+              jobId: existingBooking.reminderCallJobId,
+              error: callError.message
+            });
+          }
+        }
+
+        // Also try to cancel via CallScheduler if phone and meeting time are available
+        if (existingBooking.clientPhone && existingBooking.scheduledEventStartTime) {
+          try {
+            const callCancelResult = await cancelCall({
+              phoneNumber: existingBooking.clientPhone,
+              meetingStartISO: existingBooking.scheduledEventStartTime
+            });
+            if (callCancelResult.success) {
+              cancellationResults.callReminders.cancelled += 1;
+            }
+          } catch (callError) {
+            Logger.warn('Error cancelling call via CallScheduler', {
+              bookingId,
+              error: callError.message
+            });
+          }
+        }
+
+        // Cancel payment reminders (email reminders)
+        if (existingBooking.paymentReminders && existingBooking.paymentReminders.length > 0) {
+          const scheduledPaymentReminders = existingBooking.paymentReminders.filter(
+            pr => pr.status === 'scheduled'
+          );
+
+          if (scheduledPaymentReminders.length > 0) {
+            for (const paymentReminder of scheduledPaymentReminders) {
+              try {
+                // Remove job from queue
+                if (paymentReminder.jobId && callQueue) {
+                  const paymentJob = await callQueue.getJob(paymentReminder.jobId);
+                  if (paymentJob) {
+                    await paymentJob.remove();
+                  }
+                }
+
+                // Update status to cancelled in database
+                await CampaignBookingModel.updateOne(
+                  {
+                    bookingId,
+                    'paymentReminders.jobId': paymentReminder.jobId
+                  },
+                  {
+                    $set: {
+                      'paymentReminders.$.status': 'cancelled'
+                    }
+                  }
+                );
+
+                cancellationResults.paymentReminders.cancelled += 1;
+              } catch (paymentError) {
+                Logger.warn('Error cancelling payment reminder', {
+                  bookingId,
+                  jobId: paymentReminder.jobId,
+                  error: paymentError.message
+                });
+              }
+            }
+
+            Logger.info('Payment reminders cancelled for paid booking', {
+              bookingId,
+              cancelledCount: cancellationResults.paymentReminders.cancelled
+            });
+          }
+        }
+
+        // Cancel scheduled workflows (email and WhatsApp workflows)
+        if (existingBooking.scheduledWorkflows && existingBooking.scheduledWorkflows.length > 0) {
+          const scheduledWorkflows = existingBooking.scheduledWorkflows.filter(
+            sw => sw.status === 'scheduled'
+          );
+
+          if (scheduledWorkflows.length > 0) {
+            // Update all scheduled workflows to cancelled status
+            for (const workflow of scheduledWorkflows) {
+              try {
+                await CampaignBookingModel.updateOne(
+                  {
+                    bookingId,
+                    'scheduledWorkflows._id': workflow._id
+                  },
+                  {
+                    $set: {
+                      'scheduledWorkflows.$.status': 'cancelled',
+                      'scheduledWorkflows.$.error': 'Cancelled: Booking status changed to paid'
+                    }
+                  }
+                );
+
+                cancellationResults.scheduledWorkflows.cancelled += 1;
+              } catch (workflowError) {
+                Logger.warn('Error cancelling scheduled workflow', {
+                  bookingId,
+                  workflowId: workflow.workflowId,
+                  error: workflowError.message
+                });
+              }
+            }
+
+            Logger.info('Scheduled workflows cancelled for paid booking', {
+              bookingId,
+              cancelledCount: cancellationResults.scheduledWorkflows.cancelled
+            });
+          }
+        }
+
+        console.log(`✅ Cancelled all reminders and workflows for paid booking ${bookingId}:`, cancellationResults);
+      } catch (cancellationError) {
+        // Log error but don't fail the status update
+        Logger.error('Error cancelling reminders and workflows for paid booking', {
+          bookingId,
+          error: cancellationError.message,
+          stack: cancellationError.stack
+        });
+        console.error('⚠️ Failed to cancel reminders and workflows for paid booking:', cancellationError);
+      }
     }
 
     // Trigger workflows for specific status changes
@@ -612,11 +834,18 @@ export const updateBookingStatus = async (req, res) => {
       success: true,
       message: 'Booking status updated successfully',
       data: booking,
-      workflowTriggered: workflowTriggerStatuses.includes(status)
+      workflowTriggered: workflowTriggerStatuses.includes(status),
+      remindersCancelled: status === 'paid'
     });
 
   } catch (error) {
     console.error('Error updating booking status:', error);
+    Logger.error('Error updating booking status', {
+      bookingId: req.params.bookingId,
+      status: req.body.status,
+      error: error.message,
+      stack: error.stack
+    });
     return res.status(500).json({
       success: false,
       message: 'Failed to update booking status',

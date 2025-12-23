@@ -87,7 +87,8 @@ export const createWhatsAppCampaign = async (req, res) => {
       templateName,
       templateId,
       mobileNumbers,
-      parameters = []
+      parameters = [],
+      scheduledAt
     } = req.body;
 
     // Validation
@@ -114,6 +115,23 @@ export const createWhatsAppCampaign = async (req, res) => {
                               templateName.toLowerCase().includes('noshow') ||
                               templateName.toLowerCase().includes('mark as no show');
 
+    // Optional custom schedule datetime
+    let scheduledDate = null;
+    if (scheduledAt) {
+      const parsed = new Date(scheduledAt);
+      if (Number.isNaN(parsed.getTime())) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid scheduledAt value'
+        });
+      }
+      scheduledDate = parsed;
+      const now = new Date();
+      if (scheduledDate < now) {
+        scheduledDate = now;
+      }
+    }
+
     // Create campaign
     const campaign = await WhatsAppCampaignModel.create({
       templateName,
@@ -121,12 +139,69 @@ export const createWhatsAppCampaign = async (req, res) => {
       mobileNumbers: uniqueMobiles,
       parameters,
       totalRecipients: uniqueMobiles.length,
-      status: isNoShowTemplate ? 'IN_PROGRESS' : 'SCHEDULED',
-      isScheduled: !isNoShowTemplate
+      status: isNoShowTemplate && !scheduledDate ? 'IN_PROGRESS' : 'SCHEDULED',
+      isScheduled: !!scheduledDate || !isNoShowTemplate
     });
 
     // Initialize message statuses
-    if (isNoShowTemplate) {
+    if (scheduledDate) {
+      if (!whatsappQueue) {
+        campaign.status = 'FAILED';
+        campaign.errorMessage = 'Queue service unavailable. UPSTASH_REDIS_URL not configured.';
+        await campaign.save();
+        
+        return res.status(503).json({
+          success: false,
+          message: 'WhatsApp campaign created but queue service is unavailable. Please configure UPSTASH_REDIS_URL.',
+          campaign: {
+            campaignId: campaign.campaignId,
+            status: campaign.status
+          }
+        });
+      }
+
+      const now = new Date();
+      const delayMs = Math.max(0, scheduledDate.getTime() - now.getTime());
+
+      campaign.messageStatuses = uniqueMobiles.map((mobile) => ({
+        mobileNumber: mobile,
+        status: delayMs === 0 ? 'pending' : 'scheduled',
+        sendDay: 0,
+        scheduledSendDate: scheduledDate
+      }));
+      campaign.scheduledFor = scheduledDate;
+      campaign.status = delayMs === 0 ? 'IN_PROGRESS' : 'SCHEDULED';
+      await campaign.save();
+
+      await whatsappQueue.add(
+        `whatsapp-campaign-${campaign.campaignId}-custom`,
+        {
+          campaignId: campaign.campaignId,
+          sendDay: 0,
+          scheduledDate,
+          templateName,
+          parameters,
+          recipientMobiles: uniqueMobiles
+        },
+        {
+          jobId: `${campaign.campaignId}-custom`,
+          delay: delayMs,
+          removeOnComplete: true,
+          removeOnFail: false
+        }
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: `WhatsApp campaign scheduled for ${scheduledDate.toISOString()}`,
+        campaign: {
+          campaignId: campaign.campaignId,
+          status: campaign.status,
+          totalRecipients: campaign.totalRecipients,
+          scheduledAt: scheduledDate
+        }
+      });
+    } else if (isNoShowTemplate) {
       // Send immediately
       campaign.messageStatuses = uniqueMobiles.map(mobile => ({
         mobileNumber: mobile,

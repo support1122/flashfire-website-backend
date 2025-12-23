@@ -549,7 +549,7 @@ export const processScheduledWorkflows = async () => {
   try {
     const now = new Date();
     
-    // Find bookings with scheduled workflows that are due
+    // Find bookings with scheduled workflows that are due (exclude cancelled)
     const bookings = await CampaignBookingModel.find({
       'scheduledWorkflows.status': 'scheduled',
       'scheduledWorkflows.scheduledFor': { $lte: now }
@@ -559,6 +559,11 @@ export const processScheduledWorkflows = async () => {
 
     for (const booking of bookings) {
       for (const scheduledWorkflow of booking.scheduledWorkflows || []) {
+        // Skip cancelled workflows
+        if (scheduledWorkflow.status === 'cancelled') {
+          continue;
+        }
+        
         if (scheduledWorkflow.status === 'scheduled' && 
             new Date(scheduledWorkflow.scheduledFor) <= now) {
           try {
