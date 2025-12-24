@@ -725,14 +725,26 @@ app.post('/calendly-webhook', async (req, res) => {
           const existingBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
             .sort({ bookingCreatedAt: -1 });
           
+          const meetingStartISO = existingBooking?.scheduledEventStartTime || existingBooking?.bookingCreatedAt;
+          
           // Cancel in MongoDB scheduler (PRIMARY)
-          if (inviteePhone && existingBooking?.bookingCreatedAt) {
+          if (inviteePhone && meetingStartISO) {
             const cancelResult = await cancelCall({
               phoneNumber: inviteePhone,
-              meetingStartISO: existingBooking.bookingCreatedAt
+              meetingStartISO: meetingStartISO
             });
             if (cancelResult.success) {
               Logger.info('Cancelled call in MongoDB scheduler', { callId: cancelResult.callId });
+            }
+            
+            // Also cancel WhatsApp reminder
+            const { cancelWhatsAppReminder } = await import('./Utils/WhatsAppReminderScheduler.js');
+            const cancelWhatsAppResult = await cancelWhatsAppReminder({
+              phoneNumber: inviteePhone,
+              meetingStartISO: meetingStartISO
+            });
+            if (cancelWhatsAppResult.success) {
+              Logger.info('Cancelled WhatsApp reminder', { reminderId: cancelWhatsAppResult.reminderId });
             }
           }
           
@@ -751,11 +763,11 @@ app.post('/calendly-webhook', async (req, res) => {
           }
           
           await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-            `🗑️ **Call Cancelled**\nEmail: ${inviteeEmail}\nPhone: ${inviteePhone}\nReason: Meeting cancelled`
+            `🗑️ **Reminders Cancelled**\nEmail: ${inviteeEmail}\nPhone: ${inviteePhone}\nReason: Meeting cancelled\n✅ Call reminder cancelled\n✅ WhatsApp reminder cancelled`
           );
           
         } catch (error) {
-          Logger.error('Failed to cancel call job', { 
+          Logger.error('Failed to cancel reminders', { 
             error: error.message, 
             phone: inviteePhone,
             email: inviteeEmail 
@@ -803,6 +815,7 @@ app.post('/calendly-webhook', async (req, res) => {
           const existingBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
             .sort({ bookingCreatedAt: -1 });
           
+          // Cancel old call reminder
           if (existingBooking?.reminderCallJobId) {
             const oldJobId = existingBooking.reminderCallJobId;
             const oldJob = await callQueue.getJob(oldJobId);
@@ -813,22 +826,49 @@ app.post('/calendly-webhook', async (req, res) => {
                 jobId: oldJobId, 
                 phone: inviteePhone 
               });
-              await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-                `🗑️ Removed old reminder call job for rescheduled meeting. Email: ${inviteeEmail}, Phone: ${inviteePhone}`
-              );
             } else {
               Logger.warn('Old job not found in queue (may have already executed)', { 
                 jobId: oldJobId, 
                 phone: inviteePhone 
               });
             }
+            
+            // Also cancel MongoDB-based call reminder
+            if (inviteePhone && oldStartTime) {
+              const { cancelCall } = await import('./Utils/CallScheduler.js');
+              const cancelResult = await cancelCall({
+                phoneNumber: inviteePhone,
+                meetingStartISO: oldStartTime
+              });
+              if (cancelResult.success) {
+                Logger.info('Cancelled old MongoDB call reminder', { callId: cancelResult.callId });
+              }
+            }
+          }
+          
+          // Cancel old WhatsApp reminder
+          if (inviteePhone && oldStartTime) {
+            const { cancelWhatsAppReminder } = await import('./Utils/WhatsAppReminderScheduler.js');
+            const cancelWhatsAppResult = await cancelWhatsAppReminder({
+              phoneNumber: inviteePhone,
+              meetingStartISO: oldStartTime
+            });
+            if (cancelWhatsAppResult.success) {
+              Logger.info('Cancelled old WhatsApp reminder', { reminderId: cancelWhatsAppResult.reminderId });
+            }
+          }
+          
+          if (existingBooking?.reminderCallJobId || (inviteePhone && oldStartTime)) {
+            await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+              `🗑️ Cancelled old reminders for rescheduled meeting. Email: ${inviteeEmail}, Phone: ${inviteePhone}`
+            );
           } else {
             Logger.warn('No reminderCallJobId found in database for this booking', { 
               email: inviteeEmail 
             });
           }
         } catch (error) {
-          Logger.error('Failed to remove old call job', { 
+          Logger.error('Failed to remove old reminders', { 
             error: error.message, 
             phone: inviteePhone,
             email: inviteeEmail 
@@ -857,22 +897,35 @@ app.post('/calendly-webhook', async (req, res) => {
       const inviteeName = payload?.new_invitee?.name || payload?.old_invitee?.name;
       const meetLink = payload?.new_invitee?.scheduled_event?.location?.join_url || 
                        payload?.old_invitee?.scheduled_event?.location?.join_url || 'Not Provided';
+      
+      // Extract new reschedule link from rescheduled invitee
+      const newRescheduleLink = payload?.new_invitee?.reschedule_url || null;
 
-      // 5. Update database with reschedule info
+      // 5. Update database with reschedule info including new reschedule link
       if (inviteeEmail) {
+        const updateData = { 
+          bookingStatus: 'rescheduled',
+          rescheduledFrom: oldStartTime,
+          rescheduledTo: newStartTime,
+          rescheduledAt: new Date(),
+          scheduledEventStartTime: newStartTime,
+          $inc: { rescheduledCount: 1 }
+        };
+        
+        // Update reschedule link if available
+        if (newRescheduleLink) {
+          updateData.calendlyRescheduleLink = newRescheduleLink;
+        }
+        
         await CampaignBookingModel.findOneAndUpdate(
           { clientEmail: inviteeEmail },
-          { 
-            bookingStatus: 'rescheduled',
-            rescheduledFrom: oldStartTime,
-            rescheduledTo: newStartTime,
-            rescheduledAt: new Date(),
-            scheduledEventStartTime: newStartTime,
-            $inc: { rescheduledCount: 1 }
-          },
+          updateData,
           { sort: { bookingCreatedAt: -1 } }
         );
-        Logger.info('Updated booking with reschedule info', { email: inviteeEmail });
+        Logger.info('Updated booking with reschedule info', { 
+          email: inviteeEmail,
+          newRescheduleLink: newRescheduleLink ? 'saved' : 'not available'
+        });
       }
 
       // 6. Schedule NEW reminder call
@@ -889,9 +942,16 @@ app.post('/calendly-webhook', async (req, res) => {
         const newMeetLink = payload?.new_invitee?.scheduled_event?.location?.join_url || 
                            payload?.old_invitee?.scheduled_event?.location?.join_url || 
                            'Not Provided';
-        const rescheduleLink = payload?.new_invitee?.reschedule_url || 
-                              payload?.old_invitee?.reschedule_url || 
-                              'https://calendly.com/flashfirejobs';
+        // Use the new reschedule link (already saved to DB above) or fallback
+        const rescheduleLinkForReminder = newRescheduleLink || 
+                                         payload?.old_invitee?.reschedule_url || 
+                                         'https://calendly.com/flashfirejobs';
+        const newEndTime = payload?.new_invitee?.scheduled_event?.end_time || 
+                          payload?.old_invitee?.scheduled_event?.end_time || null;
+
+        // Get booking to pass bookingId in metadata
+        const rescheduledBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
+          .sort({ bookingCreatedAt: -1 });
 
         // Schedule MongoDB call (primary) - this will also schedule WhatsApp reminder
         const mongoRescheduleResult = await scheduleCall({
@@ -902,10 +962,12 @@ app.post('/calendly-webhook', async (req, res) => {
           inviteeEmail,
           source: 'reschedule',
           meetingLink: newMeetLink !== 'Not Provided' ? newMeetLink : null,
-          rescheduleLink: rescheduleLink,
+          rescheduleLink: rescheduleLinkForReminder,
           metadata: {
+            bookingId: rescheduledBooking?.bookingId,
             rescheduledFrom: oldStartTime,
-            rescheduledTo: newStartTime
+            rescheduledTo: newStartTime,
+            meetingEndISO: newEndTime
           }
         });
 
@@ -1064,6 +1126,10 @@ app.post('/calendly-webhook', async (req, res) => {
       const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+      
+      // ✅ Extract reschedule link from Calendly webhook
+      // According to Calendly API docs, reschedule_url is in payload.invitee.reschedule_url
+      const rescheduleLink = payload?.invitee?.reschedule_url || null;
 
       // ✅ Extract UTM parameters
       const utmSource = payload?.tracking?.utm_source || 'direct';
@@ -1155,6 +1221,7 @@ app.post('/calendly-webhook', async (req, res) => {
         calendlyEventUri: payload?.scheduled_event?.uri,
         calendlyInviteeUri: payload?.invitee?.uri,
         calendlyMeetLink: meetLink,        // Same as Discord
+        calendlyRescheduleLink: rescheduleLink, // Save reschedule link from Calendly
         scheduledEventStartTime: payload?.scheduled_event?.start_time,
         scheduledEventEndTime: payload?.scheduled_event?.end_time,
         anythingToKnow,
@@ -1272,7 +1339,10 @@ app.post('/calendly-webhook', async (req, res) => {
           // 🔥 PRIMARY: MongoDB-based Scheduler (RELIABLE - No Redis issues)
           // ============================================================
           const meetingLink = meetLink && meetLink !== 'Not Provided' ? meetLink : null;
-          const rescheduleLink = payload?.old_invitee?.reschedule_url || payload?.new_invitee?.reschedule_url || 'https://calendly.com/flashfirejobs';
+          // Use reschedule link from booking record (saved from webhook) or fallback
+          const rescheduleLinkForReminder = newBooking?.calendlyRescheduleLink || rescheduleLink || 'https://calendly.com/flashfirejobs';
+          const meetingEndTime = payload?.scheduled_event?.end_time || null;
+          
           const mongoResult = await scheduleCall({
             phoneNumber: inviteePhone,
             meetingStartISO: payload?.scheduled_event?.start_time,
@@ -1281,10 +1351,11 @@ app.post('/calendly-webhook', async (req, res) => {
             inviteeEmail,
             source: 'calendly',
             meetingLink: meetingLink,
-            rescheduleLink: rescheduleLink,
+            rescheduleLink: rescheduleLinkForReminder,
             metadata: {
               bookingId: newBooking?.bookingId,
-              eventUri: payload?.scheduled_event?.uri
+              eventUri: payload?.scheduled_event?.uri,
+              meetingEndISO: meetingEndTime
             }
           });
 

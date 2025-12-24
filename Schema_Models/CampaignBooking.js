@@ -65,6 +65,10 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  calendlyRescheduleLink: {
+    type: String,
+    default: null
+  },
   scheduledEventStartTime: {
     type: Date,
     default: null
