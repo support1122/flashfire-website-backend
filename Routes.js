@@ -47,6 +47,7 @@ import {
   updateBookingNotes,
   createBookingManually
 } from "./Controllers/CampaignBookingController.js";
+import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 // Webhook Controllers
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
 // Payment Reminder Controllers
@@ -256,6 +257,7 @@ export default function Routes(app) {
   app.put('/api/campaign-bookings/:bookingId/status', updateBookingStatus); // Update booking status
   app.post('/api/campaign-bookings/:bookingId/reschedule', rescheduleBooking); // Reschedule booking and refresh queue
   app.put('/api/campaign-bookings/:bookingId/notes', updateBookingNotes); // Update booking notes
+  app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
 
   // Microservice Integration

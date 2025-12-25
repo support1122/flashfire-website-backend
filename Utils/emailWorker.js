@@ -104,6 +104,43 @@ if (!workerConnection) {
         emailWorker = new Worker(
             'emailQueue',
             async (job) => {
+                // Handle follow-up email jobs
+                if (job.name === 'send-follow-up-email') {
+                    const {
+                        to,
+                        from,
+                        templateId,
+                        dynamicTemplateData,
+                        bookingId,
+                        followUpDateTime
+                    } = job.data;
+
+                    console.log('\n📥 ========================================');
+                    console.log(`📥 [EmailWorker] Follow-up Email Job: ${job.id}`);
+                    console.log('📥 ========================================');
+                    console.log(`📌 To: ${to}`);
+                    console.log(`📌 Template ID: ${templateId}`);
+                    console.log(`📌 Booking ID: ${bookingId}`);
+                    console.log('========================================\n');
+
+                    try {
+                        const msg = {
+                            to,
+                            from,
+                            templateId,
+                            dynamicTemplateData: dynamicTemplateData || {}
+                        };
+
+                        await sgMail.send(msg);
+                        console.log(`[EmailWorker] Follow-up email sent successfully to ${to}`);
+                        return { success: true, email: to };
+                    } catch (error) {
+                        console.error(`[EmailWorker] Failed to send follow-up email:`, error.message);
+                        throw error;
+                    }
+                }
+
+                // Handle scheduled email campaign jobs
                 const {
                     campaignId,
                     sendDay,

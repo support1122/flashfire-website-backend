@@ -1,6 +1,7 @@
 import Twilio from 'twilio';
 import dotenv from 'dotenv';
 import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
+import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
 import { scheduleWhatsAppReminder } from './WhatsAppReminderScheduler.js';
@@ -111,11 +112,61 @@ export async function scheduleCall({
 
     // Also schedule WhatsApp reminder 5 minutes before meeting
     try {
+      // Fetch reschedule link from booking record if bookingId is available
+      let finalRescheduleLink = rescheduleLink || metadata?.rescheduleLink || null;
+      
+      if (metadata?.bookingId && !finalRescheduleLink) {
+        try {
+          const booking = await CampaignBookingModel.findOne({ bookingId: metadata.bookingId });
+          if (booking?.calendlyRescheduleLink) {
+            finalRescheduleLink = booking.calendlyRescheduleLink;
+            console.log('✅ [CallScheduler] Fetched reschedule link from booking record:', finalRescheduleLink);
+          }
+        } catch (bookingError) {
+          console.warn('⚠️ [CallScheduler] Could not fetch booking record:', bookingError.message);
+        }
+      }
+      
+      // Also try fetching by email and meeting time if bookingId not available
+      if (!finalRescheduleLink && inviteeEmail && meetingStartISO) {
+        try {
+          const booking = await CampaignBookingModel.findOne({
+            clientEmail: inviteeEmail,
+            scheduledEventStartTime: new Date(meetingStartISO)
+          }).sort({ bookingCreatedAt: -1 });
+          
+          if (booking?.calendlyRescheduleLink) {
+            finalRescheduleLink = booking.calendlyRescheduleLink;
+            console.log('✅ [CallScheduler] Fetched reschedule link from booking by email/time:', finalRescheduleLink);
+          }
+        } catch (bookingError) {
+          console.warn('⚠️ [CallScheduler] Could not fetch booking by email/time:', bookingError.message);
+        }
+      }
+      
       // Format meeting date and time for WhatsApp template
+      // Format: "Saturday Dec 27, 2025" and "12am – 12:15am" (America/New_York timezone)
       const meetingStart = new Date(meetingStartISO);
+      const meetingEnd = metadata?.meetingEndISO ? new Date(metadata.meetingEndISO) : new Date(meetingStart.getTime() + 15 * 60 * 1000); // Default 15 min if not provided
+      
       const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
-      const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('EEEE, MMMM d, yyyy');
-      const meetingTimeFormatted = meetingStartUTC.setZone('America/New_York').toFormat('h:mm a');
+      const meetingEndUTC = DateTime.fromJSDate(meetingEnd, { zone: 'utc' });
+      
+      // Format date: "Saturday Dec 27, 2025" (America/New_York)
+      const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('EEEE MMM d, yyyy');
+      
+      const startTimeET = meetingStartUTC.setZone('America/New_York');
+      const startTimeFormatted = startTimeET.minute === 0 
+        ? startTimeET.toFormat('ha').toLowerCase()
+        : startTimeET.toFormat('h:mma').toLowerCase();
+      
+      // End time: always include minutes if present
+      const endTimeET = meetingEndUTC.setZone('America/New_York');
+      const endTimeFormatted = endTimeET.minute === 0
+        ? endTimeET.toFormat('ha').toLowerCase()
+        : endTimeET.toFormat('h:mma').toLowerCase();
+      
+      const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
       const whatsappResult = await scheduleWhatsAppReminder({
         phoneNumber,
@@ -125,9 +176,12 @@ export async function scheduleCall({
         clientName: inviteeName,
         clientEmail: inviteeEmail,
         meetingLink: meetingLink || metadata?.meetingLink || null,
-        rescheduleLink: rescheduleLink || metadata?.rescheduleLink || null,
+        rescheduleLink: finalRescheduleLink,
         source,
-        metadata
+        metadata: {
+          ...metadata,
+          meetingEndISO: meetingEnd.toISOString()
+        }
       });
 
       if (whatsappResult.success) {
