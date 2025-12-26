@@ -7,6 +7,7 @@ const CRM_PERMISSION_KEYS = [
   'analytics',
   'all_data',
   'workflows',
+  'leads',
 ];
 
 const CrmUserSchema = new mongoose.Schema(

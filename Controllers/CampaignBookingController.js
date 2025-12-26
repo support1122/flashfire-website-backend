@@ -1271,4 +1271,360 @@ export const createBookingManually = async (req, res) => {
   }
 };
 
+export const bulkCreateLeads = async (req, res) => {
+  try {
+    const { leads } = req.body;
+
+    if (!Array.isArray(leads) || leads.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Leads array is required and must not be empty'
+      });
+    }
+
+    const defaultMeetingTime = new Date('2025-01-01T10:00:00Z');
+    const results = {
+      successful: [],
+      failed: [],
+      skipped: []
+    };
+
+    for (const lead of leads) {
+      try {
+        const { name, email, mobile } = lead;
+
+        if (!name || !email) {
+          results.failed.push({
+            lead,
+            error: 'Name and email are required'
+          });
+          continue;
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+        
+        const existingBooking = await CampaignBookingModel.findOne({
+          clientEmail: normalizedEmail
+        });
+
+        if (existingBooking) {
+          results.skipped.push({
+            email: normalizedEmail,
+            reason: 'Email already exists'
+          });
+          continue;
+        }
+
+        const newBooking = new CampaignBookingModel({
+          clientName: name.trim(),
+          clientEmail: normalizedEmail,
+          clientPhone: mobile && mobile.trim() ? mobile.trim() : null,
+          scheduledEventStartTime: defaultMeetingTime,
+          scheduledEventEndTime: new Date(defaultMeetingTime.getTime() + 30 * 60000),
+          utmSource: 'CSV_IMPORT',
+          utmMedium: null,
+          utmCampaign: null,
+          campaignId: null,
+          bookingStatus: 'scheduled',
+          calendlyMeetLink: null,
+          anythingToKnow: null,
+          meetingNotes: null,
+          bookingCreatedAt: new Date()
+        });
+
+        await newBooking.save();
+        results.successful.push({
+          email: normalizedEmail,
+          bookingId: newBooking.bookingId
+        });
+      } catch (error) {
+        results.failed.push({
+          lead,
+          error: error.message
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Processed ${leads.length} leads`,
+      results: {
+        total: leads.length,
+        successful: results.successful.length,
+        failed: results.failed.length,
+        skipped: results.skipped.length
+      },
+      details: results
+    });
+  } catch (error) {
+    console.error('❌ Error bulk creating leads:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to bulk create leads',
+      error: error.message
+    });
+  }
+};
+
+export const getLeadsPaginated = async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      utmSource,
+      search,
+      fromDate,
+      toDate,
+      planName,
+      minAmount,
+      maxAmount,
+      status
+    } = req.query;
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    let matchQuery = {};
+    const normalizedPlanName = planName ? String(planName).toUpperCase() : null;
+
+    if (status && status !== 'all') {
+      matchQuery.bookingStatus = status;
+    }
+
+    if (utmSource && utmSource !== 'all') {
+      matchQuery.utmSource = utmSource;
+    }
+
+    if (normalizedPlanName && normalizedPlanName !== 'ALL') {
+      matchQuery['paymentPlan.name'] = normalizedPlanName;
+    }
+
+    if (minAmount || maxAmount) {
+      matchQuery['paymentPlan.price'] = {};
+      if (minAmount) {
+        matchQuery['paymentPlan.price'].$gte = parseFloat(minAmount);
+      }
+      if (maxAmount) {
+        matchQuery['paymentPlan.price'].$lte = parseFloat(maxAmount);
+      }
+    }
+
+    if (fromDate || toDate) {
+      matchQuery.scheduledEventStartTime = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        matchQuery.scheduledEventStartTime.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        matchQuery.scheduledEventStartTime.$lte = to;
+      }
+    }
+
+    if (search) {
+      matchQuery.$or = [
+        { clientName: { $regex: search, $options: 'i' } },
+        { clientEmail: { $regex: search, $options: 'i' } },
+        { utmSource: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    matchQuery.scheduledEventStartTime = matchQuery.scheduledEventStartTime || { $exists: true, $ne: null };
+
+    const basePipeline = [
+      { $match: matchQuery },
+      {
+        $sort: {
+          clientEmail: 1,
+          scheduledEventStartTime: -1,
+          bookingCreatedAt: -1
+        }
+      },
+      {
+        $group: {
+          _id: '$clientEmail',
+          latestBooking: { $first: '$$ROOT' },
+          totalBookings: { $sum: 1 }
+        }
+      },
+      {
+        $replaceRoot: {
+          newRoot: {
+            $mergeObjects: [
+              '$latestBooking',
+              { totalBookings: '$totalBookings' }
+            ]
+          }
+        }
+      },
+      {
+        $sort: {
+          scheduledEventStartTime: -1,
+          bookingCreatedAt: -1
+        }
+      }
+    ];
+
+    const countPipeline = [
+      ...basePipeline,
+      { $count: 'total' }
+    ];
+
+    const [countResult] = await CampaignBookingModel.aggregate(countPipeline);
+    const total = countResult?.total || 0;
+
+    const dataPipeline = [
+      ...basePipeline,
+      { $skip: skip },
+      { $limit: limitNum }
+    ];
+
+    const bookings = await CampaignBookingModel.aggregate(dataPipeline);
+
+    const statsPipeline = [
+      { $match: matchQuery },
+      {
+        $sort: {
+          clientEmail: 1,
+          scheduledEventStartTime: -1,
+          bookingCreatedAt: -1
+        }
+      },
+      {
+        $group: {
+          _id: '$clientEmail',
+          latestBooking: { $first: '$$ROOT' }
+        }
+      },
+      {
+        $group: {
+          _id: '$latestBooking.paymentPlan.name',
+          count: { $sum: 1 },
+          revenue: { $sum: '$latestBooking.paymentPlan.price' }
+        }
+      }
+    ];
+
+    const planBreakdownResult = await CampaignBookingModel.aggregate(statsPipeline);
+    
+    const revenuePipeline = [
+      { $match: matchQuery },
+      {
+        $sort: {
+          clientEmail: 1,
+          scheduledEventStartTime: -1,
+          bookingCreatedAt: -1
+        }
+      },
+      {
+        $group: {
+          _id: '$clientEmail',
+          latestBooking: { $first: '$$ROOT' }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalRevenue: { $sum: '$latestBooking.paymentPlan.price' }
+        }
+      }
+    ];
+
+    const [revenueResult] = await CampaignBookingModel.aggregate(revenuePipeline);
+    const totalRevenue = revenueResult?.totalRevenue || 0;
+
+    const planBreakdown = planBreakdownResult.map(item => ({
+      _id: item._id,
+      count: item.count,
+      revenue: item.revenue
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: bookings,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(total / limitNum)
+      },
+      stats: {
+        totalRevenue: totalRevenue || 0,
+        planBreakdown: planBreakdown
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching paginated leads:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch leads',
+      error: error.message
+    });
+  }
+};
+
+export const updateBookingAmount = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const { amount, planName } = req.body;
+
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    if (booking.bookingStatus !== 'paid') {
+      return res.status(400).json({
+        success: false,
+        message: 'Can only update amount for paid bookings'
+      });
+    }
+
+    const normalizedPlanName = planName ? String(planName).toUpperCase() : booking.paymentPlan?.name;
+    if (!normalizedPlanName || !PLAN_CATALOG[normalizedPlanName]) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid plan name'
+      });
+    }
+
+    const catalogPlan = PLAN_CATALOG[normalizedPlanName];
+    const newAmount = amount ? parseFloat(amount) : catalogPlan.price;
+
+    const paymentPlanUpdate = {
+      name: normalizedPlanName,
+      price: newAmount,
+      currency: catalogPlan.currency,
+      displayPrice: `$${newAmount}`,
+      selectedAt: booking.paymentPlan?.selectedAt || new Date()
+    };
+
+    const updatedBooking = await CampaignBookingModel.findOneAndUpdate(
+      { bookingId },
+      { $set: { paymentPlan: paymentPlanUpdate } },
+      { new: true }
+    );
+
+    return res.status(200).json({
+      success: true,
+      data: updatedBooking
+    });
+
+  } catch (error) {
+    console.error('Error updating booking amount:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to update booking amount',
+      error: error.message
+    });
+  }
+};
+
 

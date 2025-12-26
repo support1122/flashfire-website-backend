@@ -241,6 +241,7 @@ import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs
 import { redisConnection } from './Utils/queue.js'; // Import shared ioredis connection
 import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js'; // MongoDB-based scheduler
 import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderScheduler.js'; // WhatsApp reminder scheduler
+import { getRescheduleLinkForBooking } from './Utils/CalendlyAPIHelper.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -1129,7 +1130,21 @@ app.post('/calendly-webhook', async (req, res) => {
       
       // ✅ Extract reschedule link from Calendly webhook
       // According to Calendly API docs, reschedule_url is in payload.invitee.reschedule_url
-      const rescheduleLink = payload?.invitee?.reschedule_url || null;
+      let rescheduleLink = payload?.invitee?.reschedule_url || null;
+      
+      // If reschedule link is not in webhook, try fetching from Calendly API
+      if (!rescheduleLink && payload?.invitee?.uri) {
+        try {
+          const { fetchRescheduleLinkFromCalendly } = await import('./Utils/CalendlyAPIHelper.js');
+          const fetchedLink = await fetchRescheduleLinkFromCalendly(payload.invitee.uri);
+          if (fetchedLink) {
+            rescheduleLink = fetchedLink;
+            console.log('✅ [Calendly Webhook] Fetched reschedule link from Calendly API:', rescheduleLink);
+          }
+        } catch (error) {
+          console.warn('⚠️ [Calendly Webhook] Could not fetch reschedule link from API:', error.message);
+        }
+      }
 
       // ✅ Extract UTM parameters
       const utmSource = payload?.tracking?.utm_source || 'direct';
@@ -1339,8 +1354,27 @@ app.post('/calendly-webhook', async (req, res) => {
           // 🔥 PRIMARY: MongoDB-based Scheduler (RELIABLE - No Redis issues)
           // ============================================================
           const meetingLink = meetLink && meetLink !== 'Not Provided' ? meetLink : null;
-          // Use reschedule link from booking record (saved from webhook) or fallback
-          const rescheduleLinkForReminder = newBooking?.calendlyRescheduleLink || rescheduleLink || 'https://calendly.com/flashfirejobs';
+          // Use reschedule link from booking record (saved from webhook) or try fetching from API
+          let rescheduleLinkForReminder = newBooking?.calendlyRescheduleLink || rescheduleLink;
+          
+          // If still no reschedule link, try fetching from Calendly API
+          if (!rescheduleLinkForReminder && newBooking?.calendlyInviteeUri) {
+            try {
+              const fetchedLink = await getRescheduleLinkForBooking(newBooking);
+              if (fetchedLink) {
+                rescheduleLinkForReminder = fetchedLink;
+                console.log('✅ [Calendly Webhook] Fetched reschedule link for reminder from API:', rescheduleLinkForReminder);
+              }
+            } catch (error) {
+              console.warn('⚠️ [Calendly Webhook] Could not fetch reschedule link for reminder:', error.message);
+            }
+          }
+          
+          // Fallback to default if still no link
+          if (!rescheduleLinkForReminder) {
+            rescheduleLinkForReminder = 'https://calendly.com/flashfirejobs';
+          }
+          
           const meetingEndTime = payload?.scheduled_event?.end_time || null;
           
           const mongoResult = await scheduleCall({

@@ -45,7 +45,10 @@ import {
   captureFrontendBooking,
   rescheduleBooking,
   updateBookingNotes,
-  createBookingManually
+  createBookingManually,
+  getLeadsPaginated,
+  updateBookingAmount,
+  bulkCreateLeads
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 // Webhook Controllers
@@ -223,6 +226,7 @@ export default function Routes(app) {
 
   // Booking Management
   app.post('/api/campaign-bookings/manual', createBookingManually); // Create booking manually
+  app.post('/api/leads/bulk-create', bulkCreateLeads); // Bulk create leads from CSV
   app.get('/api/campaign-bookings', getAllBookings); // Get all bookings (legacy)
   app.get('/api/campaign-bookings/paginated', getAllBookingsPaginated); // Get paginated bookings with filters
   app.get('/api/campaign-bookings/today', getMeetingsBookedToday); // Get meetings booked today
@@ -257,8 +261,10 @@ export default function Routes(app) {
   app.put('/api/campaign-bookings/:bookingId/status', updateBookingStatus); // Update booking status
   app.post('/api/campaign-bookings/:bookingId/reschedule', rescheduleBooking); // Reschedule booking and refresh queue
   app.put('/api/campaign-bookings/:bookingId/notes', updateBookingNotes); // Update booking notes
+  app.put('/api/campaign-bookings/:bookingId/amount', updateBookingAmount); // Update booking amount (leads only)
   app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
+  app.get('/api/leads/paginated', getLeadsPaginated); // Get paginated leads (paid bookings only)
 
   // Microservice Integration
   app.get('/api/campaign-bookings/export', exportBookingsForMicroservice); // Export bookings

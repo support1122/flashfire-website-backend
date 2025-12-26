@@ -6,6 +6,7 @@ import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
 import { scheduleWhatsAppReminder } from './WhatsAppReminderScheduler.js';
 import { DateTime } from 'luxon';
+import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 
 dotenv.config();
 
@@ -118,9 +119,16 @@ export async function scheduleCall({
       if (metadata?.bookingId && !finalRescheduleLink) {
         try {
           const booking = await CampaignBookingModel.findOne({ bookingId: metadata.bookingId });
-          if (booking?.calendlyRescheduleLink) {
-            finalRescheduleLink = booking.calendlyRescheduleLink;
-            console.log('✅ [CallScheduler] Fetched reschedule link from booking record:', finalRescheduleLink);
+          if (booking) {
+            // Try to get reschedule link from Calendly API if not in DB
+            const fetchedLink = await getRescheduleLinkForBooking(booking);
+            if (fetchedLink) {
+              finalRescheduleLink = fetchedLink;
+              console.log('✅ [CallScheduler] Fetched reschedule link from Calendly API:', finalRescheduleLink);
+            } else if (booking?.calendlyRescheduleLink) {
+              finalRescheduleLink = booking.calendlyRescheduleLink;
+              console.log('✅ [CallScheduler] Fetched reschedule link from booking record:', finalRescheduleLink);
+            }
           }
         } catch (bookingError) {
           console.warn('⚠️ [CallScheduler] Could not fetch booking record:', bookingError.message);
@@ -135,9 +143,16 @@ export async function scheduleCall({
             scheduledEventStartTime: new Date(meetingStartISO)
           }).sort({ bookingCreatedAt: -1 });
           
-          if (booking?.calendlyRescheduleLink) {
-            finalRescheduleLink = booking.calendlyRescheduleLink;
-            console.log('✅ [CallScheduler] Fetched reschedule link from booking by email/time:', finalRescheduleLink);
+          if (booking) {
+            // Try to get reschedule link from Calendly API if not in DB
+            const fetchedLink = await getRescheduleLinkForBooking(booking);
+            if (fetchedLink) {
+              finalRescheduleLink = fetchedLink;
+              console.log('✅ [CallScheduler] Fetched reschedule link from Calendly API by email/time:', finalRescheduleLink);
+            } else if (booking?.calendlyRescheduleLink) {
+              finalRescheduleLink = booking.calendlyRescheduleLink;
+              console.log('✅ [CallScheduler] Fetched reschedule link from booking by email/time:', finalRescheduleLink);
+            }
           }
         } catch (bookingError) {
           console.warn('⚠️ [CallScheduler] Could not fetch booking by email/time:', bookingError.message);

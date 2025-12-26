@@ -5,30 +5,24 @@ import { emailQueue } from '../Utils/queue.js';
 import sgMail from '@sendgrid/mail';
 import { DateTime } from 'luxon';
 import { Logger } from '../Utils/Logger.js';
+import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
 export default async function ScheduleFollowUp(req, res) {
   try {
     const { bookingId } = req.params;
-    const { followUpDateTime, templateId, senderEmail } = req.body;
+    const { followUpDateTime } = req.body;
 
     // Validation
-    if (!bookingId || !followUpDateTime || !templateId || !senderEmail) {
+    if (!bookingId || !followUpDateTime) {
       return res.status(400).json({
         success: false,
-        message: 'Booking ID, follow-up date/time, template ID, and sender email are required'
+        message: 'Booking ID and follow-up date/time are required'
       });
     }
 
-    // Validate email format
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(senderEmail)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid sender email format'
-      });
-    }
+    const senderEmail = 'elizabeth@flashfirehq.com';
 
     // Find the booking
     const booking = await CampaignBookingModel.findOne({ bookingId });
@@ -77,17 +71,31 @@ export default async function ScheduleFollowUp(req, res) {
 
     // 1. Schedule Email at follow-up time
     try {
+      const followUpMessage = `Hi ${booking.clientName || 'there'},
+
+You asked for a follow-up regarding your consultation with FlashFire. We wanted to reach out and see how things are going.
+
+If you have any questions or would like to reschedule your meeting, please don't hesitate to reach out to us.
+
+Best regards,
+Elizabeth
+FlashFire Team`;
+
       const emailJob = await emailQueue.add(
         'send-follow-up-email',
         {
           to: booking.clientEmail,
           from: senderEmail,
-          templateId: templateId,
-          dynamicTemplateData: {
-            domain: booking.campaignId || 'flashfirehq.com',
-            clientName: booking.clientName || 'Client',
-            bookingId: booking.bookingId
-          },
+          subject: 'Follow-up: FlashFire Consultation',
+          text: followUpMessage,
+          html: `
+            <div style="font-family: system-ui, -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+              <p>Hi ${booking.clientName || 'there'},</p>
+              <p>You asked for a follow-up regarding your consultation with FlashFire. We wanted to reach out and see how things are going.</p>
+              <p>If you have any questions or would like to reschedule your meeting, please don't hesitate to reach out to us.</p>
+              <p>Best regards,<br/>Elizabeth<br/>FlashFire Team</p>
+            </div>
+          `,
           bookingId: booking.bookingId,
           followUpDateTime: followUpDate.toISOString()
         },
@@ -185,6 +193,20 @@ export default async function ScheduleFollowUp(req, res) {
         
         const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
+        // Try to fetch reschedule link from Calendly API if not in booking
+        let rescheduleLink = booking.calendlyRescheduleLink || null;
+        if (!rescheduleLink) {
+          try {
+            const fetchedLink = await getRescheduleLinkForBooking(booking);
+            if (fetchedLink) {
+              rescheduleLink = fetchedLink;
+              console.log('✅ [ScheduleFollowUp] Fetched reschedule link from Calendly API:', rescheduleLink);
+            }
+          } catch (error) {
+            console.warn('⚠️ [ScheduleFollowUp] Could not fetch reschedule link:', error.message);
+          }
+        }
+
         const whatsappResult = await scheduleWhatsAppReminder({
           phoneNumber: booking.clientPhone,
           meetingStartISO: followUpDate.toISOString(),
@@ -193,7 +215,7 @@ export default async function ScheduleFollowUp(req, res) {
           clientName: booking.clientName,
           clientEmail: booking.clientEmail,
           meetingLink: booking.calendlyMeetLink || null,
-          rescheduleLink: booking.calendlyRescheduleLink || null,
+          rescheduleLink: rescheduleLink,
           source: 'crm_followup',
           metadata: {
             bookingId: booking.bookingId,

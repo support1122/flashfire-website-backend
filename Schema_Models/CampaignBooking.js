@@ -284,6 +284,8 @@ CampaignBookingSchema.index({ utmSource: 1, bookingCreatedAt: -1 });
 CampaignBookingSchema.index({ clientEmail: 1, utmSource: 1 });
 CampaignBookingSchema.index({ bookingStatus: 1 });
 CampaignBookingSchema.index({ campaignId: 1, bookingCreatedAt: -1 });
+CampaignBookingSchema.index({ bookingStatus: 1, clientEmail: 1, scheduledEventStartTime: -1, bookingCreatedAt: -1 });
+CampaignBookingSchema.index({ bookingStatus: 1, 'paymentPlan.name': 1, 'paymentPlan.price': 1 });
 
 export const CampaignBookingModel = mongoose.model('CampaignBooking', CampaignBookingSchema);
 
