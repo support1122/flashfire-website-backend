@@ -50,6 +50,10 @@ const ScheduledWhatsAppReminderSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  timezone: {
+    type: String,
+    default: null // ET, PST, MT, CT, etc.
+  },
   
   // Reminder status
   status: {

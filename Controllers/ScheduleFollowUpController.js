@@ -5,6 +5,7 @@ import { emailQueue } from '../Utils/queue.js';
 import sgMail from '@sendgrid/mail';
 import { DateTime } from 'luxon';
 import { Logger } from '../Utils/Logger.js';
+import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
@@ -185,6 +186,20 @@ export default async function ScheduleFollowUp(req, res) {
         
         const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
+        // Try to fetch reschedule link from Calendly API if not in booking
+        let rescheduleLink = booking.calendlyRescheduleLink || null;
+        if (!rescheduleLink) {
+          try {
+            const fetchedLink = await getRescheduleLinkForBooking(booking);
+            if (fetchedLink) {
+              rescheduleLink = fetchedLink;
+              console.log('✅ [ScheduleFollowUp] Fetched reschedule link from Calendly API:', rescheduleLink);
+            }
+          } catch (error) {
+            console.warn('⚠️ [ScheduleFollowUp] Could not fetch reschedule link:', error.message);
+          }
+        }
+
         const whatsappResult = await scheduleWhatsAppReminder({
           phoneNumber: booking.clientPhone,
           meetingStartISO: followUpDate.toISOString(),
@@ -193,7 +208,7 @@ export default async function ScheduleFollowUp(req, res) {
           clientName: booking.clientName,
           clientEmail: booking.clientEmail,
           meetingLink: booking.calendlyMeetLink || null,
-          rescheduleLink: booking.calendlyRescheduleLink || null,
+          rescheduleLink: rescheduleLink,
           source: 'crm_followup',
           metadata: {
             bookingId: booking.bookingId,

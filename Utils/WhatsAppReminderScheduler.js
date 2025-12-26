@@ -9,7 +9,7 @@ dotenv.config();
 
 const POLL_INTERVAL_MS = 30000; // Check every 30 seconds
 const DISCORD_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
-const DEFAULT_RESCHEDULE_LINK = 'https://calendly.com/flashfirejobs'; // Default reschedule link
+const DEFAULT_RESCHEDULE_LINK = 'https://www.google.com/url?q=https%3A%2F%2Fcalendly.com%2Freschedulings%2F8e172654-1dfa-49ae-944e-e260067a0f1f&sa=D&source=calendar&usd=2&usg=AOvVaw0_ea9AmvIBNwPqLl0HSU0g'; // Default reschedule link
 
 let isRunning = false;
 let pollInterval = null;
