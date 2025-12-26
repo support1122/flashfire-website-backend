@@ -110,6 +110,9 @@ if (!workerConnection) {
                         to,
                         from,
                         templateId,
+                        subject,
+                        text,
+                        html,
                         dynamicTemplateData,
                         bookingId,
                         followUpDateTime
@@ -119,17 +122,28 @@ if (!workerConnection) {
                     console.log(`📥 [EmailWorker] Follow-up Email Job: ${job.id}`);
                     console.log('📥 ========================================');
                     console.log(`📌 To: ${to}`);
-                    console.log(`📌 Template ID: ${templateId}`);
                     console.log(`📌 Booking ID: ${bookingId}`);
+                    if (templateId) {
+                        console.log(`📌 Template ID: ${templateId}`);
+                    } else {
+                        console.log(`📌 Subject: ${subject}`);
+                    }
                     console.log('========================================\n');
 
                     try {
                         const msg = {
                             to,
-                            from,
-                            templateId,
-                            dynamicTemplateData: dynamicTemplateData || {}
+                            from
                         };
+
+                        if (templateId) {
+                            msg.templateId = templateId;
+                            msg.dynamicTemplateData = dynamicTemplateData || {};
+                        } else {
+                            msg.subject = subject || 'Follow-up: FlashFire Consultation';
+                            msg.text = text;
+                            msg.html = html;
+                        }
 
                         await sgMail.send(msg);
                         console.log(`[EmailWorker] Follow-up email sent successfully to ${to}`);

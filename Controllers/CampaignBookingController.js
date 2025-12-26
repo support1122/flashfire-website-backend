@@ -1271,6 +1271,101 @@ export const createBookingManually = async (req, res) => {
   }
 };
 
+export const bulkCreateLeads = async (req, res) => {
+  try {
+    const { leads } = req.body;
+
+    if (!Array.isArray(leads) || leads.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Leads array is required and must not be empty'
+      });
+    }
+
+    const defaultMeetingTime = new Date('2025-01-01T10:00:00Z');
+    const results = {
+      successful: [],
+      failed: [],
+      skipped: []
+    };
+
+    for (const lead of leads) {
+      try {
+        const { name, email, mobile } = lead;
+
+        if (!name || !email) {
+          results.failed.push({
+            lead,
+            error: 'Name and email are required'
+          });
+          continue;
+        }
+
+        const normalizedEmail = email.trim().toLowerCase();
+        
+        const existingBooking = await CampaignBookingModel.findOne({
+          clientEmail: normalizedEmail
+        });
+
+        if (existingBooking) {
+          results.skipped.push({
+            email: normalizedEmail,
+            reason: 'Email already exists'
+          });
+          continue;
+        }
+
+        const newBooking = new CampaignBookingModel({
+          clientName: name.trim(),
+          clientEmail: normalizedEmail,
+          clientPhone: mobile && mobile.trim() ? mobile.trim() : null,
+          scheduledEventStartTime: defaultMeetingTime,
+          scheduledEventEndTime: new Date(defaultMeetingTime.getTime() + 30 * 60000),
+          utmSource: 'CSV_IMPORT',
+          utmMedium: null,
+          utmCampaign: null,
+          campaignId: null,
+          bookingStatus: 'scheduled',
+          calendlyMeetLink: null,
+          anythingToKnow: null,
+          meetingNotes: null,
+          bookingCreatedAt: new Date()
+        });
+
+        await newBooking.save();
+        results.successful.push({
+          email: normalizedEmail,
+          bookingId: newBooking.bookingId
+        });
+      } catch (error) {
+        results.failed.push({
+          lead,
+          error: error.message
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Processed ${leads.length} leads`,
+      results: {
+        total: leads.length,
+        successful: results.successful.length,
+        failed: results.failed.length,
+        skipped: results.skipped.length
+      },
+      details: results
+    });
+  } catch (error) {
+    console.error('❌ Error bulk creating leads:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to bulk create leads',
+      error: error.message
+    });
+  }
+};
+
 export const getLeadsPaginated = async (req, res) => {
   try {
     const {

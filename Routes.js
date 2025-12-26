@@ -47,7 +47,8 @@ import {
   updateBookingNotes,
   createBookingManually,
   getLeadsPaginated,
-  updateBookingAmount
+  updateBookingAmount,
+  bulkCreateLeads
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 // Webhook Controllers
@@ -225,6 +226,7 @@ export default function Routes(app) {
 
   // Booking Management
   app.post('/api/campaign-bookings/manual', createBookingManually); // Create booking manually
+  app.post('/api/leads/bulk-create', bulkCreateLeads); // Bulk create leads from CSV
   app.get('/api/campaign-bookings', getAllBookings); // Get all bookings (legacy)
   app.get('/api/campaign-bookings/paginated', getAllBookingsPaginated); // Get paginated bookings with filters
   app.get('/api/campaign-bookings/today', getMeetingsBookedToday); // Get meetings booked today
