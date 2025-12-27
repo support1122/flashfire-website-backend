@@ -3,7 +3,7 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
 import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
-import { triggerWorkflow } from './WorkflowController.js';
+import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
 import { cancelWhatsAppRemindersForClient } from '../Utils/WhatsAppReminderScheduler.js';
 import { cancelCall } from '../Utils/CallScheduler.js';
 import { Logger } from '../Utils/Logger.js';
@@ -816,16 +816,73 @@ export const updateBookingStatus = async (req, res) => {
       }
     }
 
+    // Cancel scheduled workflows when status changes to certain statuses
+    // This should happen BEFORE triggering new workflows
+    const oldStatus = existingBooking.bookingStatus;
+    const statusesThatCancelWorkflows = ['completed', 'paid', 'canceled'];
+    
+    if (statusesThatCancelWorkflows.includes(status) && oldStatus !== status) {
+      try {
+        const cancelResult = await cancelScheduledWorkflows(bookingId, status, oldStatus);
+        
+        if (cancelResult.success && cancelResult.cancelled > 0) {
+          console.log(`✅ Cancelled ${cancelResult.cancelled} scheduled workflow(s) for booking ${bookingId} due to status change from ${oldStatus} to ${status}`);
+          Logger.info('Cancelled scheduled workflows due to status change', {
+            bookingId,
+            oldStatus,
+            newStatus: status,
+            cancelledCount: cancelResult.cancelled,
+            clientEmail: existingBooking.clientEmail
+          });
+        }
+      } catch (cancelError) {
+        console.error('Error cancelling scheduled workflows:', cancelError);
+        Logger.error('Error cancelling scheduled workflows', {
+          bookingId,
+          oldStatus,
+          newStatus: status,
+          error: cancelError.message,
+          stack: cancelError.stack
+        });
+        // Don't fail the status update if cancellation fails
+      }
+    }
+
     // Trigger workflows for specific status changes
     const workflowTriggerStatuses = ['completed', 'canceled', 'rescheduled', 'no-show'];
     if (workflowTriggerStatuses.includes(status)) {
       try {
+        Logger.info('Triggering workflows for status change', {
+          bookingId,
+          status,
+          clientEmail: existingBooking.clientEmail,
+          source: 'status_update'
+        });
+        
         const workflowResult = await triggerWorkflow(bookingId, status);
         if (workflowResult.success && workflowResult.triggered) {
           console.log(`✅ Workflows triggered for booking ${bookingId} with status ${status}`);
+          Logger.info('Workflows triggered successfully', {
+            bookingId,
+            status,
+            workflowsTriggered: workflowResult.workflowsTriggered?.length || 0,
+            clientEmail: existingBooking.clientEmail
+          });
+        } else {
+          Logger.info('No workflows triggered (none configured or inactive)', {
+            bookingId,
+            status,
+            clientEmail: existingBooking.clientEmail
+          });
         }
       } catch (workflowError) {
         console.error('Error triggering workflows:', workflowError);
+        Logger.error('Error triggering workflows', {
+          bookingId,
+          status,
+          error: workflowError.message,
+          stack: workflowError.stack
+        });
         // Don't fail the status update if workflow trigger fails
       }
     }
@@ -1366,6 +1423,33 @@ export const bulkCreateLeads = async (req, res) => {
   }
 };
 
+/**
+ * Normalize phone number for matching (extracts last 10 digits for US numbers)
+ * This allows matching +12272188477 with 2272188477
+ */
+function normalizePhoneForMatching(phone) {
+  if (!phone) return null;
+  
+  // Remove all non-digit characters except leading +
+  const cleaned = phone.replace(/[\s\-\(\)]/g, '');
+  
+  // Extract last 10 digits (US phone numbers)
+  // Handle formats: +12272188477, 12272188477, 2272188477
+  if (cleaned.startsWith('+1') && cleaned.length >= 12) {
+    // Format: +1XXXXXXXXXX -> extract last 10 digits
+    return cleaned.slice(-10);
+  } else if (cleaned.startsWith('1') && cleaned.length >= 11 && /^\d+$/.test(cleaned)) {
+    // Format: 1XXXXXXXXXX -> extract last 10 digits
+    return cleaned.slice(-10);
+  } else if (cleaned.length >= 10 && /^\d+$/.test(cleaned)) {
+    // Format: XXXXXXXXXX -> use last 10 digits
+    return cleaned.slice(-10);
+  }
+  
+  // For other formats, return cleaned version
+  return cleaned.replace(/\D/g, '').slice(-10);
+}
+
 export const getLeadsPaginated = async (req, res) => {
   try {
     const {
@@ -1428,118 +1512,91 @@ export const getLeadsPaginated = async (req, res) => {
       matchQuery.$or = [
         { clientName: { $regex: search, $options: 'i' } },
         { clientEmail: { $regex: search, $options: 'i' } },
+        { clientPhone: { $regex: search, $options: 'i' } },
         { utmSource: { $regex: search, $options: 'i' } }
       ];
     }
 
     matchQuery.scheduledEventStartTime = matchQuery.scheduledEventStartTime || { $exists: true, $ne: null };
 
-    const basePipeline = [
-      { $match: matchQuery },
-      {
-        $sort: {
-          clientEmail: 1,
-          scheduledEventStartTime: -1,
-          bookingCreatedAt: -1
-        }
-      },
-      {
-        $group: {
-          _id: '$clientEmail',
-          latestBooking: { $first: '$$ROOT' },
-          totalBookings: { $sum: 1 }
-        }
-      },
-      {
-        $replaceRoot: {
-          newRoot: {
-            $mergeObjects: [
-              '$latestBooking',
-              { totalBookings: '$totalBookings' }
-            ]
-          }
-        }
-      },
-      {
-        $sort: {
-          scheduledEventStartTime: -1,
-          bookingCreatedAt: -1
-        }
-      }
-    ];
+    // First, get all bookings matching the query
+    const allBookings = await CampaignBookingModel.find(matchQuery)
+      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
+      .lean();
 
-    const countPipeline = [
-      ...basePipeline,
-      { $count: 'total' }
-    ];
-
-    const [countResult] = await CampaignBookingModel.aggregate(countPipeline);
-    const total = countResult?.total || 0;
-
-    const dataPipeline = [
-      ...basePipeline,
-      { $skip: skip },
-      { $limit: limitNum }
-    ];
-
-    const bookings = await CampaignBookingModel.aggregate(dataPipeline);
-
-    const statsPipeline = [
-      { $match: matchQuery },
-      {
-        $sort: {
-          clientEmail: 1,
-          scheduledEventStartTime: -1,
-          bookingCreatedAt: -1
-        }
-      },
-      {
-        $group: {
-          _id: '$clientEmail',
-          latestBooking: { $first: '$$ROOT' }
-        }
-      },
-      {
-        $group: {
-          _id: '$latestBooking.paymentPlan.name',
-          count: { $sum: 1 },
-          revenue: { $sum: '$latestBooking.paymentPlan.price' }
-        }
-      }
-    ];
-
-    const planBreakdownResult = await CampaignBookingModel.aggregate(statsPipeline);
+    // Group by normalized phone or email
+    const groupedMap = new Map();
     
-    const revenuePipeline = [
-      { $match: matchQuery },
-      {
-        $sort: {
-          clientEmail: 1,
-          scheduledEventStartTime: -1,
-          bookingCreatedAt: -1
-        }
-      },
-      {
-        $group: {
-          _id: '$clientEmail',
-          latestBooking: { $first: '$$ROOT' }
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalRevenue: { $sum: '$latestBooking.paymentPlan.price' }
-        }
+    for (const booking of allBookings) {
+      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+      const groupKey = normalizedPhone || booking.clientEmail;
+      
+      if (!groupedMap.has(groupKey)) {
+        groupedMap.set(groupKey, {
+          booking: booking,
+          totalBookings: 1
+        });
+      } else {
+        const existing = groupedMap.get(groupKey);
+        existing.totalBookings += 1;
+        // Keep the latest booking (already sorted)
       }
-    ];
+    }
 
-    const [revenueResult] = await CampaignBookingModel.aggregate(revenuePipeline);
-    const totalRevenue = revenueResult?.totalRevenue || 0;
+    // Convert map to array and add totalBookings
+    const groupedBookings = Array.from(groupedMap.values()).map(item => ({
+      ...item.booking,
+      totalBookings: item.totalBookings
+    }));
 
-    const planBreakdown = planBreakdownResult.map(item => ({
-      _id: item._id,
-      count: item.count,
-      revenue: item.revenue
+    // Sort by scheduledEventStartTime descending
+    groupedBookings.sort((a, b) => {
+      const aTime = a.scheduledEventStartTime ? new Date(a.scheduledEventStartTime).getTime() : 0;
+      const bTime = b.scheduledEventStartTime ? new Date(b.scheduledEventStartTime).getTime() : 0;
+      if (bTime !== aTime) return bTime - aTime;
+      return new Date(b.bookingCreatedAt).getTime() - new Date(a.bookingCreatedAt).getTime();
+    });
+
+    const total = groupedBookings.length;
+    const bookings = groupedBookings.slice(skip, skip + limitNum);
+
+    // Update stats pipeline to use same grouping logic
+    const statsMap = new Map();
+    for (const booking of allBookings) {
+      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+      const groupKey = normalizedPhone || booking.clientEmail;
+      
+      if (!statsMap.has(groupKey)) {
+        statsMap.set(groupKey, booking);
+      }
+    }
+
+    const uniqueBookings = Array.from(statsMap.values());
+
+    // Calculate stats from unique bookings
+    const planBreakdownMap = new Map();
+    let totalRevenue = 0;
+
+    for (const booking of uniqueBookings) {
+      if (booking.paymentPlan && booking.paymentPlan.name) {
+        const planName = booking.paymentPlan.name;
+        const price = booking.paymentPlan.price || 0;
+        
+        if (!planBreakdownMap.has(planName)) {
+          planBreakdownMap.set(planName, { count: 0, revenue: 0 });
+        }
+        
+        const planStats = planBreakdownMap.get(planName);
+        planStats.count += 1;
+        planStats.revenue += price;
+        totalRevenue += price;
+      }
+    }
+
+    const planBreakdown = Array.from(planBreakdownMap.entries()).map(([name, stats]) => ({
+      _id: name,
+      count: stats.count,
+      revenue: stats.revenue
     }));
 
     return res.status(200).json({

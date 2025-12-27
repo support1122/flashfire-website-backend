@@ -1,6 +1,7 @@
 import { WorkflowModel } from '../Schema_Models/Workflow.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { WorkflowLogModel } from '../Schema_Models/WorkflowLog.js';
+import { Logger } from '../Utils/Logger.js';
 import sgMail from '@sendgrid/mail';
 import watiService from '../Utils/WatiService.js';
 
@@ -353,6 +354,114 @@ export const triggerWorkflow = async (bookingId, action) => {
   }
 };
 
+
+export const cancelScheduledWorkflows = async (bookingId, newStatus, oldStatus = null) => {
+  try {
+    // Statuses that should cancel all scheduled workflows
+    const cancelTriggerStatuses = ['completed', 'paid', 'canceled'];
+    
+    if (!cancelTriggerStatuses.includes(newStatus)) {
+      return { success: true, cancelled: 0, message: 'Status does not require workflow cancellation' };
+    }
+
+    // Get booking with scheduled workflows
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+    if (!booking) {
+      return { success: false, error: 'Booking not found' };
+    }
+
+    // Find all scheduled (not executed, failed, or already cancelled) workflows
+    const scheduledWorkflows = (booking.scheduledWorkflows || []).filter(
+      sw => sw.status === 'scheduled'
+    );
+
+    if (scheduledWorkflows.length === 0) {
+      return { success: true, cancelled: 0, message: 'No scheduled workflows to cancel' };
+    }
+
+    const cancellationReason = `Status changed to ${newStatus}`;
+    const cancelledWorkflows = [];
+
+    // Cancel each scheduled workflow
+    for (const scheduledWorkflow of scheduledWorkflows) {
+      try {
+        // Update workflow status to cancelled
+        await CampaignBookingModel.updateOne(
+          { bookingId, 'scheduledWorkflows._id': scheduledWorkflow._id },
+          { 
+            $set: { 
+              'scheduledWorkflows.$.status': 'cancelled',
+              'scheduledWorkflows.$.error': cancellationReason
+            } 
+          }
+        );
+
+        // Log cancellation in workflow logs
+        await logWorkflowExecution({
+          workflowId: scheduledWorkflow.workflowId,
+          workflowName: null, // We don't have workflow name here, but that's okay
+          triggerAction: null, // Original trigger action is not stored in scheduledWorkflow
+          bookingId,
+          booking: {
+            clientEmail: booking.clientEmail,
+            clientName: booking.clientName,
+            clientPhone: booking.clientPhone
+          },
+          step: scheduledWorkflow.step,
+          status: 'cancelled', // Use 'cancelled' status for cancelled workflows in logs
+          scheduledFor: scheduledWorkflow.scheduledFor,
+          executedAt: null,
+          error: cancellationReason,
+          cancellationReason: cancellationReason
+        });
+
+        cancelledWorkflows.push({
+          workflowId: scheduledWorkflow.workflowId,
+          step: scheduledWorkflow.step,
+          scheduledFor: scheduledWorkflow.scheduledFor,
+          cancelledAt: new Date()
+        });
+
+        console.log(`✅ Cancelled scheduled workflow for booking ${bookingId}:`, {
+          workflowId: scheduledWorkflow.workflowId,
+          daysAfter: scheduledWorkflow.step.daysAfter,
+          scheduledFor: scheduledWorkflow.scheduledFor,
+          reason: cancellationReason
+        });
+
+      } catch (workflowError) {
+        console.error(`Error cancelling workflow ${scheduledWorkflow.workflowId}:`, workflowError);
+        // Continue with other workflows even if one fails
+      }
+    }
+
+    Logger.info('Cancelled scheduled workflows due to status change', {
+      bookingId,
+      oldStatus,
+      newStatus,
+      cancelledCount: cancelledWorkflows.length,
+      clientEmail: booking.clientEmail
+    });
+
+    return {
+      success: true,
+      cancelled: cancelledWorkflows.length,
+      workflows: cancelledWorkflows,
+      message: `Cancelled ${cancelledWorkflows.length} scheduled workflow(s)`
+    };
+
+  } catch (error) {
+    console.error('Error cancelling scheduled workflows:', error);
+    Logger.error('Error cancelling scheduled workflows', {
+      bookingId,
+      newStatus,
+      error: error.message,
+      stack: error.stack
+    });
+    return { success: false, error: error.message };
+  }
+};
+
 // ==================== EXECUTE WORKFLOW STEP ====================
 async function executeWorkflowStep(step, booking, workflowId, workflowName = null, triggerAction = null) {
   let responseData = null;
@@ -508,7 +617,7 @@ async function scheduleWorkflowStep(bookingId, step, workflowId, executionDate, 
 }
 
 // ==================== LOG WORKFLOW EXECUTION ====================
-async function logWorkflowExecution({ workflowId, workflowName, triggerAction, bookingId, booking, step, status, scheduledFor, executedAt = null, error = null, errorDetails = null, responseData = null }) {
+async function logWorkflowExecution({ workflowId, workflowName, triggerAction, bookingId, booking, step, status, scheduledFor, executedAt = null, error = null, errorDetails = null, responseData = null, cancellationReason = null }) {
   try {
     const log = new WorkflowLogModel({
       workflowId,
@@ -530,7 +639,7 @@ async function logWorkflowExecution({ workflowId, workflowName, triggerAction, b
       status,
       scheduledFor: scheduledFor || executedAt || new Date(),
       executedAt: executedAt || null,
-      error: error || null,
+      error: error || cancellationReason || null,
       errorDetails: errorDetails || null,
       responseData: responseData || null
     });
