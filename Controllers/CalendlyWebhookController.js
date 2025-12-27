@@ -2,6 +2,9 @@ import { Logger } from '../Utils/Logger.js';
 import { sendNoShowReminder } from '../Utils/WatiHelper.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnectForMeet } from '../Utils/DiscordConnect.js';
+import { cancelCall, scheduleCall } from '../Utils/CallScheduler.js';
+import { cancelWhatsAppReminder, scheduleWhatsAppReminder } from '../Utils/WhatsAppReminderScheduler.js';
+import { DateTime } from 'luxon';
 
 /**
  * Handle Calendly webhook events
@@ -22,6 +25,16 @@ export const handleCalendlyWebhook = async (req, res) => {
         status: payload.status
       } : null
     });
+
+    // Handle invitee.rescheduled events
+    if (event === 'invitee.rescheduled') {
+      return await handleRescheduledEvent(req, res, payload);
+    }
+
+
+    if (event === 'invitee.canceled') {
+      return await handleCanceledEvent(req, res, payload);
+    }
 
     // Only handle invitee_no_show events
     if (event !== 'invitee_no_show') {
@@ -47,6 +60,14 @@ export const handleCalendlyWebhook = async (req, res) => {
     const clientEmail = invitee.email;
     const clientName = invitee.name || 'Valued Client';
     const clientPhone = invitee.phone_number || null;
+    
+    const rescheduleUrl = invitee.reschedule_url || null;
+    
+    Logger.info('Extracted reschedule URL from webhook', { 
+      rescheduleUrl,
+      clientEmail,
+      hasRescheduleUrl: !!rescheduleUrl
+    });
     
     // Get UTM parameters from questions and answers
     let utmSource = null;
@@ -97,10 +118,18 @@ export const handleCalendlyWebhook = async (req, res) => {
       clientPhone: clientPhone || bookingRecord?.clientPhone,
       bookingCreatedAt: bookingRecord?.bookingCreatedAt || new Date(),
       calendlyMeetLink: bookingRecord?.calendlyMeetLink || calendlyEvent?.uri,
+      rescheduleUrl: rescheduleUrl || bookingRecord?.calendlyRescheduleLink || null,
       utmSource: utmSource || bookingRecord?.utmSource,
       utmMedium: utmMedium || bookingRecord?.utmMedium,
       bookingId: bookingRecord?._id || null
     };
+
+    Logger.info('Prepared booking data for WhatsApp', {
+      clientName,
+      clientEmail,
+      hasRescheduleUrl: !!bookingData.rescheduleUrl,
+      rescheduleUrl: bookingData.rescheduleUrl
+    });
 
     // Send Discord notification
     try {
@@ -146,6 +175,14 @@ export const handleCalendlyWebhook = async (req, res) => {
         if (whatsappSent) {
           bookingRecord.whatsappSentAt = new Date();
         }
+        // Update reschedule URL if we got it from webhook and it's not already saved
+        if (rescheduleUrl && !bookingRecord.calendlyRescheduleLink) {
+          bookingRecord.calendlyRescheduleLink = rescheduleUrl;
+          Logger.info('Updated booking record with reschedule URL from webhook', {
+            bookingId: bookingRecord._id,
+            rescheduleUrl
+          });
+        }
         await bookingRecord.save();
         
         Logger.info('Updated booking record with no-show status', { 
@@ -170,7 +207,8 @@ export const handleCalendlyWebhook = async (req, res) => {
         whatsappSent: whatsappSent,
         phoneAvailable: !!bookingData.clientPhone,
         bookingUpdated: !!bookingRecord,
-        utmSource: bookingData.utmSource
+        utmSource: bookingData.utmSource,
+        rescheduleUrl: bookingData.rescheduleUrl
       }
     });
 
@@ -203,6 +241,7 @@ export const testWebhook = async (req, res) => {
       clientPhone: sendWhatsApp === 'true' ? '+1234567890' : null,
       bookingCreatedAt: new Date(),
       calendlyMeetLink: 'https://calendly.com/test',
+      rescheduleUrl: 'https://calendly.com/reschedulings/test-reschedule-url',
       utmSource: 'test_source',
       utmMedium: 'test_medium'
     };
@@ -233,3 +272,489 @@ export const testWebhook = async (req, res) => {
     });
   }
 };
+
+async function handleRescheduledEvent(req, res, payload) {
+  try {
+    const { invitee, scheduled_event, old_scheduled_event } = payload;
+
+    if (!invitee || !invitee.email) {
+      Logger.error('Invalid reschedule webhook payload: missing invitee information');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing invitee information in webhook payload' 
+      });
+    }
+
+    // Extract meeting times
+    const oldStartTime = old_scheduled_event?.start_time;
+    const newStartTime = scheduled_event?.start_time;
+    const newEndTime = scheduled_event?.end_time;
+
+    if (!oldStartTime || !newStartTime) {
+      Logger.error('Invalid reschedule webhook payload: missing scheduled event times');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing old or new scheduled event times' 
+      });
+    }
+
+    // Extract client information
+    const clientEmail = invitee.email;
+    const clientName = invitee.name || 'Valued Client';
+    const clientPhone = invitee.phone_number || null;
+    const rescheduleUrl = invitee.reschedule_url || null;
+    const meetLink = scheduled_event?.location?.join_url || 'Not Provided';
+
+    Logger.info('Processing rescheduled meeting', {
+      clientEmail,
+      clientName,
+      clientPhone,
+      oldStartTime,
+      newStartTime,
+      hasRescheduleUrl: !!rescheduleUrl
+    });
+
+    // Find the booking record
+    let bookingRecord = null;
+    try {
+      bookingRecord = await CampaignBookingModel.findOne({
+        clientEmail: clientEmail
+      }).sort({ bookingCreatedAt: -1 }).limit(1);
+    } catch (dbError) {
+      Logger.error('Database error while finding booking record for reschedule', { 
+        error: dbError.message,
+        clientEmail
+      });
+    }
+
+    // Cancel old reminders if we have phone number and old meeting time
+    let oldCallCancelled = false;
+    let oldWhatsAppCancelled = false;
+
+    if (clientPhone && oldStartTime) {
+      // Cancel old call reminder (10 minutes before old meeting)
+      try {
+        const cancelCallResult = await cancelCall({
+          phoneNumber: clientPhone,
+          meetingStartISO: oldStartTime
+        });
+        if (cancelCallResult.success) {
+          oldCallCancelled = true;
+          Logger.info('Cancelled old call reminder', {
+            callId: cancelCallResult.callId,
+            clientPhone,
+            oldStartTime
+          });
+        }
+      } catch (callError) {
+        Logger.error('Failed to cancel old call reminder', {
+          error: callError.message,
+          clientPhone,
+          oldStartTime
+        });
+      }
+
+      // Cancel old WhatsApp reminder (5 minutes before old meeting)
+      try {
+        const cancelWhatsAppResult = await cancelWhatsAppReminder({
+          phoneNumber: clientPhone,
+          meetingStartISO: oldStartTime
+        });
+        if (cancelWhatsAppResult.success) {
+          oldWhatsAppCancelled = true;
+          Logger.info('Cancelled old WhatsApp reminder', {
+            reminderId: cancelWhatsAppResult.reminderId,
+            clientPhone,
+            oldStartTime
+          });
+        }
+      } catch (whatsappError) {
+        Logger.error('Failed to cancel old WhatsApp reminder', {
+          error: whatsappError.message,
+          clientPhone,
+          oldStartTime
+        });
+      }
+    }
+
+    // Update booking record with reschedule information
+    if (bookingRecord) {
+      try {
+        bookingRecord.bookingStatus = 'rescheduled';
+        bookingRecord.rescheduledFrom = new Date(oldStartTime);
+        bookingRecord.rescheduledTo = new Date(newStartTime);
+        bookingRecord.rescheduledAt = new Date();
+        bookingRecord.scheduledEventStartTime = new Date(newStartTime);
+        if (newEndTime) {
+          bookingRecord.scheduledEventEndTime = new Date(newEndTime);
+        }
+        if (rescheduleUrl) {
+          bookingRecord.calendlyRescheduleLink = rescheduleUrl;
+        }
+        if (meetLink && meetLink !== 'Not Provided') {
+          bookingRecord.calendlyMeetLink = meetLink;
+        }
+        bookingRecord.rescheduledCount = (bookingRecord.rescheduledCount || 0) + 1;
+        
+        await bookingRecord.save();
+        
+        Logger.info('Updated booking record with reschedule information', {
+          bookingId: bookingRecord._id,
+          clientEmail,
+          oldStartTime,
+          newStartTime
+        });
+      } catch (updateError) {
+        Logger.error('Failed to update booking record for reschedule', {
+          error: updateError.message,
+          bookingId: bookingRecord?._id
+        });
+      }
+    }
+
+    // Schedule new reminders with new meeting time
+    let newCallScheduled = false;
+    let newWhatsAppScheduled = false;
+
+    if (clientPhone && newStartTime) {
+      // Validate phone number format
+      const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+      if (!phoneRegex.test(clientPhone)) {
+        Logger.warn('Invalid phone number format, skipping reminder scheduling', {
+          clientPhone
+        });
+      } else if (clientPhone.startsWith('+91')) {
+        Logger.info('Skipping India number for rescheduled meeting', {
+          clientPhone
+        });
+      } else {
+        // Calculate new meeting time in different timezones
+        const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
+        const newMeetingTimeUS = newMeetingStartUTC.setZone('America/New_York').toFormat('ff');
+        const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+        const newMeetingDate = newMeetingStartUTC.setZone('America/New_York').toFormat('EEEE MMM d, yyyy');
+
+        // Use reschedule URL from webhook, booking record, or fallback
+        const finalRescheduleLink = rescheduleUrl || 
+                                   bookingRecord?.calendlyRescheduleLink || 
+                                   'https://calendly.com/flashfirejobs';
+
+        // Schedule new call reminder (10 minutes before new meeting)
+        try {
+          const scheduleCallResult = await scheduleCall({
+            phoneNumber: clientPhone,
+            meetingStartISO: newStartTime,
+            meetingTime: newMeetingTimeIndia,
+            inviteeName: clientName,
+            inviteeEmail: clientEmail,
+            source: 'reschedule',
+            meetingLink: meetLink !== 'Not Provided' ? meetLink : null,
+            rescheduleLink: finalRescheduleLink,
+            metadata: {
+              bookingId: bookingRecord?.bookingId,
+              rescheduledFrom: oldStartTime,
+              rescheduledTo: newStartTime,
+              meetingEndISO: newEndTime
+            }
+          });
+
+          if (scheduleCallResult.success) {
+            newCallScheduled = true;
+            Logger.info('Scheduled new call reminder for rescheduled meeting', {
+              callId: scheduleCallResult.callId,
+              clientPhone,
+              newStartTime
+            });
+
+            // Update booking record with new call job ID if available
+            if (bookingRecord && scheduleCallResult.callId) {
+              bookingRecord.reminderCallJobId = scheduleCallResult.callId;
+              await bookingRecord.save();
+            }
+          }
+        } catch (callScheduleError) {
+          Logger.error('Failed to schedule new call reminder', {
+            error: callScheduleError.message,
+            clientPhone,
+            newStartTime
+          });
+        }
+
+        // Schedule new WhatsApp reminder (5 minutes before new meeting)
+        try {
+          const scheduleWhatsAppResult = await scheduleWhatsAppReminder({
+            phoneNumber: clientPhone,
+            meetingStartISO: newStartTime,
+            meetingTime: newMeetingTimeIndia,
+            meetingDate: newMeetingDate,
+            clientName: clientName,
+            clientEmail: clientEmail,
+            meetingLink: meetLink !== 'Not Provided' ? meetLink : null,
+            rescheduleLink: finalRescheduleLink,
+            source: 'reschedule',
+            metadata: {
+              bookingId: bookingRecord?.bookingId,
+              rescheduledFrom: oldStartTime,
+              rescheduledTo: newStartTime
+            }
+          });
+
+          if (scheduleWhatsAppResult.success) {
+            newWhatsAppScheduled = true;
+            Logger.info('Scheduled new WhatsApp reminder for rescheduled meeting', {
+              reminderId: scheduleWhatsAppResult.reminderId,
+              clientPhone,
+              newStartTime
+            });
+          }
+        } catch (whatsappScheduleError) {
+          Logger.error('Failed to schedule new WhatsApp reminder', {
+            error: whatsappScheduleError.message,
+            clientPhone,
+            newStartTime
+          });
+        }
+      }
+    }
+    try {
+      await DiscordConnectForMeet(
+        `🔄 Meeting Rescheduled: ${clientName} (${clientEmail})\n` +
+        `📅 Old Time: ${DateTime.fromISO(oldStartTime).toFormat('ff')}\n` +
+        `📅 New Time: ${DateTime.fromISO(newStartTime).toFormat('ff')}\n` +
+        `❌ Old Reminders: Call ${oldCallCancelled ? '✓' : '✗'}, WhatsApp ${oldWhatsAppCancelled ? '✓' : '✗'}\n` +
+        `✅ New Reminders: Call ${newCallScheduled ? '✓' : '✗'}, WhatsApp ${newWhatsAppScheduled ? '✓' : '✗'}`
+      );
+    } catch (discordError) {
+      Logger.error('Failed to send Discord notification for reschedule', {
+        error: discordError.message
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Rescheduled event processed successfully',
+      data: {
+        clientName,
+        clientEmail,
+        oldStartTime,
+        newStartTime,
+        oldCallCancelled,
+        oldWhatsAppCancelled,
+        newCallScheduled,
+        newWhatsAppScheduled,
+        rescheduleUrl
+      }
+    });
+
+  } catch (error) {
+    Logger.error('Error processing rescheduled event', {
+      error: error.message,
+      stack: error.stack,
+      payload
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error processing rescheduled event'
+    });
+  }
+}
+
+
+async function handleCanceledEvent(req, res, payload) {
+  try {
+    const { invitee, cancellation, scheduled_event } = payload;
+
+    if (!invitee || !invitee.email) {
+      Logger.error('Invalid cancel webhook payload: missing invitee information');
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing invitee information in webhook payload' 
+      });
+    }
+
+    // Extract client information
+    const clientEmail = invitee.email;
+    const clientName = invitee.name || 'Valued Client';
+    const clientPhone = invitee.phone_number || null;
+    const canceledBy = cancellation?.canceled_by || 'unknown';
+    const cancelReason = cancellation?.reason || 'No reason provided';
+    const meetingStartTime = scheduled_event?.start_time || null;
+
+    Logger.info('Processing canceled meeting', {
+      clientEmail,
+      clientName,
+      clientPhone,
+      canceledBy,
+      cancelReason,
+      meetingStartTime
+    });
+
+    // Find the booking record
+    let bookingRecord = null;
+    try {
+      bookingRecord = await CampaignBookingModel.findOne({
+        clientEmail: clientEmail
+      }).sort({ bookingCreatedAt: -1 }).limit(1);
+    } catch (dbError) {
+      Logger.error('Database error while finding booking record for cancellation', { 
+        error: dbError.message,
+        clientEmail
+      });
+    }
+
+    // Get meeting start time from booking record if not in payload
+    const meetingStartISO = meetingStartTime || bookingRecord?.scheduledEventStartTime || bookingRecord?.bookingCreatedAt;
+
+    // Cancel scheduled reminders if we have phone number and meeting time
+    let callCancelled = false;
+    let whatsappCancelled = false;
+
+    if (clientPhone && meetingStartISO) {
+      // Cancel call reminder (10 minutes before meeting)
+      try {
+        const cancelCallResult = await cancelCall({
+          phoneNumber: clientPhone,
+          meetingStartISO: meetingStartISO
+        });
+        if (cancelCallResult.success) {
+          callCancelled = true;
+          Logger.info('Cancelled call reminder', {
+            callId: cancelCallResult.callId,
+            clientPhone,
+            meetingStartISO
+          });
+        } else {
+          Logger.warn('Call reminder not found or already processed', {
+            clientPhone,
+            meetingStartISO
+          });
+        }
+      } catch (callError) {
+        Logger.error('Failed to cancel call reminder', {
+          error: callError.message,
+          clientPhone,
+          meetingStartISO
+        });
+      }
+
+      // Cancel WhatsApp reminder (5 minutes before meeting)
+      try {
+        const cancelWhatsAppResult = await cancelWhatsAppReminder({
+          phoneNumber: clientPhone,
+          meetingStartISO: meetingStartISO
+        });
+        if (cancelWhatsAppResult.success) {
+          whatsappCancelled = true;
+          Logger.info('Cancelled WhatsApp reminder', {
+            reminderId: cancelWhatsAppResult.reminderId,
+            clientPhone,
+            meetingStartISO
+          });
+        } else {
+          Logger.warn('WhatsApp reminder not found or already processed', {
+            clientPhone,
+            meetingStartISO
+          });
+        }
+      } catch (whatsappError) {
+        Logger.error('Failed to cancel WhatsApp reminder', {
+          error: whatsappError.message,
+          clientPhone,
+          meetingStartISO
+        });
+      }
+    } else {
+      Logger.warn('Cannot cancel reminders - missing phone or meeting time', {
+        hasPhone: !!clientPhone,
+        hasMeetingTime: !!meetingStartISO,
+        clientEmail
+      });
+    }
+
+    // Update booking record status to canceled
+    if (bookingRecord) {
+      try {
+        bookingRecord.bookingStatus = 'canceled';
+        await bookingRecord.save();
+        
+        Logger.info('Updated booking record status to canceled', {
+          bookingId: bookingRecord._id,
+          clientEmail
+        });
+      } catch (updateError) {
+        Logger.error('Failed to update booking record for cancellation', {
+          error: updateError.message,
+          bookingId: bookingRecord?._id
+        });
+      }
+    }
+
+    // Format meeting time for Discord message
+    let meetingTimeFormatted = 'Not Available';
+    if (meetingStartISO) {
+      try {
+        const meetingTime = DateTime.fromISO(meetingStartISO, { zone: 'utc' });
+        meetingTimeFormatted = meetingTime.toFormat('ff');
+      } catch (timeError) {
+        Logger.warn('Failed to format meeting time', { error: timeError.message });
+      }
+    }
+
+    // Send Discord notification to meeting booking channel
+    try {
+      const discordMessage = {
+        "Event": "Meeting Cancelled",
+        "Invitee Name": clientName,
+        "Invitee Email": clientEmail,
+        "Invitee Phone": clientPhone || 'Not Provided',
+        "Meeting Time": meetingTimeFormatted,
+        "Cancelled By": canceledBy,
+        "Cancellation Reason": cancelReason,
+        "Reminders Cancelled": {
+          "Call Reminder": callCancelled ? "✅ Cancelled" : "❌ Not Found",
+          "WhatsApp Reminder": whatsappCancelled ? "✅ Cancelled" : "❌ Not Found"
+        },
+        "Booking Status": bookingRecord ? "✅ Updated to 'canceled'" : "⚠️ Booking not found"
+      };
+
+      await DiscordConnectForMeet(JSON.stringify(discordMessage, null, 2));
+      
+      Logger.info('Sent Discord notification for canceled meeting', {
+        clientEmail,
+        callCancelled,
+        whatsappCancelled
+      });
+    } catch (discordError) {
+      Logger.error('Failed to send Discord notification for cancellation', {
+        error: discordError.message
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Canceled event processed successfully',
+      data: {
+        clientName,
+        clientEmail,
+        callCancelled,
+        whatsappCancelled,
+        bookingUpdated: !!bookingRecord,
+        canceledBy,
+        cancelReason
+      }
+    });
+
+  } catch (error) {
+    Logger.error('Error processing canceled event', {
+      error: error.message,
+      stack: error.stack,
+      payload
+    });
+
+    res.status(500).json({
+      success: false,
+      error: 'Internal server error processing canceled event'
+    });
+  }
+}

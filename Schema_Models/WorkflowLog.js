@@ -75,7 +75,7 @@ export const WorkflowLogSchema = new mongoose.Schema({
   // Execution details
   status: {
     type: String,
-    enum: ['scheduled', 'executed', 'failed'],
+    enum: ['scheduled', 'executed', 'failed', 'cancelled'],
     required: true,
     default: 'scheduled',
     index: true

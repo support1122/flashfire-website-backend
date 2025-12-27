@@ -110,7 +110,7 @@ export const sendWhatsAppMessage = async (phoneNumber, message) => {
 
 export const sendNoShowReminder = async (bookingData) => {
   try {
-    const { clientName, clientPhone, bookingCreatedAt, calendlyMeetLink } = bookingData;
+    const { clientName, clientPhone, bookingCreatedAt, calendlyMeetLink, rescheduleUrl } = bookingData;
     
     // Format the booking date
     const bookingDate = new Date(bookingCreatedAt).toLocaleDateString('en-US', {
@@ -122,16 +122,26 @@ export const sendNoShowReminder = async (bookingData) => {
       minute: '2-digit'
     });
 
+    // Use reschedule URL from webhook if available, otherwise fallback to default
+    const rescheduleLink = rescheduleUrl || 'https://www.flashfirejobs.com/';
+
     const message = `Hi ${clientName}! 👋
 
 You missed our scheduled meeting that was booked on ${bookingDate}. 
 
-No worries! We understand things come up. Click here to reschedule at your convenience: https://www.flashfirejobs.com/
+No worries! We understand things come up. Click here to reschedule at your convenience: ${rescheduleLink}
 
 We're excited to connect with you and discuss how we can help with your career goals! 🚀
 
 Best regards,
 FlashFire Team`;
+
+    Logger.info('Sending no-show reminder with reschedule URL', {
+      clientName,
+      clientPhone,
+      hasRescheduleUrl: !!rescheduleUrl,
+      rescheduleLink
+    });
 
     return await sendWhatsAppMessage(clientPhone, message);
 
