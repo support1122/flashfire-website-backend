@@ -74,7 +74,9 @@ import {
   getWorkflowById,
   updateWorkflow,
   deleteWorkflow,
-  processScheduledWorkflows
+  processScheduledWorkflows,
+  getBookingsByStatusForBulk,
+  triggerWorkflowsForAllByStatus
 } from "./Controllers/WorkflowController.js";
 // Workflow Log Controllers
 import {
@@ -299,6 +301,8 @@ export default function Routes(app) {
   app.put('/api/workflows/:workflowId', updateWorkflow); // Update workflow
   app.delete('/api/workflows/:workflowId', deleteWorkflow); // Delete workflow
   app.post('/api/workflows/process-scheduled', processScheduledWorkflows); // Process scheduled workflows (cron job)
+  app.get('/api/workflows/bulk/bookings-by-status', getBookingsByStatusForBulk); // Get bookings by status for bulk actions
+  app.post('/api/workflows/bulk/trigger-by-status', triggerWorkflowsForAllByStatus); // Trigger workflows for all bookings with status
 
   // ==================== WORKFLOW LOG ROUTES ====================
   app.get('/api/workflow-logs', getWorkflowLogs); // Get workflow logs with pagination
