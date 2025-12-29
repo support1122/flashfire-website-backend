@@ -715,3 +715,202 @@ export const processScheduledWorkflows = async () => {
   }
 };
 
+export const getBookingsByStatusForBulk = async (req, res) => {
+  try {
+    const { status } = req.query;
+
+    if (!status) {
+      return res.status(400).json({
+        success: false,
+        message: 'Status is required'
+      });
+    }
+
+    const statusMap = {
+      'no-show': 'no-show',
+      'completed': 'completed',
+      'canceled': 'canceled',
+      'rescheduled': 'rescheduled'
+    };
+
+    const dbStatus = statusMap[status];
+    if (!dbStatus) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${Object.keys(statusMap).join(', ')}`
+      });
+    }
+
+    const bookings = await CampaignBookingModel.find({
+      bookingStatus: dbStatus,
+      scheduledEventStartTime: { $exists: true, $ne: null }
+    })
+      .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows')
+      .lean();
+
+    // Check which bookings already have scheduled workflows
+    const bookingsWithWorkflowCheck = bookings.map(booking => {
+      const hasScheduledWorkflows = booking.scheduledWorkflows && 
+        booking.scheduledWorkflows.some(sw => sw.status === 'scheduled');
+      
+      return {
+        bookingId: booking.bookingId,
+        clientEmail: booking.clientEmail,
+        clientName: booking.clientName,
+        clientPhone: booking.clientPhone,
+        bookingStatus: booking.bookingStatus,
+        scheduledEventStartTime: booking.scheduledEventStartTime,
+        hasScheduledWorkflows: hasScheduledWorkflows,
+        scheduledWorkflowsCount: booking.scheduledWorkflows?.filter(sw => sw.status === 'scheduled').length || 0
+      };
+    });
+
+    const total = bookingsWithWorkflowCheck.length;
+    const withWorkflows = bookingsWithWorkflowCheck.filter(b => b.hasScheduledWorkflows).length;
+    const withoutWorkflows = total - withWorkflows;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        bookings: bookingsWithWorkflowCheck,
+        summary: {
+          total,
+          withScheduledWorkflows: withWorkflows,
+          withoutScheduledWorkflows: withoutWorkflows
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching bookings by status:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch bookings',
+      error: error.message
+    });
+  }
+};
+
+export const triggerWorkflowsForAllByStatus = async (req, res) => {
+  try {
+    const { status, skipExisting = true } = req.body;
+
+    if (!status) {
+      return res.status(400).json({
+        success: false,
+        message: 'Status is required'
+      });
+    }
+
+    const statusMap = {
+      'no-show': { dbStatus: 'no-show', action: 'no-show' },
+      'completed': { dbStatus: 'completed', action: 'completed' },
+      'canceled': { dbStatus: 'canceled', action: 'canceled' },
+      'rescheduled': { dbStatus: 'rescheduled', action: 'rescheduled' }
+    };
+
+    const statusInfo = statusMap[status];
+    if (!statusInfo) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${Object.keys(statusMap).join(', ')}`
+      });
+    }
+
+    // Get all bookings with this status
+    const bookings = await CampaignBookingModel.find({
+      bookingStatus: statusInfo.dbStatus,
+      scheduledEventStartTime: { $exists: true, $ne: null }
+    }).lean();
+
+    if (bookings.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No bookings found with this status',
+        data: {
+          total: 0,
+          processed: 0,
+          skipped: 0,
+          errors: []
+        }
+      });
+    }
+
+    const actionMap = {
+      'no-show': 'no-show',
+      'completed': 'complete',
+      'canceled': 'cancel',
+      'rescheduled': 're-schedule'
+    };
+
+    const triggerAction = actionMap[statusInfo.action];
+    
+    // Check for active workflows for this action
+    const workflows = await WorkflowModel.find({
+      triggerAction,
+      isActive: true
+    }).lean();
+
+    if (workflows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No active workflows found for this status',
+        data: {
+          total: bookings.length,
+          processed: 0,
+          skipped: bookings.length,
+          errors: []
+        }
+      });
+    }
+
+    const results = {
+      total: bookings.length,
+      processed: 0,
+      skipped: 0,
+      errors: []
+    };
+
+    for (const booking of bookings) {
+      try {
+        const hasScheduledWorkflows = booking.scheduledWorkflows && 
+          booking.scheduledWorkflows.some(sw => sw.status === 'scheduled');
+
+        if (skipExisting && hasScheduledWorkflows) {
+          results.skipped++;
+          continue;
+        }
+
+        const workflowResult = await triggerWorkflow(booking.bookingId, statusInfo.action);
+        
+        if (workflowResult.success && workflowResult.triggered) {
+          results.processed++;
+        } else {
+          results.skipped++;
+        }
+      } catch (error) {
+        console.error(`Error processing booking ${booking.bookingId}:`, error);
+        results.errors.push({
+          bookingId: booking.bookingId,
+          clientEmail: booking.clientEmail,
+          error: error.message
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Processed ${results.processed} bookings, skipped ${results.skipped}`,
+      data: results
+    });
+
+  } catch (error) {
+    console.error('Error triggering workflows for all bookings:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to trigger workflows',
+      error: error.message
+    });
+  }
+};
+

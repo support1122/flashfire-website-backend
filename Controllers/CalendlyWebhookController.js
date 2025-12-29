@@ -517,16 +517,31 @@ async function handleRescheduledEvent(req, res, payload) {
       }
     }
     try {
+      const fullPayload = JSON.stringify(req.body, null, 2);
+      const truncatedPayload = fullPayload.length > 1000 
+        ? fullPayload.substring(0, 1000) + '\n... (truncated)' 
+        : fullPayload;
+        
       await DiscordConnectForMeet(
         `🔄 Meeting Rescheduled: ${clientName} (${clientEmail})\n` +
         `📅 Old Time: ${DateTime.fromISO(oldStartTime).toFormat('ff')}\n` +
         `📅 New Time: ${DateTime.fromISO(newStartTime).toFormat('ff')}\n` +
         `❌ Old Reminders: Call ${oldCallCancelled ? '✓' : '✗'}, WhatsApp ${oldWhatsAppCancelled ? '✓' : '✗'}\n` +
-        `✅ New Reminders: Call ${newCallScheduled ? '✓' : '✗'}, WhatsApp ${newWhatsAppScheduled ? '✓' : '✗'}`
+        `✅ New Reminders: Call ${newCallScheduled ? '✓' : '✗'}, WhatsApp ${newWhatsAppScheduled ? '✓' : '✗'}\n\n` +
+        `🔍 Webhook Payload (truncated if large):\n\`\`\`json\n${truncatedPayload}\n\`\`\``
       );
+      
+      // Log the full payload to the server logs
+      Logger.info('Full webhook payload for reschedule:', { 
+        payload: req.body,
+        clientEmail,
+        eventId: req.body.event_id
+      });
     } catch (discordError) {
       Logger.error('Failed to send Discord notification for reschedule', {
-        error: discordError.message
+        error: discordError.message,
+        clientEmail,
+        eventId: req.body.event_id
       });
     }
 
