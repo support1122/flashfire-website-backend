@@ -31,7 +31,6 @@ export const handleCalendlyWebhook = async (req, res) => {
       return await handleRescheduledEvent(req, res, payload);
     }
 
-
     if (event === 'invitee.canceled') {
       return await handleCanceledEvent(req, res, payload);
     }
@@ -63,10 +62,11 @@ export const handleCalendlyWebhook = async (req, res) => {
     
     const rescheduleUrl = invitee.reschedule_url || null;
     
-    Logger.info('Extracted reschedule URL from webhook', { 
+    Logger.info('Extracted reschedule URL from no-show webhook', { 
       rescheduleUrl,
       clientEmail,
-      hasRescheduleUrl: !!rescheduleUrl
+      hasRescheduleUrl: !!rescheduleUrl,
+      inviteeKeys: Object.keys(invitee) // Debug: log all available keys
     });
     
     // Get UTM parameters from questions and answers
@@ -98,7 +98,6 @@ export const handleCalendlyWebhook = async (req, res) => {
       }).sort({ bookingCreatedAt: -1 }).limit(1);
 
       if (!bookingRecord && utmSource) {
-        // Try to find by UTM source only
         bookingRecord = await CampaignBookingModel.findOne({
           utmSource: utmSource
         }).sort({ bookingCreatedAt: -1 }).limit(1);
@@ -228,8 +227,6 @@ export const handleCalendlyWebhook = async (req, res) => {
 
 /**
  * Test webhook endpoint
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
  */
 export const testWebhook = async (req, res) => {
   try {
@@ -275,8 +272,15 @@ export const testWebhook = async (req, res) => {
 
 async function handleRescheduledEvent(req, res, payload) {
   try {
-    const { invitee, scheduled_event, old_scheduled_event } = payload;
+    // ✅ FIXED: Correct destructuring for rescheduled event
+    // According to Calendly docs, rescheduled events have:
+    // - old_invitee (previous booking)
+    // - new_invitee (new booking)
+    const { old_invitee, new_invitee } = payload;
 
+    // Use new_invitee for current booking info
+    const invitee = new_invitee || old_invitee;
+    
     if (!invitee || !invitee.email) {
       Logger.error('Invalid reschedule webhook payload: missing invitee information');
       return res.status(400).json({ 
@@ -285,10 +289,9 @@ async function handleRescheduledEvent(req, res, payload) {
       });
     }
 
-    // Extract meeting times
-    const oldStartTime = old_scheduled_event?.start_time;
-    const newStartTime = scheduled_event?.start_time;
-    const newEndTime = scheduled_event?.end_time;
+    const oldStartTime = old_invitee?.scheduled_event?.start_time;
+    const newStartTime = new_invitee?.scheduled_event?.start_time;
+    const newEndTime = new_invitee?.scheduled_event?.end_time;
 
     if (!oldStartTime || !newStartTime) {
       Logger.error('Invalid reschedule webhook payload: missing scheduled event times');
@@ -298,12 +301,13 @@ async function handleRescheduledEvent(req, res, payload) {
       });
     }
 
-    // Extract client information
     const clientEmail = invitee.email;
     const clientName = invitee.name || 'Valued Client';
     const clientPhone = invitee.phone_number || null;
-    const rescheduleUrl = invitee.reschedule_url || null;
-    const meetLink = scheduled_event?.location?.join_url || 'Not Provided';
+    
+    const rescheduleUrl = new_invitee?.reschedule_url || null;
+    
+    const meetLink = new_invitee?.scheduled_event?.location?.join_url || 'Not Provided';
 
     Logger.info('Processing rescheduled meeting', {
       clientEmail,
@@ -311,10 +315,12 @@ async function handleRescheduledEvent(req, res, payload) {
       clientPhone,
       oldStartTime,
       newStartTime,
-      hasRescheduleUrl: !!rescheduleUrl
+      hasRescheduleUrl: !!rescheduleUrl,
+      rescheduleUrl, // Log the actual URL for debugging
+      newInviteeKeys: new_invitee ? Object.keys(new_invitee) : [], // Debug
+      scheduledEventKeys: new_invitee?.scheduled_event ? Object.keys(new_invitee.scheduled_event) : [] // Debug
     });
 
-    // Find the booking record
     let bookingRecord = null;
     try {
       bookingRecord = await CampaignBookingModel.findOne({
@@ -327,12 +333,11 @@ async function handleRescheduledEvent(req, res, payload) {
       });
     }
 
-    // Cancel old reminders if we have phone number and old meeting time
     let oldCallCancelled = false;
     let oldWhatsAppCancelled = false;
 
     if (clientPhone && oldStartTime) {
-      // Cancel old call reminder (10 minutes before old meeting)
+      // Cancel old call reminder
       try {
         const cancelCallResult = await cancelCall({
           phoneNumber: clientPhone,
@@ -354,7 +359,7 @@ async function handleRescheduledEvent(req, res, payload) {
         });
       }
 
-      // Cancel old WhatsApp reminder (5 minutes before old meeting)
+      // Cancel old WhatsApp reminder
       try {
         const cancelWhatsAppResult = await cancelWhatsAppReminder({
           phoneNumber: clientPhone,
@@ -390,6 +395,10 @@ async function handleRescheduledEvent(req, res, payload) {
         }
         if (rescheduleUrl) {
           bookingRecord.calendlyRescheduleLink = rescheduleUrl;
+          Logger.info('Updated reschedule URL from webhook', {
+            bookingId: bookingRecord._id,
+            rescheduleUrl
+          });
         }
         if (meetLink && meetLink !== 'Not Provided') {
           bookingRecord.calendlyMeetLink = meetLink;
@@ -402,7 +411,8 @@ async function handleRescheduledEvent(req, res, payload) {
           bookingId: bookingRecord._id,
           clientEmail,
           oldStartTime,
-          newStartTime
+          newStartTime,
+          rescheduleUrlSaved: !!rescheduleUrl
         });
       } catch (updateError) {
         Logger.error('Failed to update booking record for reschedule', {
@@ -430,16 +440,19 @@ async function handleRescheduledEvent(req, res, payload) {
       } else {
         // Calculate new meeting time in different timezones
         const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
-        const newMeetingTimeUS = newMeetingStartUTC.setZone('America/New_York').toFormat('ff');
         const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
         const newMeetingDate = newMeetingStartUTC.setZone('America/New_York').toFormat('EEEE MMM d, yyyy');
 
-        // Use reschedule URL from webhook, booking record, or fallback
+        //Use reschedule URL from webhook with proper fallback chain
         const finalRescheduleLink = rescheduleUrl || 
                                    bookingRecord?.calendlyRescheduleLink || 
                                    'https://calendly.com/flashfirejobs';
 
-        // Schedule new call reminder (10 minutes before new meeting)
+        Logger.info('Using reschedule link for reminders', {
+          source: rescheduleUrl ? 'webhook' : (bookingRecord?.calendlyRescheduleLink ? 'database' : 'default'),
+          link: finalRescheduleLink
+        });
+
         try {
           const scheduleCallResult = await scheduleCall({
             phoneNumber: clientPhone,
@@ -466,7 +479,7 @@ async function handleRescheduledEvent(req, res, payload) {
               newStartTime
             });
 
-            // Update booking record with new call job ID if available
+            // Update booking record with new call job ID
             if (bookingRecord && scheduleCallResult.callId) {
               bookingRecord.reminderCallJobId = scheduleCallResult.callId;
               await bookingRecord.save();
@@ -480,7 +493,7 @@ async function handleRescheduledEvent(req, res, payload) {
           });
         }
 
-        // Schedule new WhatsApp reminder (5 minutes before new meeting)
+        // Schedule new WhatsApp reminder
         try {
           const scheduleWhatsAppResult = await scheduleWhatsAppReminder({
             phoneNumber: clientPhone,
@@ -526,16 +539,18 @@ async function handleRescheduledEvent(req, res, payload) {
         `🔄 Meeting Rescheduled: ${clientName} (${clientEmail})\n` +
         `📅 Old Time: ${DateTime.fromISO(oldStartTime).toFormat('ff')}\n` +
         `📅 New Time: ${DateTime.fromISO(newStartTime).toFormat('ff')}\n` +
+        `🔗 Reschedule URL: ${rescheduleUrl || 'NOT PROVIDED BY CALENDLY'}\n` +
         `❌ Old Reminders: Call ${oldCallCancelled ? '✓' : '✗'}, WhatsApp ${oldWhatsAppCancelled ? '✓' : '✗'}\n` +
         `✅ New Reminders: Call ${newCallScheduled ? '✓' : '✗'}, WhatsApp ${newWhatsAppScheduled ? '✓' : '✗'}\n\n` +
         `🔍 Webhook Payload (truncated if large):\n\`\`\`json\n${truncatedPayload}\n\`\`\``
       );
       
-      // Log the full payload to the server logs
+      // Log the full payload to server logs
       Logger.info('Full webhook payload for reschedule:', { 
         payload: req.body,
         clientEmail,
-        eventId: req.body.event_id
+        eventId: req.body.event_id,
+        rescheduleUrlFound: !!rescheduleUrl
       });
     } catch (discordError) {
       Logger.error('Failed to send Discord notification for reschedule', {
@@ -557,7 +572,7 @@ async function handleRescheduledEvent(req, res, payload) {
         oldWhatsAppCancelled,
         newCallScheduled,
         newWhatsAppScheduled,
-        rescheduleUrl
+        rescheduleUrl // Include in response for debugging
       }
     });
 
@@ -621,12 +636,12 @@ async function handleCanceledEvent(req, res, payload) {
     // Get meeting start time from booking record if not in payload
     const meetingStartISO = meetingStartTime || bookingRecord?.scheduledEventStartTime || bookingRecord?.bookingCreatedAt;
 
-    // Cancel scheduled reminders if we have phone number and meeting time
+    // Cancel scheduled reminders
     let callCancelled = false;
     let whatsappCancelled = false;
 
     if (clientPhone && meetingStartISO) {
-      // Cancel call reminder (10 minutes before meeting)
+      // Cancel call reminder
       try {
         const cancelCallResult = await cancelCall({
           phoneNumber: clientPhone,
@@ -639,11 +654,6 @@ async function handleCanceledEvent(req, res, payload) {
             clientPhone,
             meetingStartISO
           });
-        } else {
-          Logger.warn('Call reminder not found or already processed', {
-            clientPhone,
-            meetingStartISO
-          });
         }
       } catch (callError) {
         Logger.error('Failed to cancel call reminder', {
@@ -653,7 +663,7 @@ async function handleCanceledEvent(req, res, payload) {
         });
       }
 
-      // Cancel WhatsApp reminder (5 minutes before meeting)
+      // Cancel WhatsApp reminder
       try {
         const cancelWhatsAppResult = await cancelWhatsAppReminder({
           phoneNumber: clientPhone,
@@ -666,11 +676,6 @@ async function handleCanceledEvent(req, res, payload) {
             clientPhone,
             meetingStartISO
           });
-        } else {
-          Logger.warn('WhatsApp reminder not found or already processed', {
-            clientPhone,
-            meetingStartISO
-          });
         }
       } catch (whatsappError) {
         Logger.error('Failed to cancel WhatsApp reminder', {
@@ -679,18 +684,15 @@ async function handleCanceledEvent(req, res, payload) {
           meetingStartISO
         });
       }
-    } else {
-      Logger.warn('Cannot cancel reminders - missing phone or meeting time', {
-        hasPhone: !!clientPhone,
-        hasMeetingTime: !!meetingStartISO,
-        clientEmail
-      });
     }
 
     // Update booking record status to canceled
     if (bookingRecord) {
       try {
         bookingRecord.bookingStatus = 'canceled';
+        bookingRecord.canceledAt = new Date();
+        bookingRecord.canceledBy = canceledBy;
+        bookingRecord.cancelReason = cancelReason;
         await bookingRecord.save();
         
         Logger.info('Updated booking record status to canceled', {
@@ -705,7 +707,7 @@ async function handleCanceledEvent(req, res, payload) {
       }
     }
 
-    // Format meeting time for Discord message
+    // Format meeting time for Discord
     let meetingTimeFormatted = 'Not Available';
     if (meetingStartISO) {
       try {
@@ -716,7 +718,6 @@ async function handleCanceledEvent(req, res, payload) {
       }
     }
 
-    // Send Discord notification to meeting booking channel
     try {
       const discordMessage = {
         "Event": "Meeting Cancelled",

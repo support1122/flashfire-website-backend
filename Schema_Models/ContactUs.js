@@ -1,30 +1,33 @@
 import mongoose from 'mongoose'
 
 export const ContactUsSchema = new mongoose.Schema({
-    firstName : {
+    fullName: {
         type: String,
-        required : true,
-        default : 'Not Specified'
+        required: true
     },
-    lastName :{
+    email: {
         type: String,
-        required : true,
-        default : 'Not Specified'
+        required: true
     },
-    email : {
+    company: {
         type: String,
-        required : true,
-        default : 'Not Specified'
+        default: ''
     },
-    message : {
+    phone: {
         type: String,
-        required : true,
-        default : 'Not Specified'
+        default: ''
     },
-    currentRole : {
+    message: {
         type: String,
-        required : true,
-        default : 'Not Specified'
+        required: true
+    },
+    workAuthorization: {
+        type: String,
+        default: ''
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
     }
 })
 

@@ -713,6 +713,11 @@ app.post("/call-status", async (req, res) => {
 app.post('/calendly-webhook', async (req, res) => {
   const { event, payload } = req.body;
   Logger.info('Calendly webhook received', { event });
+  Logger.info('Full Calendly webhook payload', { 
+    event, 
+    payload: JSON.stringify(payload, null, 2) 
+  });
+  
   try {
     if (event === "invitee.canceled") {
       const inviteePhone = payload?.invitee?.questions_and_answers?.find(q =>
@@ -780,7 +785,10 @@ app.post('/calendly-webhook', async (req, res) => {
       if (inviteeEmail) {
         await CampaignBookingModel.findOneAndUpdate(
           { clientEmail: inviteeEmail },
-          { bookingStatus: 'canceled' },
+          { 
+            bookingStatus: 'canceled',
+            canceledAt: new Date()
+          },
           { sort: { bookingCreatedAt: -1 } }
         );
       }
@@ -792,17 +800,34 @@ app.post('/calendly-webhook', async (req, res) => {
     if (event === "invitee.rescheduled") {
       Logger.info('Processing rescheduled meeting');
       
-      const inviteeEmail = payload?.new_invitee?.email || payload?.old_invitee?.email;
-      let inviteePhone = payload?.new_invitee?.questions_and_answers?.find(q =>
+      const { old_invitee, new_invitee } = payload;
+      Logger.info('Rescheduled event payload structure', {
+        hasOldInvitee: !!old_invitee,
+        hasNewInvitee: !!new_invitee,
+        oldInviteeKeys: old_invitee ? Object.keys(old_invitee) : [],
+        newInviteeKeys: new_invitee ? Object.keys(new_invitee) : [],
+        oldRescheduleUrl: old_invitee?.reschedule_url,
+        newRescheduleUrl: new_invitee?.reschedule_url
+      });
+      
+      const inviteeEmail = new_invitee?.email || old_invitee?.email;
+      
+      let inviteePhone = new_invitee?.questions_and_answers?.find(q =>
         q.question.trim().toLowerCase() === 'phone number'
       )?.answer || null;
+
+      if (!inviteePhone) {
+        inviteePhone = old_invitee?.questions_and_answers?.find(q =>
+          q.question.trim().toLowerCase() === 'phone number'
+        )?.answer || null;
+      }
 
       if (inviteePhone) {
         inviteePhone = inviteePhone.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '');
       }
 
-      const oldStartTime = payload?.old_invitee?.scheduled_event?.start_time;
-      const newStartTime = payload?.new_invitee?.scheduled_event?.start_time;
+      const oldStartTime = old_invitee?.scheduled_event?.start_time;
+      const newStartTime = new_invitee?.scheduled_event?.start_time;
       
       Logger.info('Meeting rescheduled', { 
         email: inviteeEmail, 
@@ -816,8 +841,8 @@ app.post('/calendly-webhook', async (req, res) => {
           const existingBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
             .sort({ bookingCreatedAt: -1 });
           
-          // Cancel old call reminder
-          if (existingBooking?.reminderCallJobId) {
+          // Cancel old call reminder from BullMQ
+          if (existingBooking?.reminderCallJobId && callQueue) {
             const oldJobId = existingBooking.reminderCallJobId;
             const oldJob = await callQueue.getJob(oldJobId);
             
@@ -833,17 +858,17 @@ app.post('/calendly-webhook', async (req, res) => {
                 phone: inviteePhone 
               });
             }
-            
-            // Also cancel MongoDB-based call reminder
-            if (inviteePhone && oldStartTime) {
-              const { cancelCall } = await import('./Utils/CallScheduler.js');
-              const cancelResult = await cancelCall({
-                phoneNumber: inviteePhone,
-                meetingStartISO: oldStartTime
-              });
-              if (cancelResult.success) {
-                Logger.info('Cancelled old MongoDB call reminder', { callId: cancelResult.callId });
-              }
+          }
+          
+          // Cancel MongoDB-based call reminder
+          if (inviteePhone && oldStartTime) {
+            const { cancelCall } = await import('./Utils/CallScheduler.js');
+            const cancelResult = await cancelCall({
+              phoneNumber: inviteePhone,
+              meetingStartISO: oldStartTime
+            });
+            if (cancelResult.success) {
+              Logger.info('Cancelled old MongoDB call reminder', { callId: cancelResult.callId });
             }
           }
           
@@ -877,7 +902,6 @@ app.post('/calendly-webhook', async (req, res) => {
         }
       }
 
-      // 2. Calculate new delay for rescheduled meeting
       const newMeetingStart = new Date(newStartTime);
       const newDelay = newMeetingStart.getTime() - Date.now() - (10 * 60 * 1000);
 
@@ -889,20 +913,22 @@ app.post('/calendly-webhook', async (req, res) => {
         return res.status(200).json({ message: 'Rescheduled meeting too soon for call' });
       }
 
-      // 3. Convert times to different zones
       const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
-      const newMeetingTimeUS = newMeetingStartUTC.setZone('America/New_York').toFormat('ff');
       const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
 
-      // 4. Extract additional details
-      const inviteeName = payload?.new_invitee?.name || payload?.old_invitee?.name;
-      const meetLink = payload?.new_invitee?.scheduled_event?.location?.join_url || 
-                       payload?.old_invitee?.scheduled_event?.location?.join_url || 'Not Provided';
+      const inviteeName = new_invitee?.name || old_invitee?.name;
+      const meetLink = new_invitee?.scheduled_event?.location?.join_url || 
+                       old_invitee?.scheduled_event?.location?.join_url || 
+                       'Not Provided';
       
-      // Extract new reschedule link from rescheduled invitee
-      const newRescheduleLink = payload?.new_invitee?.reschedule_url || null;
+      const newRescheduleLink = new_invitee?.reschedule_url || null;
+      Logger.info('Reschedule link extraction', {
+        newRescheduleLink,
+        hasNewRescheduleLink: !!newRescheduleLink,
+        source: newRescheduleLink ? 'new_invitee.reschedule_url' : 'NOT FOUND',
+        newInviteeStructure: new_invitee ? Object.keys(new_invitee) : []
+      });
 
-      // 5. Update database with reschedule info including new reschedule link
       if (inviteeEmail) {
         const updateData = { 
           bookingStatus: 'rescheduled',
@@ -913,9 +939,18 @@ app.post('/calendly-webhook', async (req, res) => {
           $inc: { rescheduledCount: 1 }
         };
         
-        // Update reschedule link if available
+        // ✅ FIXED: Always update reschedule link if available
         if (newRescheduleLink) {
           updateData.calendlyRescheduleLink = newRescheduleLink;
+          Logger.info('Updating booking with reschedule link', { 
+            email: inviteeEmail,
+            rescheduleLink: newRescheduleLink
+          });
+        } else {
+          Logger.warn('No reschedule link in webhook - Calendly may not be providing it', {
+            email: inviteeEmail,
+            eventType: event
+          });
         }
         
         await CampaignBookingModel.findOneAndUpdate(
@@ -929,7 +964,7 @@ app.post('/calendly-webhook', async (req, res) => {
         });
       }
 
-      // 6. Schedule NEW reminder call
+      // Schedule NEW reminder call
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       if (inviteePhone && phoneRegex.test(inviteePhone)) {
         if (inviteePhone.startsWith("+91")) {
@@ -940,21 +975,28 @@ app.post('/calendly-webhook', async (req, res) => {
           return res.status(200).json({ message: 'Rescheduled but skipped India number' });
         }
 
-        const newMeetLink = payload?.new_invitee?.scheduled_event?.location?.join_url || 
-                           payload?.old_invitee?.scheduled_event?.location?.join_url || 
+        const newMeetLink = new_invitee?.scheduled_event?.location?.join_url || 
+                           old_invitee?.scheduled_event?.location?.join_url || 
                            'Not Provided';
-        // Use the new reschedule link (already saved to DB above) or fallback
+        
+        // ✅ FIXED: Use reschedule link with proper fallback
         const rescheduleLinkForReminder = newRescheduleLink || 
-                                         payload?.old_invitee?.reschedule_url || 
+                                         old_invitee?.reschedule_url || 
                                          'https://calendly.com/flashfirejobs';
-        const newEndTime = payload?.new_invitee?.scheduled_event?.end_time || 
-                          payload?.old_invitee?.scheduled_event?.end_time || null;
+        
+        Logger.info('Using reschedule link for reminder', {
+          link: rescheduleLinkForReminder,
+          source: newRescheduleLink ? 'new_invitee' : (old_invitee?.reschedule_url ? 'old_invitee' : 'default')
+        });
+        
+        const newEndTime = new_invitee?.scheduled_event?.end_time || 
+                          old_invitee?.scheduled_event?.end_time || null;
 
         // Get booking to pass bookingId in metadata
         const rescheduledBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
           .sort({ bookingCreatedAt: -1 });
 
-        // Schedule MongoDB call (primary) - this will also schedule WhatsApp reminder
+        // Schedule MongoDB call (primary)
         const mongoRescheduleResult = await scheduleCall({
           phoneNumber: inviteePhone,
           meetingStartISO: newStartTime,
@@ -976,28 +1018,28 @@ app.post('/calendly-webhook', async (req, res) => {
           console.log('✅ [MongoDB Scheduler] Rescheduled call and WhatsApp reminder scheduled:', mongoRescheduleResult.callId);
         }
 
-        // ✅ Use unique jobId: phone + meeting time to prevent collisions (BullMQ backup)
+        // BullMQ backup
         const uniqueJobId = `${inviteePhone}_${newStartTime}`;
         
         const newJob = await callQueue.add(
           'callUser',
           {
             phone: inviteePhone,
-            phoneNumber: inviteePhone, // Include both for compatibility with all workers
+            phoneNumber: inviteePhone,
             meetingTime: newMeetingTimeIndia,
             role: 'client',
             inviteeEmail,
             eventStartISO: newStartTime,
           },
           {
-            jobId: uniqueJobId,  // ✅ Unique: phone + meeting time
+            jobId: uniqueJobId,
             delay: newDelay,
             removeOnComplete: true,
             removeOnFail: 100,
-            attempts: 3,  // ✅ Retry failed calls up to 3 times
+            attempts: 3,
             backoff: {
               type: 'exponential',
-              delay: 60000  // 1 minute, 2 minutes, 4 minutes
+              delay: 60000
             }
           }
         );
@@ -1007,7 +1049,7 @@ app.post('/calendly-webhook', async (req, res) => {
           { clientEmail: inviteeEmail },
           { 
             reminderCallJobId: mongoRescheduleResult.callId || newJob.id.toString(),
-            bookingStatus: 'scheduled'  // Reset to scheduled after successful reschedule
+            bookingStatus: 'scheduled'
           },
           { sort: { bookingCreatedAt: -1 } }
         );
@@ -1021,9 +1063,8 @@ app.post('/calendly-webhook', async (req, res) => {
         console.log('   • Name:', inviteeName);
         console.log('   • Old Time:', DateTime.fromISO(oldStartTime, { zone: 'utc' }).setZone('Asia/Kolkata').toFormat('ff'));
         console.log('   • New Time:', newMeetingTimeIndia);
+        console.log('   • Reschedule Link:', rescheduleLinkForReminder);
         console.log('   • New Delay:', Math.round(newDelay / 1000), 'seconds');
-        console.log('   • Will execute at:', new Date(Date.now() + newDelay).toLocaleString());
-        console.log('   • Retry attempts: 3 (exponential backoff)');
         console.log('========================================\n');
 
         Logger.info('Scheduled NEW reminder call for rescheduled meeting', { 
@@ -1032,6 +1073,7 @@ app.post('/calendly-webhook', async (req, res) => {
           newMeetingTime: newMeetingTimeIndia,
           jobId: newJob.id,
           uniqueJobId,
+          rescheduleLink: rescheduleLinkForReminder,
           retryAttempts: 3
         });
 
@@ -1040,10 +1082,10 @@ app.post('/calendly-webhook', async (req, res) => {
 - Phone: ${inviteePhone}
 - Old Time: ${DateTime.fromISO(oldStartTime, { zone: 'utc' }).setZone('Asia/Kolkata').toFormat('ff')} (IST)
 - New Time: ${newMeetingTimeIndia} (IST)
+- Reschedule Link: ${rescheduleLinkForReminder}
 - Reminder Call: Scheduled 10 minutes before new time
 - Job ID: ${newJob.id}
-- Unique ID: ${uniqueJobId}
-- Retries: 3 attempts`;
+- Unique ID: ${uniqueJobId}`;
 
         await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, rescheduleMessage);
       } else {
@@ -1057,9 +1099,12 @@ app.post('/calendly-webhook', async (req, res) => {
         message: 'Rescheduled meeting processed successfully',
         oldTime: oldStartTime,
         newTime: newStartTime,
-        reminderScheduled: !!inviteePhone
+        reminderScheduled: !!inviteePhone,
+        rescheduleLink: newRescheduleLink || 'Not provided by Calendly'
       });
     }
+
+    // ==================== HANDLE CREATED EVENTS ====================
     if (event === "invitee.created") {
       Logger.info('Calendly payload received');
 
@@ -1073,7 +1118,6 @@ app.post('/calendly-webhook', async (req, res) => {
         inviteePhone = inviteePhone.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '');
       }
 
-      // ✅ Calculate meeting start in UTC
       const meetingStart = new Date(payload?.scheduled_event?.start_time);
       
       if (isNaN(meetingStart.getTime())) {
@@ -1104,7 +1148,6 @@ app.post('/calendly-webhook', async (req, res) => {
         callWillExecuteInMinutes: Math.round(delay / 60000)
       });
 
-      // ✅ CRITICAL: Validate delay before scheduling
       if (delay < 0) {
         const minutesUntilMeeting = Math.round(-delay / 60000);
         Logger.warn('⚠️ Meeting is too soon to schedule calls - skipping reminder', { 
@@ -1115,22 +1158,25 @@ app.post('/calendly-webhook', async (req, res) => {
           meetingInMinutes: minutesUntilMeeting
         });
         await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-          `⚠️ Meeting too soon for reminder call: ${inviteeName || 'Unknown'} (${inviteeEmail || 'Unknown'}). Meeting in ${minutesUntilMeeting} minutes. Cannot schedule 10-minute reminder.`
+          `⚠️ Meeting too soon for reminder call: ${inviteeName || 'Unknown'} (${inviteeEmail || 'Unknown'}). Meeting in ${minutesUntilMeeting} minutes.`
         );
-        // Continue processing booking but skip call scheduling
-        // Don't return - still save booking to database
       }
 
-      // ✅ Convert to different time zones
       const meetingStartUTC = DateTime.fromISO(payload?.scheduled_event?.start_time, { zone: 'utc' });
       const meetingTimeUS = meetingStartUTC.setZone('America/New_York').toFormat('ff');
       const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
       
-      // ✅ Extract reschedule link from Calendly webhook
-      // According to Calendly API docs, reschedule_url is in payload.invitee.reschedule_url
+      // ✅ CRITICAL: Extract and log reschedule link
       let rescheduleLink = payload?.invitee?.reschedule_url || null;
+      
+      Logger.info('Reschedule link from invitee.created webhook', {
+        rescheduleLink,
+        hasRescheduleLink: !!rescheduleLink,
+        inviteeUri: payload?.invitee?.uri,
+        inviteeKeys: payload?.invitee ? Object.keys(payload.invitee) : []
+      });
       
       // If reschedule link is not in webhook, try fetching from Calendly API
       if (!rescheduleLink && payload?.invitee?.uri) {
@@ -1146,14 +1192,13 @@ app.post('/calendly-webhook', async (req, res) => {
         }
       }
 
-      // ✅ Extract UTM parameters
+      // Extract UTM parameters
       const utmSource = payload?.tracking?.utm_source || 'direct';
       const utmMedium = payload?.tracking?.utm_medium || null;
       const utmCampaign = payload?.tracking?.utm_campaign || null;
       const utmContent = payload?.tracking?.utm_content || null;
       const utmTerm = payload?.tracking?.utm_term || null;
 
-      // ✅ Extract "anything to know" field
       const anythingToKnow = payload?.questions_and_answers?.find(q =>
         q.question.toLowerCase().includes('anything') || 
         q.question.toLowerCase().includes('prepare')
@@ -1185,7 +1230,6 @@ app.post('/calendly-webhook', async (req, res) => {
         });
       }
 
-      // ✅ NOT A DUPLICATE - Save DIRECTLY to database (same place as Discord)
       // Find campaign by UTM source
       let campaignId = null;
       let campaign = await CampaignModel.findOne({ utmSource });
@@ -1194,13 +1238,11 @@ app.post('/calendly-webhook', async (req, res) => {
         campaignId = campaign.campaignId;
         Logger.info('✅ Campaign found for booking', { campaignId, utmSource });
       } else {
-        // No campaign found - this is a direct Calendly booking
-        // Create a virtual campaign WITHOUT auto-generated numbers
-        Logger.warn('⚠️ No campaign found for UTM source - Creating virtual campaign for direct booking', { utmSource });
+        Logger.warn('⚠️ No campaign found for UTM source - Creating virtual campaign', { utmSource });
         
         try {
           const virtualCampaign = new CampaignModel({
-            campaignName: utmSource, // Just use the UTM source as name (no "Direct Calendly:" prefix or numbers)
+            campaignName: utmSource,
             utmSource: utmSource,
             utmMedium: utmMedium || 'direct',
             utmCampaign: utmCampaign || 'calendly_direct',
@@ -1212,7 +1254,7 @@ app.post('/calendly-webhook', async (req, res) => {
           await virtualCampaign.save();
           campaignId = virtualCampaign.campaignId;
           
-          Logger.info('✅ Virtual campaign created for direct Calendly booking', {
+          Logger.info('✅ Virtual campaign created', {
             campaignId,
             utmSource,
             campaignName: virtualCampaign.campaignName
@@ -1222,7 +1264,7 @@ app.post('/calendly-webhook', async (req, res) => {
         }
       }
 
-      // Create booking object directly here (where Discord data is)
+      // Create booking object
       const newBooking = new CampaignBookingModel({
         campaignId,
         utmSource: utmSource || 'direct',
@@ -1230,13 +1272,13 @@ app.post('/calendly-webhook', async (req, res) => {
         utmCampaign,
         utmContent,
         utmTerm,
-        clientName: inviteeName,           // Same as Discord
-        clientEmail: inviteeEmail,         // Same as Discord
-        clientPhone: inviteePhone,         // Same as Discord
+        clientName: inviteeName,
+        clientEmail: inviteeEmail,
+        clientPhone: inviteePhone,
         calendlyEventUri: payload?.scheduled_event?.uri,
         calendlyInviteeUri: payload?.invitee?.uri,
-        calendlyMeetLink: meetLink,        // Same as Discord
-        calendlyRescheduleLink: rescheduleLink, // Save reschedule link from Calendly
+        calendlyMeetLink: meetLink,
+        calendlyRescheduleLink: rescheduleLink, // ✅ Save reschedule link
         scheduledEventStartTime: payload?.scheduled_event?.start_time,
         scheduledEventEndTime: payload?.scheduled_event?.end_time,
         anythingToKnow,
@@ -1247,10 +1289,9 @@ app.post('/calendly-webhook', async (req, res) => {
         bookingStatus: 'scheduled'
       });
 
-      // Save to database
       await newBooking.save();
 
-      // Mark user as booked in UserModel since they now have a booking
+      // Mark user as booked
       try {
         const escapedEmail = inviteeEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         await UserModel.updateOne(
@@ -1263,51 +1304,52 @@ app.post('/calendly-webhook', async (req, res) => {
           email: inviteeEmail, 
           error: userUpdateError.message 
         });
-        // Don't fail the whole request if user update fails
       }
 
-      Logger.info('✅ Booking saved DIRECTLY in Discord webhook handler', {
+      Logger.info('✅ Booking saved', {
         bookingId: newBooking.bookingId,
         campaignId: newBooking.campaignId,
         utmSource: newBooking.utmSource,
         clientName: newBooking.clientName,
         clientEmail: newBooking.clientEmail,
         clientPhone: newBooking.clientPhone,
-        calendlyMeetLink: newBooking.calendlyMeetLink
+        calendlyMeetLink: newBooking.calendlyMeetLink,
+        rescheduleLink: newBooking.calendlyRescheduleLink // ✅ Log reschedule link
       });
 
-      // ✅ Prepare booking details for Discord (same data that was saved)
+      // Prepare booking details for Discord
       const bookingDetails = {
-        "Booking ID": newBooking.bookingId,           // NEW!
-        "Campaign ID": newBooking.campaignId || 'N/A', // NEW!
+        "Booking ID": newBooking.bookingId,
+        "Campaign ID": newBooking.campaignId || 'N/A',
         "Invitee Name": inviteeName,
         "Invitee Email": inviteeEmail,
         "Invitee Phone": inviteePhone || 'Not Provided',
         "Google Meet Link": meetLink,
+        "Reschedule Link": rescheduleLink || 'Not Provided', // ✅ Include in Discord
         "Meeting Time (Client US)": meetingTimeUS,
         "Meeting Time (Team India)": meetingTimeIndia,
         "Booked At": bookedAt,
-        "UTM Source" : utmSource,
+        "UTM Source": utmSource,
         "UTM Medium": utmMedium || 'N/A',
         "UTM Campaign": utmCampaign || 'N/A',
-        "Database Status": "✅ SAVED"                  // NEW!
+        "Database Status": "✅ SAVED"
       };
 
-       if(payload.tracking.utm_source !== 'webpage_visit' && payload.tracking.utm_source !== null && payload.tracking.utm_source !== 'direct'){
-        const utmData ={
-          clientName : inviteeName,
-          clientEmail : inviteeEmail,
-          clientPhone : inviteePhone || 'Not Provided',
-          utmSource : payload?.tracking?.utm_source ,
-        }
-        await fetch('https://clients-tracking-backend.onrender.com/api/track/utm-campaign-lead',{
-          method:'POST',
-          headers:{
-            'Content-Type':'application/json'          
-                  },
-          body:JSON.stringify(utmData)
-        })
-        console.log('✅ UTM campaign lead tracked to external service:', utmData);  
+      if (payload.tracking.utm_source !== 'webpage_visit' && payload.tracking.utm_source !== null && payload.tracking.utm_source !== 'direct') {
+        const utmData = {
+          clientName: inviteeName,
+          clientEmail: inviteeEmail,
+          clientPhone: inviteePhone || 'Not Provided',
+          utmSource: payload?.tracking?.utm_source,
+        };
+        await fetch('https://clients-tracking-backend.onrender.com/api/track/utm-campaign-lead', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(utmData)
+        });
+        console.log('✅ UTM campaign lead tracked to external service:', utmData);
       }
 
       Logger.info('New Calendly booking', bookingDetails);
@@ -1322,186 +1364,163 @@ app.post('/calendly-webhook', async (req, res) => {
         });
       }
 
-      // -------------------- Fraud Screening --------------------
-      // const screening = basicFraudCheck({
-      //   email: inviteeEmail,
-      //   name: inviteeName,
-      //   utmSource: payload?.tracking?.utm_source
-      // });
-      // if (screening.flagged) {
-      //   Logger.warn('Booking flagged by fraud screening, skipping call', { email: inviteeEmail, reasons: screening.reasons });
-      //   await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Fraud screening flagged booking. Email: ${inviteeEmail}. Reasons: ${screening.reasons.join(', ')}`);
-      //   return res.status(200).json({ message: 'Booking flagged by fraud screening. Call not scheduled.', reasons: screening.reasons });
-      // }
-
-      // ✅ Validate phone numbers
-
+      // Validate phone numbers
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       let scheduledJobs = [];
+      
       if (inviteePhone && inviteePhone.startsWith("+91")) {
-  Logger.info('Skipping India number', { phone: inviteePhone });
-  if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-    await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,`Skipping India number: ${inviteePhone}` );
-  }
-  return res.status(200).json({ message: 'Skipped India number' });
-}
-
-
-      // ✅ Only schedule call if delay is positive (meeting is in future)
-      if (inviteePhone && phoneRegex.test(inviteePhone) && delay > 0) {
-          
-          // ============================================================
-          // 🔥 PRIMARY: MongoDB-based Scheduler (RELIABLE - No Redis issues)
-          // ============================================================
-          const meetingLink = meetLink && meetLink !== 'Not Provided' ? meetLink : null;
-          // Use reschedule link from booking record (saved from webhook) or try fetching from API
-          let rescheduleLinkForReminder = newBooking?.calendlyRescheduleLink || rescheduleLink;
-          
-          // If still no reschedule link, try fetching from Calendly API
-          if (!rescheduleLinkForReminder && newBooking?.calendlyInviteeUri) {
-            try {
-              const fetchedLink = await getRescheduleLinkForBooking(newBooking);
-              if (fetchedLink) {
-                rescheduleLinkForReminder = fetchedLink;
-                console.log('✅ [Calendly Webhook] Fetched reschedule link for reminder from API:', rescheduleLinkForReminder);
-              }
-            } catch (error) {
-              console.warn('⚠️ [Calendly Webhook] Could not fetch reschedule link for reminder:', error.message);
-            }
-          }
-          
-          // Fallback to default if still no link
-          if (!rescheduleLinkForReminder) {
-            rescheduleLinkForReminder = 'https://calendly.com/flashfirejobs';
-          }
-          
-          const meetingEndTime = payload?.scheduled_event?.end_time || null;
-          
-          const mongoResult = await scheduleCall({
-            phoneNumber: inviteePhone,
-            meetingStartISO: payload?.scheduled_event?.start_time,
-            meetingTime: meetingTimeIndia,
-            inviteeName,
-            inviteeEmail,
-            source: 'calendly',
-            meetingLink: meetingLink,
-            rescheduleLink: rescheduleLinkForReminder,
-            metadata: {
-              bookingId: newBooking?.bookingId,
-              eventUri: payload?.scheduled_event?.uri,
-              meetingEndISO: meetingEndTime
-            }
-          });
-
-          if (mongoResult.success) {
-            console.log('✅ [MongoDB Scheduler] Call scheduled successfully:', mongoResult.callId);
-            scheduledJobs.push(`Client: ${inviteePhone} (MongoDB)`);
-            
-            // Update booking with call ID
-            if (newBooking?.bookingId) {
-              await CampaignBookingModel.findOneAndUpdate(
-                { bookingId: newBooking.bookingId },
-                { reminderCallJobId: mongoResult.callId }
-              );
-            }
-          } else {
-            console.warn('⚠️ [MongoDB Scheduler] Failed to schedule:', mongoResult.error);
-          }
-
-          // ============================================================
-          // 🔄 BACKUP: BullMQ Scheduler (if Redis is available)
-          // ============================================================
-          try {
-            const uniqueJobId = `${inviteePhone}_${payload?.scheduled_event?.start_time}`;
-            
-            // Check if BullMQ job already exists
-            const existingJob = callQueue ? await callQueue.getJob(uniqueJobId) : null;
-            if (existingJob) {
-              Logger.info('BullMQ job already exists - skipping', { jobId: uniqueJobId });
-            } else if (callQueue) {
-              const job = await callQueue.add(
-                'callUser',
-                {
-                  phone: inviteePhone,
-                  phoneNumber: inviteePhone,
-                  meetingTime: meetingTimeIndia,
-                  role: 'client',
-                  inviteeEmail,
-                  eventStartISO: payload?.scheduled_event?.start_time,
-                },
-                {
-                  jobId: uniqueJobId,
-                  delay,
-                  removeOnComplete: true,
-                  removeOnFail: 100,
-                  attempts: 3,
-                  backoff: { type: 'exponential', delay: 60000 }
-                }
-              );
-              console.log('✅ [BullMQ Backup] Also scheduled in BullMQ:', job.id);
-            }
-          } catch (bullmqError) {
-            console.warn('⚠️ [BullMQ Backup] Failed (MongoDB will handle it):', bullmqError.message);
-          }
-            
-          // Calculate execution times for verification
-          const callExecutionTime = new Date(Date.now() + delay);
-          const meetingTimeUTC = new Date(payload?.scheduled_event?.start_time);
-          const timeDifference = meetingTimeUTC.getTime() - callExecutionTime.getTime();
-          const minutesDifference = Math.round(timeDifference / 60000);
-
-          console.log('\n📞 ========================================');
-          console.log('📞 [API] Call Reminder Scheduled!');
-          console.log('📞 ========================================');
-          console.log('   • MongoDB Call ID:', mongoResult.callId);
-          console.log('   • Phone:', inviteePhone);
-          console.log('   • Name:', inviteeName);
-          console.log('   • Email:', inviteeEmail);
-          console.log('   • Meeting Time (IST):', meetingTimeIndia);
-          console.log('   • Meeting Time (UTC):', meetingTimeUTC.toISOString());
-          console.log('   • Delay:', Math.round(delay / 60000), 'minutes');
-          console.log('   • Call Will Execute At:', callExecutionTime.toISOString());
-          console.log('   • Time Between Call & Meeting:', minutesDifference, 'minutes');
-          console.log('   • ✅ Primary: MongoDB Scheduler (RELIABLE)');
-          console.log('   • 🔄 Backup: BullMQ (if Redis works)');
-          console.log('========================================\n');
-            
-          Logger.info('Call scheduled via MongoDB scheduler', { 
-            phone: inviteePhone, 
-            delayMinutes: Math.round(delay / 60000), 
-            callId: mongoResult.callId,
-            retryAttempts: 3
-          });
-          
-          // Send Discord notification
-          const scheduledMessage = `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reminder: 10 minutes before meeting\n• Primary: MongoDB Scheduler ✅\n• Backup: BullMQ 🔄`;
-          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
-          
-      } else if (delay <= 0) {
-          Logger.warn('Skipping call scheduling - meeting too soon or invalid phone', {
-            phone: inviteePhone,
-            delayMs: delay,
-            hasValidPhone: inviteePhone && phoneRegex.test(inviteePhone)
-          });
-        } else {
-          Logger.warn('No valid phone number provided by invitee', { phone: inviteePhone });
-          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-            `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
-          );
+        Logger.info('Skipping India number', { phone: inviteePhone });
+        if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Skipping India number: ${inviteePhone}`);
         }
+        return res.status(200).json({ message: 'Skipped India number' });
+      }
+
+      // Schedule call if delay is positive
+      if (inviteePhone && phoneRegex.test(inviteePhone) && delay > 0) {
+        const meetingLink = meetLink && meetLink !== 'Not Provided' ? meetLink : null;
+        let rescheduleLinkForReminder = newBooking?.calendlyRescheduleLink || rescheduleLink;
+        
+        if (!rescheduleLinkForReminder && newBooking?.calendlyInviteeUri) {
+          try {
+            const fetchedLink = await getRescheduleLinkForBooking(newBooking);
+            if (fetchedLink) {
+              rescheduleLinkForReminder = fetchedLink;
+              console.log('✅ [Calendly Webhook] Fetched reschedule link for reminder from API:', rescheduleLinkForReminder);
+            }
+          } catch (error) {
+            console.warn('⚠️ [Calendly Webhook] Could not fetch reschedule link for reminder:', error.message);
+          }
+        }
+        
+        // Fallback to default
+        if (!rescheduleLinkForReminder) {
+          rescheduleLinkForReminder = 'https://calendly.com/flashfirejobs';
+          Logger.warn('Using default reschedule link - Calendly did not provide one', {
+            bookingId: newBooking.bookingId
+          });
+        }
+        
+        const meetingEndTime = payload?.scheduled_event?.end_time || null;
+        
+        const mongoResult = await scheduleCall({
+          phoneNumber: inviteePhone,
+          meetingStartISO: payload?.scheduled_event?.start_time,
+          meetingTime: meetingTimeIndia,
+          inviteeName,
+          inviteeEmail,
+          source: 'calendly',
+          meetingLink: meetingLink,
+          rescheduleLink: rescheduleLinkForReminder,
+          metadata: {
+            bookingId: newBooking?.bookingId,
+            eventUri: payload?.scheduled_event?.uri,
+            meetingEndISO: meetingEndTime
+          }
+        });
+
+        if (mongoResult.success) {
+          console.log('✅ [MongoDB Scheduler] Call scheduled successfully:', mongoResult.callId);
+          scheduledJobs.push(`Client: ${inviteePhone} (MongoDB)`);
+          
+          // Update booking with call ID
+          if (newBooking?.bookingId) {
+            await CampaignBookingModel.findOneAndUpdate(
+              { bookingId: newBooking.bookingId },
+              { reminderCallJobId: mongoResult.callId }
+            );
+          }
+        } else {
+          console.warn('⚠️ [MongoDB Scheduler] Failed to schedule:', mongoResult.error);
+        }
+
+        // BullMQ Backup
+        try {
+          const uniqueJobId = `${inviteePhone}_${payload?.scheduled_event?.start_time}`;
+          
+          const existingJob = callQueue ? await callQueue.getJob(uniqueJobId) : null;
+          if (existingJob) {
+            Logger.info('BullMQ job already exists - skipping', { jobId: uniqueJobId });
+          } else if (callQueue) {
+            const job = await callQueue.add(
+              'callUser',
+              {
+                phone: inviteePhone,
+                phoneNumber: inviteePhone,
+                meetingTime: meetingTimeIndia,
+                role: 'client',
+                inviteeEmail,
+                eventStartISO: payload?.scheduled_event?.start_time,
+              },
+              {
+                jobId: uniqueJobId,
+                delay,
+                removeOnComplete: true,
+                removeOnFail: 100,
+                attempts: 3,
+                backoff: { type: 'exponential', delay: 60000 }
+              }
+            );
+            console.log('✅ [BullMQ Backup] Also scheduled in BullMQ:', job.id);
+          }
+        } catch (bullmqError) {
+          console.warn('⚠️ [BullMQ Backup] Failed (MongoDB will handle it):', bullmqError.message);
+        }
+          
+        const callExecutionTime = new Date(Date.now() + delay);
+        const meetingTimeUTC = new Date(payload?.scheduled_event?.start_time);
+        const timeDifference = meetingTimeUTC.getTime() - callExecutionTime.getTime();
+        const minutesDifference = Math.round(timeDifference / 60000);
+
+        console.log('\n📞 ========================================');
+        console.log('📞 [API] Call Reminder Scheduled!');
+        console.log('📞 ========================================');
+        console.log('   • MongoDB Call ID:', mongoResult.callId);
+        console.log('   • Phone:', inviteePhone);
+        console.log('   • Name:', inviteeName);
+        console.log('   • Email:', inviteeEmail);
+        console.log('   • Meeting Time (IST):', meetingTimeIndia);
+        console.log('   • Reschedule Link:', rescheduleLinkForReminder);
+        console.log('   • Delay:', Math.round(delay / 60000), 'minutes');
+        console.log('========================================\n');
+          
+        Logger.info('Call scheduled via MongoDB scheduler', { 
+          phone: inviteePhone, 
+          delayMinutes: Math.round(delay / 60000), 
+          callId: mongoResult.callId,
+          rescheduleLink: rescheduleLinkForReminder,
+          retryAttempts: 3
+        });
+        
+        const scheduledMessage = `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reschedule Link: ${rescheduleLinkForReminder}\n• Reminder: 10 minutes before meeting`;
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
+        
+      } else if (delay <= 0) {
+        Logger.warn('Skipping call scheduling - meeting too soon or invalid phone', {
+          phone: inviteePhone,
+          delayMs: delay,
+          hasValidPhone: inviteePhone && phoneRegex.test(inviteePhone)
+        });
+      } else {
+        Logger.warn('No valid phone number provided by invitee', { phone: inviteePhone });
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+          `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
+        );
+      }
 
       Logger.info('Scheduled calls summary', { jobs: scheduledJobs, count: scheduledJobs.length });
       const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
       if (discordWebhookUrl) {
         await DiscordConnect(discordWebhookUrl, `✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
       } else {
-        Logger.warn('Discord webhook URL not configured - skipping scheduled calls summary');
+        Logger.warn('Discord webhook URL not configured');
       }
 
       return res.status(200).json({
         message: 'Webhook received & calls scheduled',
         bookingDetails,
-        scheduledCalls: scheduledJobs
+        scheduledCalls: scheduledJobs,
+        rescheduleLink: rescheduleLink || 'Not provided by Calendly'
       });
     }
 
