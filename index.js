@@ -921,12 +921,15 @@ app.post('/calendly-webhook', async (req, res) => {
                        old_invitee?.scheduled_event?.location?.join_url || 
                        'Not Provided';
       
-      const newRescheduleLink = new_invitee?.reschedule_url || null;
+      const newRescheduleLink = payload?.reschedule_url || new_invitee?.reschedule_url || null;
       Logger.info('Reschedule link extraction', {
         newRescheduleLink,
         hasNewRescheduleLink: !!newRescheduleLink,
-        source: newRescheduleLink ? 'new_invitee.reschedule_url' : 'NOT FOUND',
-        newInviteeStructure: new_invitee ? Object.keys(new_invitee) : []
+        topLevelRescheduleUrl: payload?.reschedule_url,
+        nestedRescheduleUrl: new_invitee?.reschedule_url,
+        source: payload?.reschedule_url ? 'payload.reschedule_url' : (new_invitee?.reschedule_url ? 'new_invitee.reschedule_url' : 'NOT FOUND'),
+        newInviteeStructure: new_invitee ? Object.keys(new_invitee) : [],
+        payloadKeys: Object.keys(payload || {})
       });
 
       if (inviteeEmail) {
@@ -1169,13 +1172,16 @@ app.post('/calendly-webhook', async (req, res) => {
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
       
       // ✅ CRITICAL: Extract and log reschedule link
-      let rescheduleLink = payload?.invitee?.reschedule_url || null;
+      let rescheduleLink = payload?.reschedule_url || payload?.invitee?.reschedule_url || null;
       
       Logger.info('Reschedule link from invitee.created webhook', {
         rescheduleLink,
         hasRescheduleLink: !!rescheduleLink,
+        topLevelRescheduleUrl: payload?.reschedule_url,
+        nestedRescheduleUrl: payload?.invitee?.reschedule_url,
         inviteeUri: payload?.invitee?.uri,
-        inviteeKeys: payload?.invitee ? Object.keys(payload.invitee) : []
+        inviteeKeys: payload?.invitee ? Object.keys(payload.invitee) : [],
+        payloadKeys: Object.keys(payload || {})
       });
       
       // If reschedule link is not in webhook, try fetching from Calendly API

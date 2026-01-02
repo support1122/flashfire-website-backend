@@ -60,13 +60,16 @@ export const handleCalendlyWebhook = async (req, res) => {
     const clientName = invitee.name || 'Valued Client';
     const clientPhone = invitee.phone_number || null;
     
-    const rescheduleUrl = invitee.reschedule_url || null;
+    const rescheduleUrl = payload?.reschedule_url || invitee.reschedule_url || null;
     
     Logger.info('Extracted reschedule URL from no-show webhook', { 
       rescheduleUrl,
       clientEmail,
       hasRescheduleUrl: !!rescheduleUrl,
-      inviteeKeys: Object.keys(invitee) // Debug: log all available keys
+      topLevelRescheduleUrl: payload?.reschedule_url,
+      nestedRescheduleUrl: invitee.reschedule_url,
+      inviteeKeys: Object.keys(invitee), // Debug: log all available keys
+      payloadKeys: Object.keys(payload || {})
     });
     
     // Get UTM parameters from questions and answers
@@ -305,7 +308,7 @@ async function handleRescheduledEvent(req, res, payload) {
     const clientName = invitee.name || 'Valued Client';
     const clientPhone = invitee.phone_number || null;
     
-    const rescheduleUrl = new_invitee?.reschedule_url || null;
+    const rescheduleUrl = payload?.reschedule_url || new_invitee?.reschedule_url || null;
     
     const meetLink = new_invitee?.scheduled_event?.location?.join_url || 'Not Provided';
 
@@ -316,9 +319,12 @@ async function handleRescheduledEvent(req, res, payload) {
       oldStartTime,
       newStartTime,
       hasRescheduleUrl: !!rescheduleUrl,
+      topLevelRescheduleUrl: payload?.reschedule_url,
+      nestedRescheduleUrl: new_invitee?.reschedule_url,
       rescheduleUrl, // Log the actual URL for debugging
       newInviteeKeys: new_invitee ? Object.keys(new_invitee) : [], // Debug
-      scheduledEventKeys: new_invitee?.scheduled_event ? Object.keys(new_invitee.scheduled_event) : [] // Debug
+      scheduledEventKeys: new_invitee?.scheduled_event ? Object.keys(new_invitee.scheduled_event) : [], // Debug
+      payloadKeys: Object.keys(payload || {})
     });
 
     let bookingRecord = null;
