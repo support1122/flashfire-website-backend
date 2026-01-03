@@ -278,11 +278,16 @@ async function makeCall(scheduledCall) {
       'See you in the meeting. Thank you and good luck.'
     );
 
-    // Make the call
+    const baseUrl = process.env.API_BASE_URL || 'https://api.flashfirejobs.com';
+    const statusCallbackUrl = `${baseUrl}/call-status`;
+
     const call = await twilioClient.calls.create({
       to: phoneNumber,
       from: TWILIO_FROM,
-      twiml: twiml.toString()
+      twiml: twiml.toString(),
+      statusCallback: statusCallbackUrl,
+      statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed', 'busy', 'failed', 'no-answer', 'canceled'],
+      statusCallbackMethod: 'POST'
     });
 
     console.log('✅ [CallScheduler] Call initiated:', {
@@ -339,74 +344,19 @@ export async function processDueCalls() {
         const result = await makeCall(call);
 
         if (result.success) {
-          // Mark as completed
+          // Update with Twilio call SID - status updates will come via webhook
           await ScheduledCallModel.updateOne(
             { _id: call._id },
             { 
-              status: 'completed',
-              completedAt: new Date(),
               twilioCallSid: result.twilioCallSid
             }
           );
 
-          // Send success notification
-          if (DISCORD_WEBHOOK) {
-            await DiscordConnect(DISCORD_WEBHOOK,
-              // `✅ **Call Completed (MongoDB Scheduler)**\n` +
-              // `📞 Phone: ${call.phoneNumber}\n` +
-              // `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
-              // `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
-              // `📆 Meeting: ${call.meetingTime}\n` +
-              // `🎫 Twilio SID: ${result.twilioCallSid}`
-
-              `✅ **Call Status Update (MongoDB Scheduler)**\n` +
-              // ` what's app message sent to ${call.phoneNumber} for meeting scheduled at ${call.meetingTime} \n` +
-              `🚨 App Update: initiated\n` +
-              `📞 To: ${call.phoneNumber}\n` +
-              `👤 From: +14722138424\n` +
-              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
-              `👤 Status: initiated\n` +
-              `👤 Answered By: Unknown\n` +
-              `👤 Call SID: ${result.twilioCallSid}\n` +
-              `👤 Timestamp: ${new Date().toISOString()}\n` +
-              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
-              `📆 Meeting: ${call.meetingTime}\n` +
-              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
-              `🚨 App Update:ringing\n` +
-              `📞 To: ${call.phoneNumber}\n` +
-              `👤 From: +14722138424\n` +
-              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
-              `👤 Status: ringing\n` +
-              `👤 Answered By: Unknown\n` +
-              `👤 Call SID: ${result.twilioCallSid}\n` +
-              `👤 Timestamp: ${new Date().toISOString()}\n` +
-              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
-              `📆 Meeting: ${call.meetingTime}\n` +
-              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
-              `🚨 App Update:answered\n` +
-              `📞 To: ${call.phoneNumber}\n` +
-              `👤 From: +14722138424\n` +
-              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
-              `👤 Status: answered\n` +
-              `👤 Answered By: Unknown\n` +
-              `👤 Call SID: ${result.twilioCallSid}\n` +
-              `👤 Timestamp: ${new Date().toISOString()}\n` +
-              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
-              `📆 Meeting: ${call.meetingTime}\n` +
-              `🎫 Twilio SID: ${result.twilioCallSid}\n`+
-              `🚨 App Update:completed\n` +
-              `📞 To: ${call.phoneNumber}\n` +
-              `👤 From: +14722138424\n` +
-              `👤 Name: ${call.inviteeName || 'Unknown'}\n` +
-              `👤 Status: completed\n` +
-              `👤 Answered By: Unknown\n` +
-              `👤 Call SID: ${result.twilioCallSid}\n` +
-              `👤 Timestamp: ${new Date().toISOString()}\n` +
-              `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
-              `📆 Meeting: ${call.meetingTime}\n` +
-              `🎫 Twilio SID: ${result.twilioCallSid}\n`
-            );
-          }
+          console.log('✅ [CallScheduler] Call initiated, waiting for Twilio status updates:', {
+            callId: call.callId,
+            twilioCallSid: result.twilioCallSid,
+            phoneNumber: call.phoneNumber
+          });
         } else {
           // Check if we should retry
           const updatedCall = await ScheduledCallModel.findById(call._id);
