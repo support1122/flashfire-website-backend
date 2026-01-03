@@ -623,9 +623,58 @@ app.post("/api/debug/test-call", async (req, res) => {
   }
 });
 
+function buildCallSummaryMessage(scheduledCall, meetingInfo, To, From, CallSid) {
+  let summary = `✅ **Call Status Update (MongoDB Scheduler)**\n`;
+  summary += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  
+  // Add all status updates from history
+  if (scheduledCall.statusHistory && scheduledCall.statusHistory.length > 0) {
+    scheduledCall.statusHistory.forEach((statusUpdate, index) => {
+      const statusDate = statusUpdate.timestamp ? new Date(statusUpdate.timestamp).toUTCString() : 'Unknown';
+      
+      summary += `\n🚨 **App Update: ${statusUpdate.status}**\n`;
+      summary += `📞 **To:** ${To}\n`;
+      summary += `👤 **From:** ${From}\n`;
+      
+      if (meetingInfo.inviteeName && meetingInfo.inviteeName !== 'Unknown') {
+        summary += `👤 **Name:** ${meetingInfo.inviteeName}\n`;
+      }
+      
+      summary += `👤 **Status:** ${statusUpdate.status}\n`;
+      summary += `👤 **Answered By:** ${statusUpdate.answeredBy || 'Unknown'}\n`;
+      
+      if (statusUpdate.duration) {
+        summary += `⏱️ **Duration:** ${statusUpdate.duration} seconds\n`;
+      }
+      
+      summary += `👤 **Call SID:** ${CallSid}\n`;
+      summary += `👤 **Timestamp:** ${statusDate}\n`;
+      
+      if (meetingInfo.inviteeEmail && meetingInfo.inviteeEmail !== 'Unknown') {
+        summary += `📧 **Email:** ${meetingInfo.inviteeEmail}\n`;
+      }
+      
+      if (meetingInfo.meetingTime && meetingInfo.meetingTime !== 'Unknown') {
+        summary += `📆 **Meeting:** ${meetingInfo.meetingTime}\n`;
+      }
+      
+      summary += `🎫 **Twilio SID:** ${CallSid}\n`;
+      
+      // Add separator between statuses (except for last one)
+      if (index < scheduledCall.statusHistory.length - 1) {
+        summary += `\n`;
+      }
+    });
+  }
+  
+  summary += `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+  
+  return summary;
+}
+
 // POST handler for /call-status (Twilio webhook)
 app.post("/call-status", async (req, res) => {
-  const { CallSid, CallStatus, To, From, AnsweredBy, Timestamp } = req.body;
+  const { CallSid, CallStatus, To, From, AnsweredBy, Timestamp, CallDuration } = req.body;
 
   try {
     // Log the raw request for debugging
@@ -636,6 +685,7 @@ app.post("/call-status", async (req, res) => {
       From,
       AnsweredBy,
       Timestamp,
+      CallDuration,
       receivedAt: new Date().toISOString()
     });
 
@@ -645,50 +695,103 @@ app.post("/call-status", async (req, res) => {
       To,
       From,
       AnsweredBy,
-      Timestamp
+      Timestamp,
+      CallDuration
     });
 
-    // Get queue statistics for context
-    let queueStats = {};
+    let scheduledCall = null;
+    let meetingInfo = {};
+    let isFinalStatus = false;
     try {
-      const { callQueue } = await import('./Utils/queue.js');
-      queueStats = {
-        waiting: await callQueue?.getWaitingCount() || 0,
-        active: await callQueue?.getActiveCount() || 0,
-        completed: await callQueue?.getCompletedCount() || 0,
-        failed: await callQueue?.getFailedCount() || 0,
-        delayed: await callQueue?.getDelayedCount() || 0
-      };
-    } catch (statsError) {
-      console.warn('Could not fetch queue stats:', statsError.message);
+      const { ScheduledCallModel } = await import('./Schema_Models/ScheduledCall.js');
+      scheduledCall = await ScheduledCallModel.findOne({ twilioCallSid: CallSid });
+      
+      if (scheduledCall) {
+        meetingInfo = {
+          inviteeName: scheduledCall.inviteeName || 'Unknown',
+          inviteeEmail: scheduledCall.inviteeEmail || 'Unknown',
+          meetingTime: scheduledCall.meetingTime || 'Unknown'
+        };
+        
+        // Track status history
+        const statusTimestamp = Timestamp ? new Date(Timestamp) : new Date();
+        const statusUpdate = {
+          status: CallStatus,
+          answeredBy: AnsweredBy || 'Unknown',
+          timestamp: statusTimestamp,
+          duration: CallDuration ? parseInt(CallDuration) : null,
+          rawData: req.body
+        };
+        
+        // Determine if this is a final status
+        const finalStatuses = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
+        isFinalStatus = finalStatuses.includes(CallStatus);
+        
+        // Update scheduled call with status history
+        const statusMap = {
+          'completed': 'completed',
+          'busy': 'failed',
+          'failed': 'failed',
+          'no-answer': 'failed',
+          'canceled': 'cancelled'
+        };
+        
+        const updateData = {
+          $push: { statusHistory: statusUpdate }
+        };
+        
+        if (statusMap[CallStatus]) {
+          updateData.status = statusMap[CallStatus];
+          if (CallStatus === 'completed') {
+            updateData.completedAt = new Date();
+          }
+        }
+        
+        await ScheduledCallModel.updateOne(
+          { _id: scheduledCall._id },
+          updateData
+        );
+        
+        // Reload to get updated status history
+        scheduledCall = await ScheduledCallModel.findById(scheduledCall._id);
+      }
+    } catch (lookupError) {
+      console.warn('Could not lookup scheduled call:', lookupError.message);
     }
 
-    const totalCalls = (queueStats.waiting || 0) + (queueStats.active || 0) + (queueStats.delayed || 0) + (queueStats.completed || 0) + (queueStats.failed || 0);
+    // Format timestamp
+    const statusTimestamp = Timestamp ? new Date(Timestamp).toISOString() : new Date().toISOString();
+    const statusDate = Timestamp ? new Date(Timestamp).toUTCString() : new Date().toUTCString();
 
-    const msg = `
-📞 **Call Status Update**
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📞 **Call Details:**
-• To: ${To}
-• From: ${From}
-• Status: ${CallStatus}
-• Answered By: ${AnsweredBy || "Unknown"}
-• Call SID: ${CallSid}
-• Timestamp: ${Timestamp || new Date().toISOString()}
-
-📊 **Queue Statistics:**
-• Waiting: ${queueStats.waiting || 0}
-• Active: ${queueStats.active || 0}
-• Delayed: ${queueStats.delayed || 0}
-• Completed: ${queueStats.completed || 0}
-• Failed: ${queueStats.failed || 0}
-• **Total Calls: ${totalCalls}**
-
-⏰ **Update Time:**
-• Received At: ${new Date().toISOString()}
-• Received At (Local): ${new Date().toLocaleString()}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-    `.trim();
+    // Build Discord message with real status information
+    let msg = `🚨 **App Update: ${CallStatus}**\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `📞 **To:** ${To}\n`;
+    msg += `👤 **From:** ${From}\n`;
+    
+    if (meetingInfo.inviteeName && meetingInfo.inviteeName !== 'Unknown') {
+      msg += `👤 **Name:** ${meetingInfo.inviteeName}\n`;
+    }
+    
+    msg += `👤 **Status:** ${CallStatus}\n`;
+    msg += `👤 **Answered By:** ${AnsweredBy || 'Unknown'}\n`;
+    
+    if (CallDuration) {
+      msg += `⏱️ **Duration:** ${CallDuration} seconds\n`;
+    }
+    
+    msg += `👤 **Call SID:** ${CallSid}\n`;
+    msg += `👤 **Timestamp:** ${statusDate}\n`;
+    
+    if (meetingInfo.inviteeEmail && meetingInfo.inviteeEmail !== 'Unknown') {
+      msg += `📧 **Email:** ${meetingInfo.inviteeEmail}\n`;
+    }
+    
+    if (meetingInfo.meetingTime && meetingInfo.meetingTime !== 'Unknown') {
+      msg += `📆 **Meeting:** ${meetingInfo.meetingTime}\n`;
+    }
+    
+    msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
     // Send Discord notification if configured
     const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
@@ -696,6 +799,13 @@ app.post("/call-status", async (req, res) => {
       Logger.info('Sending call status to Discord', { CallSid, CallStatus, hasWebhook: !!discordWebhookUrl });
       await DiscordConnect(discordWebhookUrl, msg);
       console.log('✅ Discord notification sent for call status');
+      
+      // If this is a final status, send comprehensive summary message
+      if (isFinalStatus && scheduledCall && scheduledCall.statusHistory && scheduledCall.statusHistory.length > 0) {
+        const summaryMsg = buildCallSummaryMessage(scheduledCall, meetingInfo, To, From, CallSid);
+        await DiscordConnect(discordWebhookUrl, summaryMsg);
+        console.log('✅ Discord summary notification sent for call completion');
+      }
     } else {
       console.warn("⚠️ DISCORD_REMINDER_CALL_WEBHOOK_URL not configured. Discord notification skipped.");
       Logger.warn('Discord webhook URL not configured - skipping notification', { CallSid, CallStatus });
@@ -720,12 +830,17 @@ app.post('/calendly-webhook', async (req, res) => {
   
   try {
     if (event === "invitee.canceled") {
-      const inviteePhone = payload?.invitee?.questions_and_answers?.find(q =>
+      // FIXED: Extract from payload directly (not payload.invitee) based on Calendly webhook structure
+      const inviteePhone = payload?.questions_and_answers?.find(q =>
         q.question.trim().toLowerCase() === 'phone number'
       )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
-      const inviteeEmail = payload?.invitee?.email || payload?.email;
+      const inviteeEmail = payload?.email || null;
+      const inviteeName = payload?.name || 'Unknown';
 
       // Remove old reminder call job from BOTH schedulers
+      let callCancelled = false;
+      let whatsappCancelled = false;
+      
       if (inviteeEmail || inviteePhone) {
         try {
           const existingBooking = await CampaignBookingModel.findOne({ clientEmail: inviteeEmail })
@@ -739,7 +854,8 @@ app.post('/calendly-webhook', async (req, res) => {
               phoneNumber: inviteePhone,
               meetingStartISO: meetingStartISO
             });
-            if (cancelResult.success) {
+            if (cancelResult?.success) {
+              callCancelled = true;
               Logger.info('Cancelled call in MongoDB scheduler', { callId: cancelResult.callId });
             }
             
@@ -749,7 +865,8 @@ app.post('/calendly-webhook', async (req, res) => {
               phoneNumber: inviteePhone,
               meetingStartISO: meetingStartISO
             });
-            if (cancelWhatsAppResult.success) {
+            if (cancelWhatsAppResult?.success) {
+              whatsappCancelled = true;
               Logger.info('Cancelled WhatsApp reminder', { reminderId: cancelWhatsAppResult.reminderId });
             }
           }
@@ -762,15 +879,26 @@ app.post('/calendly-webhook', async (req, res) => {
               if (oldJob) {
                 await oldJob.remove();
                 Logger.info('Removed call job from BullMQ', { jobId: oldJobId });
+                callCancelled = true; // Mark as cancelled if BullMQ job existed
               }
             } catch (bullmqError) {
               Logger.warn('Could not remove BullMQ job (may not exist)', { error: bullmqError.message });
             }
           }
           
-          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
-            `🗑️ **Reminders Cancelled**\nEmail: ${inviteeEmail}\nPhone: ${inviteePhone}\nReason: Meeting cancelled\n✅ Call reminder cancelled\n✅ WhatsApp reminder cancelled`
-          );
+          // Send detailed Discord notification
+          const discordMsg = `🗑️ **Meeting Cancelled - Reminders Cancelled**\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `👤 **Name:** ${inviteeName}\n` +
+            `📧 **Email:** ${inviteeEmail}\n` +
+            `📞 **Phone:** ${inviteePhone || 'Not Provided'}\n` +
+            `📅 **Meeting Time:** ${existingBooking?.scheduledEventStartTime ? new Date(existingBooking.scheduledEventStartTime).toUTCString() : 'Not Available'}\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `✅ **Call Reminder:** ${callCancelled ? 'Cancelled' : 'Not Found'}\n` +
+            `✅ **WhatsApp Reminder:** ${whatsappCancelled ? 'Cancelled' : 'Not Found'}\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+          
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, discordMsg);
           
         } catch (error) {
           Logger.error('Failed to cancel reminders', { 
@@ -778,6 +906,14 @@ app.post('/calendly-webhook', async (req, res) => {
             phone: inviteePhone,
             email: inviteeEmail 
           });
+          const message = `🗑️ **Error in Cancelling Reminders**\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
+            `� **Email:** ${inviteeEmail}\n` +
+            `📞 **Phone:** ${inviteePhone || 'Not Provided'}\n` +
+            `� **Meeting Time:** ${existingBooking?.scheduledEventStartTime ? new Date(existingBooking.scheduledEventStartTime).toUTCString() : 'Not Available'}\n` +
+            `�👤 **Error:** ${error.message}\n` +
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+          await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, message);
         }
       }
 
@@ -921,7 +1057,8 @@ app.post('/calendly-webhook', async (req, res) => {
                        old_invitee?.scheduled_event?.location?.join_url || 
                        'Not Provided';
       
-      const newRescheduleLink = payload?.reschedule_url || new_invitee?.reschedule_url || null;
+      // FIXED: Use payload.reschedule_url only (not nested invitee)
+      const newRescheduleLink = payload?.reschedule_url || null;
       Logger.info('Reschedule link extraction', {
         newRescheduleLink,
         hasNewRescheduleLink: !!newRescheduleLink,
@@ -1171,14 +1308,13 @@ app.post('/calendly-webhook', async (req, res) => {
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
       
-      // ✅ CRITICAL: Extract and log reschedule link
-      let rescheduleLink = payload?.reschedule_url || payload?.invitee?.reschedule_url || null;
+      // ✅ CRITICAL: Extract and log reschedule link (FIXED: use payload.reschedule_url only)
+      let rescheduleLink = payload?.reschedule_url || null;
       
       Logger.info('Reschedule link from invitee.created webhook', {
         rescheduleLink,
         hasRescheduleLink: !!rescheduleLink,
         topLevelRescheduleUrl: payload?.reschedule_url,
-        nestedRescheduleUrl: payload?.invitee?.reschedule_url,
         inviteeUri: payload?.invitee?.uri,
         inviteeKeys: payload?.invitee ? Object.keys(payload.invitee) : [],
         payloadKeys: Object.keys(payload || {})

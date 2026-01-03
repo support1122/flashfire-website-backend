@@ -308,7 +308,7 @@ async function handleRescheduledEvent(req, res, payload) {
     const clientName = invitee.name || 'Valued Client';
     const clientPhone = invitee.phone_number || null;
     
-    const rescheduleUrl = payload?.reschedule_url || new_invitee?.reschedule_url || null;
+    const rescheduleUrl = payload?.reschedule_url || null;
     
     const meetLink = new_invitee?.scheduled_event?.location?.join_url || 'Not Provided';
 
@@ -599,23 +599,28 @@ async function handleRescheduledEvent(req, res, payload) {
 
 async function handleCanceledEvent(req, res, payload) {
   try {
-    const { invitee, cancellation, scheduled_event } = payload;
+    const clientEmail = payload?.email || payload?.invitee?.email || null;
+    const clientName = payload?.name || payload?.invitee?.name || 'Valued Client';
+    
+    const clientPhone = payload?.questions_and_answers?.find(q =>
+      q.question?.trim().toLowerCase() === 'phone number'
+    )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || 
+    payload?.invitee?.phone_number || 
+    payload?.invitee?.questions_and_answers?.find(q =>
+      q.question?.trim().toLowerCase() === 'phone number'
+    )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
+    
+    const canceledBy = payload?.cancellation?.canceled_by || payload?.canceled_by || 'unknown';
+    const cancelReason = payload?.cancellation?.reason || payload?.cancel_reason || 'No reason provided';
+    const meetingStartTime = payload?.scheduled_event?.start_time || payload?.event?.start_time || null;
 
-    if (!invitee || !invitee.email) {
-      Logger.error('Invalid cancel webhook payload: missing invitee information');
+    if (!clientEmail) {
+      Logger.error('Invalid cancel webhook payload: missing email information');
       return res.status(400).json({ 
         success: false, 
-        error: 'Missing invitee information in webhook payload' 
+        error: 'Missing email information in webhook payload' 
       });
     }
-
-    // Extract client information
-    const clientEmail = invitee.email;
-    const clientName = invitee.name || 'Valued Client';
-    const clientPhone = invitee.phone_number || null;
-    const canceledBy = cancellation?.canceled_by || 'unknown';
-    const cancelReason = cancellation?.reason || 'No reason provided';
-    const meetingStartTime = scheduled_event?.start_time || null;
 
     Logger.info('Processing canceled meeting', {
       clientEmail,

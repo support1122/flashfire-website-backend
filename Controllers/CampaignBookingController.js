@@ -1509,15 +1509,25 @@ export const getLeadsPaginated = async (req, res) => {
     }
 
     if (search) {
-      matchQuery.$or = [
-        { clientName: { $regex: search, $options: 'i' } },
-        { clientEmail: { $regex: search, $options: 'i' } },
-        { clientPhone: { $regex: search, $options: 'i' } },
-        { utmSource: { $regex: search, $options: 'i' } }
-      ];
+      // Trim the search term
+      const trimmedSearch = search.trim();
+      if (trimmedSearch) {
+        // Escape special regex characters to prevent regex errors
+        // This allows literal search while preventing regex injection
+        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        matchQuery.$or = [
+          { clientName: { $regex: escapedSearch, $options: 'i' } },
+          { clientEmail: { $regex: escapedSearch, $options: 'i' } },
+          { clientPhone: { $regex: escapedSearch, $options: 'i' } },
+          { utmSource: { $regex: escapedSearch, $options: 'i' } }
+        ];
+      }
     }
 
-    matchQuery.scheduledEventStartTime = matchQuery.scheduledEventStartTime || { $exists: true, $ne: null };
+    // Only add scheduledEventStartTime filter if it wasn't already set by date filters
+    if (!matchQuery.scheduledEventStartTime) {
+      matchQuery.scheduledEventStartTime = { $exists: true, $ne: null };
+    }
 
     // First, get all bookings matching the query
     const allBookings = await CampaignBookingModel.find(matchQuery)
@@ -1525,6 +1535,7 @@ export const getLeadsPaginated = async (req, res) => {
       .lean();
 
     // Group by normalized phone or email
+    // Since MongoDB already filtered by search, all bookings in allBookings match the search
     const groupedMap = new Map();
     
     for (const booking of allBookings) {
@@ -1539,15 +1550,33 @@ export const getLeadsPaginated = async (req, res) => {
       } else {
         const existing = groupedMap.get(groupKey);
         existing.totalBookings += 1;
-        // Keep the latest booking (already sorted)
+        // Keep the latest booking (already sorted by MongoDB query)
+        // Since all bookings already match the search (filtered by MongoDB), 
+        // we can safely keep the latest one
+        existing.booking = booking;
       }
     }
 
     // Convert map to array and add totalBookings
-    const groupedBookings = Array.from(groupedMap.values()).map(item => ({
+    let groupedBookings = Array.from(groupedMap.values()).map(item => ({
       ...item.booking,
       totalBookings: item.totalBookings
     }));
+
+    // Post-filter: If search exists, ensure all results match the search term
+    // This is important because grouping might have included non-matching contacts
+    if (search) {
+      const trimmedSearch = search.trim().toLowerCase();
+      if (trimmedSearch) {
+        groupedBookings = groupedBookings.filter(booking => {
+          const nameMatch = booking.clientName && booking.clientName.toLowerCase().includes(trimmedSearch);
+          const emailMatch = booking.clientEmail && booking.clientEmail.toLowerCase().includes(trimmedSearch);
+          const phoneMatch = booking.clientPhone && booking.clientPhone.toLowerCase().includes(trimmedSearch);
+          const sourceMatch = booking.utmSource && booking.utmSource.toLowerCase().includes(trimmedSearch);
+          return nameMatch || emailMatch || phoneMatch || sourceMatch;
+        });
+      }
+    }
 
     // Sort by scheduledEventStartTime descending
     groupedBookings.sort((a, b) => {
@@ -1560,20 +1589,8 @@ export const getLeadsPaginated = async (req, res) => {
     const total = groupedBookings.length;
     const bookings = groupedBookings.slice(skip, skip + limitNum);
 
-    // Update stats pipeline to use same grouping logic
-    const statsMap = new Map();
-    for (const booking of allBookings) {
-      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
-      const groupKey = normalizedPhone || booking.clientEmail;
-      
-      if (!statsMap.has(groupKey)) {
-        statsMap.set(groupKey, booking);
-      }
-    }
-
-    const uniqueBookings = Array.from(statsMap.values());
-
-    // Calculate stats from unique bookings
+    // Calculate stats from the same grouped bookings (ensures consistency)
+    const uniqueBookings = groupedBookings;
     const planBreakdownMap = new Map();
     let totalRevenue = 0;
 

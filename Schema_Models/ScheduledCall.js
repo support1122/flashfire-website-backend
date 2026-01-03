@@ -59,7 +59,8 @@ const ScheduledCallSchema = new mongoose.Schema({
   // Twilio call SID (after call is made)
   twilioCallSid: {
     type: String,
-    default: null
+    default: null,
+    index: true
   },
   
   // Error message if failed
@@ -99,7 +100,15 @@ const ScheduledCallSchema = new mongoose.Schema({
   metadata: {
     type: mongoose.Schema.Types.Mixed,
     default: {}
-  }
+  },
+  
+  statusHistory: [{
+    status: String,
+    answeredBy: String,
+    timestamp: Date,
+    duration: Number,
+    rawData: mongoose.Schema.Types.Mixed
+  }]
 }, {
   timestamps: true // createdAt, updatedAt
 });
