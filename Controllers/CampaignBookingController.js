@@ -1702,3 +1702,142 @@ export const updateBookingAmount = async (req, res) => {
 };
 
 
+export const handlePaidClientFromMicroservice = async (req, res) => {
+  try {
+    const {
+      firstName,
+      lastName,
+      email,
+      oldEmail,
+      password,
+      planType,
+      dashboardManager,
+      amountPaid,
+      currency,
+      amountPaidFormatted,
+      mobile // Optional: mobile number without country code
+    } = req.body;
+
+    // Validate required fields
+    if (!oldEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'oldEmail is required to match leads'
+      });
+    }
+
+    if (!planType) {
+      return res.status(400).json({
+        success: false,
+        message: 'planType is required'
+      });
+    }
+
+    // Normalize plan name to match PLAN_CATALOG enum
+    const normalizedPlanName = String(planType).toUpperCase();
+    if (!PLAN_CATALOG[normalizedPlanName]) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid planType. Must be one of: ${Object.keys(PLAN_CATALOG).join(', ')}`
+      });
+    }
+    const normalizedOldEmail = oldEmail.trim().toLowerCase();
+
+    let matchQuery = {};
+
+    // If mobile number is provided, match by either email OR mobile
+    // This ensures we match leads even if email doesn't match exactly
+    if (mobile) {
+      const normalizedMobile = normalizePhoneForMatching(mobile);
+      if (normalizedMobile) {
+        // Use $or to match by either email or mobile
+        matchQuery.$or = [
+          { clientEmail: normalizedOldEmail },
+          { clientPhone: { $regex: normalizedMobile, $options: 'i' } }
+        ];
+      } else {
+        // If mobile normalization failed, fall back to email only
+        matchQuery.clientEmail = normalizedOldEmail;
+      }
+    } else {
+      // If no mobile provided, match by email only
+      matchQuery.clientEmail = normalizedOldEmail;
+    }
+
+    // Find all matching bookings/leads
+    const matchingLeads = await CampaignBookingModel.find(matchQuery);
+
+    if (!matchingLeads || matchingLeads.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: `No leads found matching oldEmail: ${oldEmail}${mobile ? ` or mobile: ${mobile}` : ''}`,
+        matchedCount: 0
+      });
+    }
+
+    // Prepare payment plan update
+    const catalogPlan = PLAN_CATALOG[normalizedPlanName];
+    const paymentAmount = amountPaid ? parseFloat(amountPaid) : catalogPlan.price;
+    const paymentCurrency = currency || catalogPlan.currency;
+    const displayPrice = amountPaidFormatted || catalogPlan.displayPrice || `${paymentCurrency}${paymentAmount}`;
+
+    const paymentPlanUpdate = {
+      name: normalizedPlanName,
+      price: paymentAmount,
+      currency: paymentCurrency,
+      displayPrice: displayPrice,
+      selectedAt: new Date()
+    };
+
+    // Update all matching leads to mark as paid
+    const updateResult = await CampaignBookingModel.updateMany(
+      matchQuery,
+      {
+        $set: {
+          bookingStatus: 'paid',
+          paymentPlan: paymentPlanUpdate
+        }
+      }
+    );
+
+    // Log the update
+    console.log(`✅ Marked ${updateResult.modifiedCount} lead(s) as paid`, {
+      oldEmail: normalizedOldEmail,
+      mobile: mobile || 'not provided',
+      planType: normalizedPlanName,
+      amountPaid: paymentAmount,
+      currency: paymentCurrency
+    });
+
+    return res.status(200).json({
+      success: true,
+      message: `Successfully marked ${updateResult.modifiedCount} lead(s) as paid`,
+      data: {
+        matchedCount: matchingLeads.length,
+        updatedCount: updateResult.modifiedCount,
+        oldEmail: normalizedOldEmail,
+        newEmail: email || null,
+        planType: normalizedPlanName,
+        amountPaid: paymentAmount,
+        currency: paymentCurrency,
+        displayPrice: displayPrice,
+        updatedLeads: matchingLeads.map(lead => ({
+          bookingId: lead.bookingId,
+          clientName: lead.clientName,
+          clientEmail: lead.clientEmail,
+          clientPhone: lead.clientPhone
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error handling paid client from microservice:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to process paid client webhook',
+      error: error.message
+    });
+  }
+};
+
+

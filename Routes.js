@@ -48,7 +48,8 @@ import {
   createBookingManually,
   getLeadsPaginated,
   updateBookingAmount,
-  bulkCreateLeads
+  bulkCreateLeads,
+  handlePaidClientFromMicroservice
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 // Webhook Controllers
@@ -271,6 +272,7 @@ export default function Routes(app) {
   // Microservice Integration
   app.get('/api/campaign-bookings/export', exportBookingsForMicroservice); // Export bookings
   app.post('/api/campaign-bookings/mark-synced', markBookingsAsSynced); // Mark as synced
+  app.post('/api/microservice/paid', handlePaidClientFromMicroservice); // Handle paid client webhook from microservice
 
   // ==================== WEBHOOK ROUTES ====================
   // Calendly Webhooks
