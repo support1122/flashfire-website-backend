@@ -134,6 +134,17 @@ export const CampaignBookingSchema = new mongoose.Schema({
       default: null
     }
   },
+  // Plan details for finalkk template workflow
+  planDetails: {
+    days: {
+      type: Number,
+      default: 7
+    },
+    updatedAt: {
+      type: Date,
+      default: null
+    }
+  },
   // Sync status
   syncedToMicroservice: {
     type: Boolean,

@@ -48,6 +48,20 @@ export const WorkflowSchema = new mongoose.Schema({
       type: Number,
       required: true,
       default: 0
+    },
+    templateConfig: {
+      planName: {
+        type: String,
+        default: null
+      },
+      planAmount: {
+        type: Number,
+        default: null
+      },
+      days: {
+        type: Number,
+        default: 7
+      }
     }
   }],
   isActive: {
