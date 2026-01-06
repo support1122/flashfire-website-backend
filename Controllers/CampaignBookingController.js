@@ -594,7 +594,7 @@ export const getBookingById = async (req, res) => {
 export const updateBookingStatus = async (req, res) => {
   try {
     const { bookingId } = req.params;
-    const { status, plan } = req.body;
+    const { status, plan, planDetails } = req.body;
 
     const validStatuses = ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid', 'ignored'];
 
@@ -615,6 +615,15 @@ export const updateBookingStatus = async (req, res) => {
     }
 
     let paymentPlanUpdate = null;
+    let planDetailsUpdate = null;
+
+    // Handle planDetails for finalkk template (can be sent with any status)
+    if (planDetails) {
+      planDetailsUpdate = {
+        days: planDetails.days || 7,
+        updatedAt: new Date()
+      };
+    }
 
     if (status === 'paid') {
       const normalizedPlanName = plan?.name ? String(plan.name).toUpperCase() : null;
@@ -641,6 +650,26 @@ export const updateBookingStatus = async (req, res) => {
 
     if (paymentPlanUpdate) {
       updatePayload.paymentPlan = paymentPlanUpdate;
+    }
+
+    // Store planDetails for finalkk template execution
+    if (planDetailsUpdate) {
+      updatePayload.planDetails = planDetailsUpdate;
+    }
+    
+    // Also update paymentPlan if plan is provided (for completed status with finalkk)
+    if (plan && !paymentPlanUpdate) {
+      const normalizedPlanName = plan?.name ? String(plan.name).toUpperCase() : null;
+      if (normalizedPlanName && PLAN_CATALOG[normalizedPlanName]) {
+        const catalogPlan = PLAN_CATALOG[normalizedPlanName];
+        updatePayload.paymentPlan = {
+          name: normalizedPlanName,
+          price: plan?.price ?? catalogPlan.price,
+          currency: plan?.currency || catalogPlan.currency,
+          displayPrice: plan?.displayPrice || catalogPlan.displayPrice,
+          selectedAt: new Date()
+        };
+      }
     }
 
     // Update booking status

@@ -52,6 +52,7 @@ import {
   handlePaidClientFromMicroservice
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
+import TestCallStatus from "./test/TestCallStatus.js";
 // Webhook Controllers
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
 // Payment Reminder Controllers
@@ -77,7 +78,8 @@ import {
   deleteWorkflow,
   processScheduledWorkflows,
   getBookingsByStatusForBulk,
-  triggerWorkflowsForAllByStatus
+  triggerWorkflowsForAllByStatus,
+  checkWorkflowsNeedPlanDetails
 } from "./Controllers/WorkflowController.js";
 // Workflow Log Controllers
 import {
@@ -279,6 +281,9 @@ export default function Routes(app) {
   app.post('/api/webhooks/calendly', handleCalendlyWebhook); // Handle Calendly webhook events
   app.get('/api/webhooks/test', testWebhook); // Test webhook functionality
 
+  // ==================== TEST ROUTES ====================
+  app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number
+
   // ==================== PAYMENT REMINDER ROUTES ====================
   app.post('/api/payment-reminders', schedulePaymentReminder); // Schedule payment reminder
   app.get('/api/payment-reminders/:bookingId', getPaymentReminders); // Get scheduled reminders for booking
@@ -299,12 +304,15 @@ export default function Routes(app) {
   // ==================== WORKFLOW ROUTES ====================
   app.post('/api/workflows', createWorkflow); // Create new workflow
   app.get('/api/workflows', getAllWorkflows); // Get all workflows
-  app.get('/api/workflows/:workflowId', getWorkflowById); // Get workflow by ID
-  app.put('/api/workflows/:workflowId', updateWorkflow); // Update workflow
-  app.delete('/api/workflows/:workflowId', deleteWorkflow); // Delete workflow
+  // Specific routes must come before parameterized routes
   app.post('/api/workflows/process-scheduled', processScheduledWorkflows); // Process scheduled workflows (cron job)
   app.get('/api/workflows/bulk/bookings-by-status', getBookingsByStatusForBulk); // Get bookings by status for bulk actions
   app.post('/api/workflows/bulk/trigger-by-status', triggerWorkflowsForAllByStatus); // Trigger workflows for all bookings with status
+  app.get('/api/workflows/check-plan-details', checkWorkflowsNeedPlanDetails); // Check if workflows need plan details for an action
+  // Parameterized routes come last
+  app.get('/api/workflows/:workflowId', getWorkflowById); // Get workflow by ID
+  app.put('/api/workflows/:workflowId', updateWorkflow); // Update workflow
+  app.delete('/api/workflows/:workflowId', deleteWorkflow); // Delete workflow
 
   // ==================== WORKFLOW LOG ROUTES ====================
   app.get('/api/workflow-logs', getWorkflowLogs); // Get workflow logs with pagination

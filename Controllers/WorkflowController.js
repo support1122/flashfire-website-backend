@@ -258,6 +258,71 @@ export const deleteWorkflow = async (req, res) => {
   }
 };
 
+// ==================== CHECK IF WORKFLOWS NEED PLAN DETAILS ====================
+export const checkWorkflowsNeedPlanDetails = async (req, res) => {
+  try {
+    const { action } = req.query; // 'completed', 'canceled', etc.
+
+    if (!action) {
+      return res.status(400).json({
+        success: false,
+        message: 'Action is required'
+      });
+    }
+
+    const actionMap = {
+      'no-show': 'no-show',
+      'completed': 'complete',
+      'canceled': 'cancel',
+      'rescheduled': 're-schedule'
+    };
+
+    const triggerAction = actionMap[action];
+    if (!triggerAction) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid action. Must be one of: ${Object.keys(actionMap).join(', ')}`
+      });
+    }
+
+    // Find active workflows for this action
+    const workflows = await WorkflowModel.find({
+      triggerAction,
+      isActive: true
+    }).lean();
+
+    // Check if any workflow has finalkk or plan_followup_utility_01dd template
+    let hasPlanDetailsTemplate = false;
+    for (const workflow of workflows) {
+      for (const step of workflow.steps) {
+        if (step.channel === 'whatsapp') {
+          const templateName = step.templateName || step.templateId;
+          if (templateName === 'finalkk' || step.templateId === 'finalkk' || 
+              templateName === 'plan_followup_utility_01dd' || step.templateId === 'plan_followup_utility_01dd') {
+            hasPlanDetailsTemplate = true;
+            break;
+          }
+        }
+      }
+      if (hasPlanDetailsTemplate) break;
+    }
+
+    return res.status(200).json({
+      success: true,
+      needsPlanDetails: hasPlanDetailsTemplate,
+      workflowsCount: workflows.length
+    });
+
+  } catch (error) {
+    console.error('Error checking workflows for plan details:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to check workflows',
+      error: error.message
+    });
+  }
+};
+
 // ==================== TRIGGER WORKFLOW ====================
 export const triggerWorkflow = async (bookingId, action) => {
   try {
@@ -516,10 +581,73 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
         throw new Error('Client phone number not available');
       }
 
+      // Prepare parameters based on template
+      let parameters = [];
+      const templateName = step.templateName || step.templateId;
+
+      // Handle finalkk template with custom parameters
+      if (templateName === 'finalkk' || step.templateId === 'finalkk') {
+        // Get plan details from booking.planDetails (from status update), templateConfig (from workflow), or defaults
+        const planName = booking.paymentPlan?.name || step.templateConfig?.planName || 'PRIME';
+        const days = booking.planDetails?.days || step.templateConfig?.days || 7;
+        
+        // Calculate date (days from execution)
+        const executionDate = new Date(executedAt);
+        const reminderDate = new Date(executionDate);
+        reminderDate.setDate(reminderDate.getDate() + days);
+        
+        // Format date as "MMM DD, YYYY" (e.g., "Jan 15, 2024")
+        const dateOptions = { year: 'numeric', month: 'short', day: 'numeric' };
+        const formattedDate = reminderDate.toLocaleDateString('en-US', dateOptions);
+
+        // Parameters: {{1}} = client name, {{2}} = plan name, {{3}} = date
+        parameters = [
+          booking.clientName || 'Valued Client', // {{1}}
+          planName, // {{2}}
+          formattedDate // {{3}}
+        ];
+
+        console.log(`📋 finalkk template parameters:`, {
+          clientName: parameters[0],
+          planName: parameters[1],
+          date: parameters[2],
+          daysFromExecution: days
+        });
+      } else if (templateName === 'plan_followup_utility_01dd' || step.templateId === 'plan_followup_utility_01dd') {
+        // Handle plan_followup_utility_01dd template
+        // Use plan details from booking.paymentPlan (from status update) or templateConfig
+        const planName = booking.paymentPlan?.name || step.templateConfig?.planName || 'PRIME';
+        const planPrice = booking.paymentPlan?.price || step.templateConfig?.planAmount || 0;
+        
+        // Format plan amount - prefer displayPrice, otherwise format price
+        let planAmount = booking.paymentPlan?.displayPrice;
+        if (!planAmount && planPrice > 0) {
+          planAmount = `$${planPrice}`;
+        } else if (!planAmount) {
+          planAmount = '$0';
+        }
+        
+        parameters = [
+          booking.clientName || 'Valued Client', // {{1}}
+          planAmount // {{2}}
+        ];
+        
+        console.log(`📋 plan_followup_utility_01dd template parameters:`, {
+          clientName: parameters[0],
+          planAmount: parameters[1],
+          planName: planName,
+          planPrice: planPrice
+        });
+      }
+
+      // Use templateName for WATI (not templateId)
+      // templateName should be the actual template name like 'finalkk', 'plan_followup_utility_01dd', etc.
+      const watiTemplateName = step.templateName || step.templateId;
+      
       const result = await watiService.sendTemplateMessage({
         mobileNumber: booking.clientPhone,
-        templateName: step.templateId, // Using templateId as templateName for WATI
-        parameters: [],
+        templateName: watiTemplateName, // Use template name, not ID
+        parameters: parameters,
         campaignId: `workflow_${workflowId}_${Date.now()}`
       });
 
