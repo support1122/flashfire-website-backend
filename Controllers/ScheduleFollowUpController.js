@@ -1,6 +1,6 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { scheduleCall } from '../Utils/CallScheduler.js';
-import { scheduleWhatsAppReminder } from '../Utils/WhatsAppReminderScheduler.js';
+import { scheduleAllWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler.js';
 import { emailQueue } from '../Utils/queue.js';
 import sgMail from '@sendgrid/mail';
 import { DateTime } from 'luxon';
@@ -207,7 +207,7 @@ FlashFire Team`;
           }
         }
 
-        const whatsappResult = await scheduleWhatsAppReminder({
+        const whatsappResults = await scheduleAllWhatsAppReminders({
           phoneNumber: booking.clientPhone,
           meetingStartISO: followUpDate.toISOString(),
           meetingTime: meetingTimeFormatted,
@@ -217,6 +217,7 @@ FlashFire Team`;
           meetingLink: booking.calendlyMeetLink || null,
           rescheduleLink: rescheduleLink,
           source: 'crm_followup',
+          timezone: 'ET', // Follow-up meetings are scheduled in ET timezone
           metadata: {
             bookingId: booking.bookingId,
             followUpType: 'followup',
@@ -225,17 +226,18 @@ FlashFire Team`;
           }
         });
 
-        if (whatsappResult.success) {
+        const scheduledCount = Object.values(whatsappResults).filter(r => r.success).length;
+        if (scheduledCount > 0) {
           results.whatsapp.success = true;
-          results.whatsapp.reminderId = whatsappResult.reminderId;
-          Logger.info('Scheduled follow-up WhatsApp', {
+          results.whatsapp.scheduledCount = scheduledCount;
+          Logger.info('Scheduled follow-up WhatsApp reminders', {
             bookingId: booking.bookingId,
-            phone: booking.clientPhone,
-            scheduledFor: whatsappTime.toISOString(),
-            reminderId: whatsappResult.reminderId
+            scheduledCount,
+            phone: booking.clientPhone
           });
         } else {
-          results.whatsapp.error = whatsappResult.error || 'Failed to schedule WhatsApp';
+          const skippedCount = Object.values(whatsappResults).filter(r => r.skipped).length;
+          results.whatsapp.error = `Failed to schedule WhatsApp reminders (${skippedCount} skipped)`;
         }
       } catch (error) {
         results.whatsapp.error = error.message;
