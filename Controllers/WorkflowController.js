@@ -378,7 +378,8 @@ export const triggerWorkflow = async (bookingId, action) => {
               executedAt: new Date()
             });
           } else {
-            const executionDate = calculateScheduledDate(new Date(), step.daysAfter);
+            // Use channel-specific timing for workflows
+            const executionDate = calculateScheduledDate(new Date(), step.daysAfter, step.channel, bookingId);
             await scheduleWorkflowStep(bookingId, step, workflow.workflowId, executionDate, booking, workflow.name, triggerAction);
             results.workflowsTriggered.push({
               workflowId: workflow.workflowId,
@@ -423,7 +424,9 @@ export const triggerWorkflow = async (bookingId, action) => {
 export const cancelScheduledWorkflows = async (bookingId, newStatus, oldStatus = null) => {
   try {
     // Statuses that should cancel all scheduled workflows
-    const cancelTriggerStatuses = ['completed', 'paid', 'canceled'];
+    // Cancel workflows when moving to these statuses from workflow-triggering statuses (like 'no-show')
+    // This prevents old workflows from executing for the wrong status
+    const cancelTriggerStatuses = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled'];
     
     if (!cancelTriggerStatuses.includes(newStatus)) {
       return { success: true, cancelled: 0, message: 'Status does not require workflow cancellation' };

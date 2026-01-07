@@ -847,9 +847,15 @@ export const updateBookingStatus = async (req, res) => {
 
     // Cancel scheduled workflows when status changes to certain statuses
     // This should happen BEFORE triggering new workflows
+    // Cancel workflows when moving away from workflow-triggering statuses (like 'no-show') 
+    // to other statuses, so old workflows don't execute for the wrong status
     const oldStatus = existingBooking.bookingStatus;
-    const statusesThatCancelWorkflows = ['completed', 'paid', 'canceled'];
+    const statusesThatCancelWorkflows = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled'];
     
+    // Cancel workflows if:
+    // 1. New status is in the cancellation list AND
+    // 2. Status is actually changing AND
+    // 3. Old status was a workflow-triggering status (has scheduled workflows that should be cancelled)
     if (statusesThatCancelWorkflows.includes(status) && oldStatus !== status) {
       try {
         const cancelResult = await cancelScheduledWorkflows(bookingId, status, oldStatus);

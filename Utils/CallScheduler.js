@@ -4,7 +4,7 @@ import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
-import { scheduleWhatsAppReminder } from './WhatsAppReminderScheduler.js';
+import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
 import { DateTime } from 'luxon';
 import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 
@@ -183,7 +183,18 @@ export async function scheduleCall({
       
       const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
-      const whatsappResult = await scheduleWhatsAppReminder({
+      // Determine timezone from meeting time (ET/PST)
+      // This will be used for WhatsApp reminders
+      const meetingStartForTZ = new Date(meetingStartISO);
+      const meetingStartUTCTZ = DateTime.fromJSDate(meetingStartForTZ, { zone: 'utc' });
+      const meetingPST = meetingStartUTCTZ.setZone('America/Los_Angeles');
+      const pstOffset = meetingPST.offset / 60;
+      const meetingET = meetingStartUTCTZ.setZone('America/New_York');
+      const etOffset = meetingET.offset / 60;
+      const meetingTimezone = (pstOffset === -8 || pstOffset === -7) ? 'PST' : ((etOffset === -5 || etOffset === -4) ? 'ET' : 'ET');
+
+      // Schedule all WhatsApp reminders (24h, 2h, 5min)
+      const whatsappResults = await scheduleAllWhatsAppReminders({
         phoneNumber,
         meetingStartISO,
         meetingTime: meetingTimeFormatted,
@@ -193,16 +204,20 @@ export async function scheduleCall({
         meetingLink: meetingLink || metadata?.meetingLink || null,
         rescheduleLink: finalRescheduleLink,
         source,
+        timezone: meetingTimezone, // Pass timezone to reminder scheduler
         metadata: {
           ...metadata,
           meetingEndISO: meetingEnd.toISOString()
         }
       });
 
-      if (whatsappResult.success) {
-        console.log('✅ [CallScheduler] WhatsApp reminder also scheduled:', whatsappResult.reminderId);
+      const scheduledCount = Object.values(whatsappResults).filter(r => r.success).length;
+      const skippedCount = Object.values(whatsappResults).filter(r => r.skipped).length;
+      
+      if (scheduledCount > 0) {
+        console.log(`✅ [CallScheduler] WhatsApp reminders scheduled: ${scheduledCount} (${skippedCount} skipped)`);
       } else {
-        console.warn('⚠️ [CallScheduler] Failed to schedule WhatsApp reminder:', whatsappResult.error);
+        console.warn('⚠️ [CallScheduler] Failed to schedule WhatsApp reminders:', whatsappResults);
       }
     } catch (whatsappError) {
       console.error('❌ [CallScheduler] Error scheduling WhatsApp reminder:', whatsappError.message);

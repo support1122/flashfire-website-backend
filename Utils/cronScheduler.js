@@ -11,17 +11,65 @@ import { DateTime } from 'luxon';
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
 const IST_TIMEZONE = 'Asia/Kolkata';
-const SEND_HOUR = 19;
+const SEND_HOUR = 19; // 7 PM IST (for backward compatibility with campaigns)
 const SEND_MINUTE = 30;
+
+// WhatsApp workflow timing: 11 PM IST
+const WHATSAPP_WORKFLOW_HOUR = 23;
+const WHATSAPP_WORKFLOW_MINUTE = 0;
+
+// Email workflow timing: Random between 8-10 PM IST
+const EMAIL_WORKFLOW_START_HOUR = 20; // 8 PM IST
+const EMAIL_WORKFLOW_END_HOUR = 22; // 10 PM IST
 
 function getIST730PM(date) {
   const istDate = DateTime.fromJSDate(date).setZone(IST_TIMEZONE);
   return istDate.set({ hour: SEND_HOUR, minute: SEND_MINUTE, second: 0, millisecond: 0 }).toJSDate();
 }
 
-function calculateScheduledDate(triggerDate, daysAfter) {
+/**
+ * Get WhatsApp workflow send time: 11 PM IST
+ */
+function getIST11PM(date) {
+  const istDate = DateTime.fromJSDate(date).setZone(IST_TIMEZONE);
+  return istDate.set({ hour: WHATSAPP_WORKFLOW_HOUR, minute: WHATSAPP_WORKFLOW_MINUTE, second: 0, millisecond: 0 }).toJSDate();
+}
+
+/**
+ * Get Email workflow send time: Random between 8-10 PM IST
+ * Uses a deterministic random based on bookingId to ensure same time for same booking
+ */
+function getISTEmailWindow(date, bookingId = null) {
+  const istDate = DateTime.fromJSDate(date).setZone(IST_TIMEZONE);
+  
+  // Generate deterministic random hour between 20-22 (8-10 PM) based on bookingId or date
+  let seed = bookingId ? bookingId.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) : date.getTime();
+  const randomHour = EMAIL_WORKFLOW_START_HOUR + (seed % (EMAIL_WORKFLOW_END_HOUR - EMAIL_WORKFLOW_START_HOUR + 1));
+  
+  // Random minute between 0-59
+  const randomMinute = seed % 60;
+  
+  return istDate.set({ hour: randomHour, minute: randomMinute, second: 0, millisecond: 0 }).toJSDate();
+}
+
+/**
+ * Calculate scheduled date for workflows based on channel type
+ * @param {Date} triggerDate - The date to calculate from
+ * @param {number} daysAfter - Days after trigger date
+ * @param {string} channel - 'email' or 'whatsapp' (for workflows)
+ * @param {string} bookingId - Optional booking ID for deterministic email timing
+ */
+function calculateScheduledDate(triggerDate, daysAfter, channel = null, bookingId = null) {
   const targetDate = new Date(triggerDate);
   targetDate.setDate(targetDate.getDate() + daysAfter);
+
+  if (channel === 'whatsapp') {
+    return getIST11PM(targetDate);
+  } else if (channel === 'email') {
+    return getISTEmailWindow(targetDate, bookingId);
+  }
+  
+  // Default: 7:30 PM IST (for backward compatibility with campaigns)
   return getIST730PM(targetDate);
 }
 
@@ -370,17 +418,51 @@ async function processScheduledItems() {
     const currentHour = nowIST.hour;
     const currentMinute = nowIST.minute;
 
+    // Check for WhatsApp workflow window (11 PM IST)
+    const isWhatsAppWorkflowWindow = currentHour === WHATSAPP_WORKFLOW_HOUR && currentMinute >= WHATSAPP_WORKFLOW_MINUTE && currentMinute < WHATSAPP_WORKFLOW_MINUTE + 15;
+    
+    // Check for Email workflow window (8-10 PM IST)
+    const isEmailWorkflowWindow = currentHour >= EMAIL_WORKFLOW_START_HOUR && currentHour < EMAIL_WORKFLOW_END_HOUR;
+    
+    // Legacy send window for campaigns (7:30 PM IST)
     const isSendWindow = currentHour === SEND_HOUR && currentMinute >= SEND_MINUTE && currentMinute < SEND_MINUTE + 15;
 
-    const workflowLogs = await WorkflowLogModel.find({
+    // Process workflow logs based on channel type and timing
+    // Find workflows that are due (scheduledFor <= now)
+    const allDueWorkflows = await WorkflowLogModel.find({
       status: 'scheduled',
       scheduledFor: { $lte: now }
     }).limit(100);
 
-    if (workflowLogs.length > 0) {
-      console.log(`📧 Processing ${workflowLogs.length} scheduled workflow logs`);
-      for (const log of workflowLogs) {
-        await executeWorkflowLog(log);
+    if (allDueWorkflows.length > 0) {
+      // Separate workflows by channel
+      const emailWorkflows = allDueWorkflows.filter(log => log.step?.channel === 'email');
+      const whatsappWorkflows = allDueWorkflows.filter(log => log.step?.channel === 'whatsapp');
+      
+      // Process email workflows only during email window (8-10 PM IST)
+      if (isEmailWorkflowWindow && emailWorkflows.length > 0) {
+        console.log(`📧 Processing ${emailWorkflows.length} scheduled email workflow logs (8-10 PM IST window)`);
+        for (const log of emailWorkflows) {
+          await executeWorkflowLog(log);
+        }
+      }
+      
+      // Process WhatsApp workflows only during WhatsApp window (11 PM IST)
+      if (isWhatsAppWorkflowWindow && whatsappWorkflows.length > 0) {
+        console.log(`📱 Processing ${whatsappWorkflows.length} scheduled WhatsApp workflow logs (11 PM IST window)`);
+        for (const log of whatsappWorkflows) {
+          await executeWorkflowLog(log);
+        }
+      }
+      
+      // Log if workflows are waiting outside their windows (for monitoring)
+      const waitingEmail = emailWorkflows.length > 0 && !isEmailWorkflowWindow;
+      const waitingWhatsApp = whatsappWorkflows.length > 0 && !isWhatsAppWorkflowWindow;
+      
+      if (waitingEmail || waitingWhatsApp) {
+        const emailCount = waitingEmail ? emailWorkflows.length : 0;
+        const whatsappCount = waitingWhatsApp ? whatsappWorkflows.length : 0;
+        console.log(`⏳ Workflows waiting for their send windows: ${emailCount > 0 ? `${emailCount} email (waiting for 8-10 PM IST)` : ''} ${whatsappCount > 0 ? `${whatsappCount} WhatsApp (waiting for 11 PM IST)` : ''}`);
       }
     }
 
@@ -440,4 +522,4 @@ export function startCronScheduler() {
   processScheduledItems();
 }
 
-export { calculateScheduledDate, getIST730PM };
+export { calculateScheduledDate, getIST730PM, getIST11PM, getISTEmailWindow };

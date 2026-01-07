@@ -3,7 +3,7 @@ import { sendNoShowReminder } from '../Utils/WatiHelper.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnectForMeet } from '../Utils/DiscordConnect.js';
 import { cancelCall, scheduleCall } from '../Utils/CallScheduler.js';
-import { cancelWhatsAppReminder, scheduleWhatsAppReminder } from '../Utils/WhatsAppReminderScheduler.js';
+import { cancelWhatsAppReminder, scheduleAllWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler.js';
 import { DateTime } from 'luxon';
 
 /**
@@ -447,7 +447,22 @@ async function handleRescheduledEvent(req, res, payload) {
         // Calculate new meeting time in different timezones
         const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
         const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+        
+        // Format meeting date and time for WhatsApp (America/New_York timezone)
         const newMeetingDate = newMeetingStartUTC.setZone('America/New_York').toFormat('EEEE MMM d, yyyy');
+        const newMeetingEndUTC = newEndTime ? DateTime.fromISO(newEndTime, { zone: 'utc' }) : newMeetingStartUTC.plus({ minutes: 15 });
+        
+        const startTimeET = newMeetingStartUTC.setZone('America/New_York');
+        const startTimeFormatted = startTimeET.minute === 0 
+          ? startTimeET.toFormat('ha').toLowerCase()
+          : startTimeET.toFormat('h:mma').toLowerCase();
+        
+        const endTimeET = newMeetingEndUTC.setZone('America/New_York');
+        const endTimeFormatted = endTimeET.minute === 0
+          ? endTimeET.toFormat('ha').toLowerCase()
+          : endTimeET.toFormat('h:mma').toLowerCase();
+        
+        const newMeetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
         //Use reschedule URL from webhook with proper fallback chain
         const finalRescheduleLink = rescheduleUrl || 
@@ -499,12 +514,14 @@ async function handleRescheduledEvent(req, res, payload) {
           });
         }
 
-        // Schedule new WhatsApp reminder
+        // Note: WhatsApp reminders are now scheduled automatically by scheduleCall
+        // But we keep this as a backup in case scheduleCall fails or doesn't schedule WhatsApp reminders
+        // The duplicate prevention logic will prevent double-scheduling
         try {
-          const scheduleWhatsAppResult = await scheduleWhatsAppReminder({
+          const whatsappResults = await scheduleAllWhatsAppReminders({
             phoneNumber: clientPhone,
             meetingStartISO: newStartTime,
-            meetingTime: newMeetingTimeIndia,
+            meetingTime: newMeetingTimeFormatted,
             meetingDate: newMeetingDate,
             clientName: clientName,
             clientEmail: clientEmail,
@@ -514,20 +531,23 @@ async function handleRescheduledEvent(req, res, payload) {
             metadata: {
               bookingId: bookingRecord?.bookingId,
               rescheduledFrom: oldStartTime,
-              rescheduledTo: newStartTime
+              rescheduledTo: newStartTime,
+              meetingEndISO: newEndTime
             }
           });
 
-          if (scheduleWhatsAppResult.success) {
+          const scheduledCount = Object.values(whatsappResults).filter(r => r.success).length;
+          if (scheduledCount > 0) {
             newWhatsAppScheduled = true;
-            Logger.info('Scheduled new WhatsApp reminder for rescheduled meeting', {
-              reminderId: scheduleWhatsAppResult.reminderId,
+            Logger.info('Scheduled new WhatsApp reminders for rescheduled meeting', {
+              scheduledCount,
+              skippedCount: Object.values(whatsappResults).filter(r => r.skipped).length,
               clientPhone,
               newStartTime
             });
           }
         } catch (whatsappScheduleError) {
-          Logger.error('Failed to schedule new WhatsApp reminder', {
+          Logger.error('Failed to schedule new WhatsApp reminders', {
             error: whatsappScheduleError.message,
             clientPhone,
             newStartTime
