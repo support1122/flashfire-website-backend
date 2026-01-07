@@ -188,10 +188,6 @@ export async function scheduleWhatsAppReminder({
   }
 }
 
-/**
- * Schedule all WhatsApp reminders (24h, 2h, and 5min before meeting)
- * Handles edge cases where meetings are booked within 24h or 2h
- */
 export async function scheduleAllWhatsAppReminders({
   phoneNumber,
   meetingStartISO,
@@ -206,18 +202,75 @@ export async function scheduleAllWhatsAppReminders({
   timezone = null
 }) {
   const results = {
-    '24h': { success: false, skipped: false },
-    '2h': { success: false, skipped: false },
+    'immediate': { success: false, skipped: false },
+    '3h': { success: false, skipped: false },
     '5min': { success: false, skipped: false }
   };
 
   const meetingStart = new Date(meetingStartISO);
   const now = new Date();
   const hoursUntilMeeting = (meetingStart.getTime() - now.getTime()) / (1000 * 60 * 60);
+  const minutesUntilMeeting = (meetingStart.getTime() - now.getTime()) / (1000 * 60);
 
-  // Schedule 24-hour reminder (only if meeting is more than 24 hours away)
-  if (hoursUntilMeeting > 24) {
-    const result24h = await scheduleWhatsAppReminder({
+  const immediateReminderTime = new Date(now.getTime() + 1 * 60 * 1000);
+  const immediateReminderId = `whatsapp_reminder_immediate_${phoneNumber}_${meetingStart.getTime()}`;
+  
+  try {
+    const existingImmediate = await ScheduledWhatsAppReminderModel.findOne({ reminderId: immediateReminderId });
+    if (!existingImmediate) {
+      const immediateReminder = await ScheduledWhatsAppReminderModel.create({
+        reminderId: immediateReminderId,
+        phoneNumber,
+        scheduledFor: immediateReminderTime,
+        meetingTime,
+        meetingDate,
+        meetingStartISO: meetingStart,
+        clientName,
+        clientEmail,
+        meetingLink: meetingLink || 'Not Provided',
+        rescheduleLink: rescheduleLink || DEFAULT_RESCHEDULE_LINK,
+        timezone: timezone || getTimezoneAbbreviation(meetingStartISO),
+        source,
+        metadata: {
+          ...metadata,
+          isImmediateReminder: true,
+          actualMeetingTime: meetingStartISO
+        }
+      });
+      
+      const delayMinutes = Math.round((immediateReminderTime - now) / 60000);
+      
+      console.log('✅ [WhatsAppReminderScheduler] Immediate WhatsApp reminder scheduled:', {
+        reminderId: immediateReminderId,
+        phoneNumber,
+        scheduledFor: immediateReminderTime.toISOString(),
+        meetingTime,
+        meetingDate,
+        delayMinutes
+      });
+      
+      if (DISCORD_WEBHOOK) {
+        await DiscordConnect(DISCORD_WEBHOOK, 
+          `⏰ WA reminder scheduled: immediate (${source})\n` +
+          `📞 ${phoneNumber} • ${clientName || 'Unknown'}\n` +
+          `📧 ${clientEmail || 'Unknown'}\n` +
+          `🗓️ ${meetingDate} @ ${meetingTime}\n` +
+          `➡️ reminder at ${immediateReminderTime.toISOString()}\n` +
+          `⏳ in ${delayMinutes}m`
+        );
+      }
+      
+      results['immediate'] = { success: true, reminderId: immediateReminderId, scheduledFor: immediateReminderTime };
+    } else {
+      results['immediate'] = { success: true, reminderId: immediateReminderId, existing: true };
+    }
+  } catch (error) {
+    console.error('❌ [WhatsAppReminderScheduler] Error scheduling immediate reminder:', error);
+    results['immediate'] = { success: false, error: error.message };
+  }
+
+  if (hoursUntilMeeting > 3) {
+    const result3h = await scheduleWhatsAppReminder({
       phoneNumber,
       meetingStartISO,
       meetingTime,
@@ -229,28 +282,27 @@ export async function scheduleAllWhatsAppReminders({
       source,
       metadata,
       timezone,
-      reminderOffsetMinutes: 24 * 60, // 24 hours
-      reminderType: '24h'
+      reminderOffsetMinutes: 3 * 60,
+      reminderType: '3h'
     });
-    results['24h'] = result24h;
+    results['3h'] = result3h;
   } else {
-    console.log(`⏭️ [WhatsAppReminderScheduler] Skipping 24h reminder - meeting is ${hoursUntilMeeting.toFixed(1)}h away (< 24h)`);
-    results['24h'] = { success: false, skipped: true, reason: `Meeting is only ${hoursUntilMeeting.toFixed(1)}h away` };
+    console.log(`⏭️ [WhatsAppReminderScheduler] Skipping 3h reminder - meeting is ${hoursUntilMeeting.toFixed(1)}h away (< 3h)`);
+    results['3h'] = { success: false, skipped: true, reason: `Meeting is only ${hoursUntilMeeting.toFixed(1)}h away` };
     
     if (DISCORD_WEBHOOK) {
       await DiscordConnect(DISCORD_WEBHOOK,
-        `⏭️ WA reminder skipped: 24h\n` +
+        `⏭️ WA reminder skipped: 3h\n` +
         `📞 ${phoneNumber} • ${clientName || 'Unknown'}\n` +
         `📧 ${clientEmail || 'Unknown'}\n` +
         `🗓️ ${meetingDate} @ ${meetingTime}\n` +
-        `⚠️ Meeting is only ${hoursUntilMeeting.toFixed(1)}h away (booked within 24h)`
+        `⚠️ Meeting is only ${hoursUntilMeeting.toFixed(1)}h away (booked within 3h)`
       );
     }
   }
 
-  // Schedule 2-hour reminder (only if meeting is more than 2 hours away)
-  if (hoursUntilMeeting > 2) {
-    const result2h = await scheduleWhatsAppReminder({
+  if (minutesUntilMeeting > 5) {
+    const result5min = await scheduleWhatsAppReminder({
       phoneNumber,
       meetingStartISO,
       meetingTime,
@@ -262,44 +314,25 @@ export async function scheduleAllWhatsAppReminders({
       source,
       metadata,
       timezone,
-      reminderOffsetMinutes: 2 * 60, // 2 hours
-      reminderType: '2h'
+      reminderOffsetMinutes: 5,
+      reminderType: '5min'
     });
-    results['2h'] = result2h;
+    results['5min'] = result5min;
   } else {
-    console.log(`⏭️ [WhatsAppReminderScheduler] Skipping 2h reminder - meeting is ${hoursUntilMeeting.toFixed(1)}h away (< 2h)`);
-    results['2h'] = { success: false, skipped: true, reason: `Meeting is only ${hoursUntilMeeting.toFixed(1)}h away` };
+    console.log(`⏭️ [WhatsAppReminderScheduler] Skipping 5min reminder - meeting is ${minutesUntilMeeting.toFixed(1)}m away (< 5min)`);
+    results['5min'] = { success: false, skipped: true, reason: `Meeting is only ${minutesUntilMeeting.toFixed(1)}m away` };
     
     if (DISCORD_WEBHOOK) {
       await DiscordConnect(DISCORD_WEBHOOK,
-        `⏭️ WA reminder skipped: 2h\n` +
+        `⏭️ WA reminder skipped: 5min\n` +
         `📞 ${phoneNumber} • ${clientName || 'Unknown'}\n` +
         `📧 ${clientEmail || 'Unknown'}\n` +
         `🗓️ ${meetingDate} @ ${meetingTime}\n` +
-        `⚠️ Meeting is only ${hoursUntilMeeting.toFixed(1)}h away (booked within 2h)`
+        `⚠️ Meeting is only ${minutesUntilMeeting.toFixed(1)}m away (< 5min)`
       );
     }
   }
 
-  // Schedule 5-minute reminder (always schedule if meeting is in the future)
-  const result5min = await scheduleWhatsAppReminder({
-    phoneNumber,
-    meetingStartISO,
-    meetingTime,
-    meetingDate,
-    clientName,
-    clientEmail,
-    meetingLink,
-    rescheduleLink,
-    source,
-    metadata,
-    timezone,
-    reminderOffsetMinutes: 5, // 5 minutes
-    reminderType: '5min'
-  });
-  results['5min'] = result5min;
-
-  // Summary Discord message
   if (DISCORD_WEBHOOK) {
     const scheduledCount = Object.values(results).filter(r => r.success).length;
     const skippedCount = Object.values(results).filter(r => r.skipped).length;
@@ -310,8 +343,8 @@ export async function scheduleAllWhatsAppReminders({
       `📧 ${clientEmail || 'Unknown'}\n` +
       `🗓️ ${meetingDate} @ ${meetingTime}\n` +
       `✅ Scheduled: ${scheduledCount}/3\n` +
-      `   • 24h: ${results['24h'].success ? '✅' : (results['24h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
-      `   • 2h: ${results['2h'].success ? '✅' : (results['2h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
+      `   • Immediate: ${results['immediate'].success ? '✅' : (results['immediate'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
+      `   • 3h: ${results['3h'].success ? '✅' : (results['3h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
       `   • 5min: ${results['5min'].success ? '✅' : (results['5min'].skipped ? '⏭️ Skipped' : '❌ Failed')}`
     );
   }
@@ -327,8 +360,7 @@ export async function cancelWhatsAppReminder({ phoneNumber, meetingStartISO }) {
   try {
     const meetingStart = new Date(meetingStartISO);
     
-    // Cancel all reminder types (24h, 2h, 5min)
-    const reminderTypes = ['24h', '2h', '5min'];
+    const reminderTypes = ['immediate', '3h', '5min'];
     const cancelledReminders = [];
     
     for (const reminderType of reminderTypes) {
