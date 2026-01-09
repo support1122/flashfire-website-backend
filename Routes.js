@@ -96,6 +96,14 @@ import { callQueue, emailQueue, whatsappQueue, redisConnection } from './Utils/q
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser } from './Middlewares/CrmAuth.js';
+import {
+  getAvailableLeads,
+  getLeadByEmail,
+  claimLead,
+  updateLeadDetails,
+  getBdaAnalysis,
+  getMyClaimedLeads
+} from './Controllers/BdaLeadController.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -197,6 +205,13 @@ export default function Routes(app) {
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);
   app.get('/api/crm/auth/me', requireCrmUser, crmMe);
+  
+  app.get('/api/bda/available-leads', requireCrmUser, getAvailableLeads);
+  app.get('/api/bda/lead-by-email/:email', requireCrmUser, getLeadByEmail);
+  app.post('/api/bda/claim-lead/:bookingId', requireCrmUser, claimLead);
+  app.put('/api/bda/update-lead/:bookingId', requireCrmUser, updateLeadDetails);
+  app.get('/api/bda/my-leads', requireCrmUser, getMyClaimedLeads);
+  app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);
