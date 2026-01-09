@@ -4,6 +4,8 @@ import { WorkflowLogModel } from '../Schema_Models/WorkflowLog.js';
 import { Logger } from '../Utils/Logger.js';
 import sgMail from '@sendgrid/mail';
 import watiService from '../Utils/WatiService.js';
+import { DateTime } from 'luxon';
+import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1 || process.env.SENDGRID_API_KEY);
 
@@ -640,6 +642,68 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
           planAmount: parameters[1],
           planName: planName,
           planPrice: planPrice
+        });
+      } else if (templateName === 'cancelled1' || step.templateId === 'cancelled1') {
+        if (!booking.scheduledEventStartTime) {
+          throw new Error('Meeting date/time not available for cancelled1 template');
+        }
+
+        const meetingStart = new Date(booking.scheduledEventStartTime);
+        const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
+        const meetingEndUTC = booking.scheduledEventEndTime 
+          ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime), { zone: 'utc' })
+          : meetingStartUTC.plus({ minutes: 15 });
+
+        const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('MMM d');
+        
+        const startTimeET = meetingStartUTC.setZone('America/New_York');
+        const startTimeFormatted = startTimeET.minute === 0 
+          ? startTimeET.toFormat('ha').toLowerCase()
+          : startTimeET.toFormat('h:mma').toLowerCase();
+        
+        const endTimeET = meetingEndUTC.setZone('America/New_York');
+        const endTimeFormatted = endTimeET.minute === 0
+          ? endTimeET.toFormat('ha').toLowerCase()
+          : endTimeET.toFormat('h:mma').toLowerCase();
+        
+        const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
+
+        const meetingPST = meetingStartUTC.setZone('America/Los_Angeles');
+        const pstOffset = meetingPST.offset / 60;
+        const meetingET = meetingStartUTC.setZone('America/New_York');
+        const etOffset = meetingET.offset / 60;
+        const timezone = (pstOffset === -8 || pstOffset === -7) ? 'PST' : ((etOffset === -5 || etOffset === -4) ? 'ET' : 'ET');
+        
+        const meetingTimeWithTimezone = `${meetingTimeFormatted} ${timezone}`;
+
+        let rescheduleLink = booking.calendlyRescheduleLink || null;
+        if (!rescheduleLink) {
+          try {
+            const fetchedLink = await getRescheduleLinkForBooking(booking);
+            if (fetchedLink) {
+              rescheduleLink = fetchedLink;
+            }
+          } catch (error) {
+            console.warn('⚠️ [WorkflowController] Could not fetch reschedule link:', error.message);
+          }
+        }
+
+        if (!rescheduleLink) {
+          rescheduleLink = 'https://calendly.com/feedback-flashfire/30min';
+        }
+
+        parameters = [
+          booking.clientName || 'Valued Client',
+          meetingDateFormatted,
+          meetingTimeWithTimezone,
+          rescheduleLink
+        ];
+
+        console.log(`📋 cancelled1 template parameters:`, {
+          clientName: parameters[0],
+          date: parameters[1],
+          timeWithTimezone: parameters[2],
+          rescheduleLink: parameters[3]
         });
       }
 

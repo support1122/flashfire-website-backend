@@ -285,7 +285,22 @@ export const CampaignBookingSchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     }
-  }]
+  }],
+  claimedBy: {
+    email: {
+      type: String,
+      default: null,
+      index: true
+    },
+    name: {
+      type: String,
+      default: null
+    },
+    claimedAt: {
+      type: Date,
+      default: null
+    }
+  }
 }, {
   timestamps: true
 });
@@ -297,6 +312,7 @@ CampaignBookingSchema.index({ bookingStatus: 1 });
 CampaignBookingSchema.index({ campaignId: 1, bookingCreatedAt: -1 });
 CampaignBookingSchema.index({ bookingStatus: 1, clientEmail: 1, scheduledEventStartTime: -1, bookingCreatedAt: -1 });
 CampaignBookingSchema.index({ bookingStatus: 1, 'paymentPlan.name': 1, 'paymentPlan.price': 1 });
+CampaignBookingSchema.index({ 'claimedBy.email': 1, bookingStatus: 1 });
 
 export const CampaignBookingModel = mongoose.model('CampaignBooking', CampaignBookingSchema);
 
