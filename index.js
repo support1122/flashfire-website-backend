@@ -1069,6 +1069,15 @@ app.post('/calendly-webhook', async (req, res) => {
         payloadKeys: Object.keys(payload || {})
       });
 
+      // Extract invitee_timezone from rescheduled webhook payload
+      const newInviteeTimezone = new_invitee?.timezone || payload?.timezone || null;
+      
+      Logger.info('Extracted invitee timezone from rescheduled webhook', {
+        newInviteeTimezone,
+        hasNewInviteeTimezone: !!newInviteeTimezone,
+        newInviteeKeys: new_invitee ? Object.keys(new_invitee) : []
+      });
+
       if (inviteeEmail) {
         const updateData = { 
           bookingStatus: 'rescheduled',
@@ -1090,6 +1099,15 @@ app.post('/calendly-webhook', async (req, res) => {
           Logger.warn('No reschedule link in webhook - Calendly may not be providing it', {
             email: inviteeEmail,
             eventType: event
+          });
+        }
+        
+        // ✅ Update invitee_timezone if available in rescheduled webhook
+        if (newInviteeTimezone) {
+          updateData.inviteeTimezone = newInviteeTimezone;
+          Logger.info('Updating booking with invitee timezone from rescheduled webhook', { 
+            email: inviteeEmail,
+            inviteeTimezone: newInviteeTimezone
           });
         }
         
@@ -1150,7 +1168,8 @@ app.post('/calendly-webhook', async (req, res) => {
             bookingId: rescheduledBooking?.bookingId,
             rescheduledFrom: oldStartTime,
             rescheduledTo: newStartTime,
-            meetingEndISO: newEndTime
+            meetingEndISO: newEndTime,
+            inviteeTimezone: newInviteeTimezone // ✅ Pass invitee_timezone to CallScheduler
           }
         });
 
@@ -1406,6 +1425,15 @@ app.post('/calendly-webhook', async (req, res) => {
         }
       }
 
+      // Extract invitee_timezone from webhook payload
+      const inviteeTimezone = payload?.invitee?.timezone || payload?.timezone || null;
+      
+      Logger.info('Extracted invitee timezone from webhook', {
+        inviteeTimezone,
+        hasInviteeTimezone: !!inviteeTimezone,
+        inviteeKeys: payload?.invitee ? Object.keys(payload.invitee) : []
+      });
+
       // Create booking object
       const newBooking = new CampaignBookingModel({
         campaignId,
@@ -1423,6 +1451,7 @@ app.post('/calendly-webhook', async (req, res) => {
         calendlyRescheduleLink: rescheduleLink, // ✅ Save reschedule link
         scheduledEventStartTime: payload?.scheduled_event?.start_time,
         scheduledEventEndTime: payload?.scheduled_event?.end_time,
+        inviteeTimezone: inviteeTimezone, // ✅ Save invitee timezone from webhook
         anythingToKnow,
         questionsAndAnswers: payload?.questions_and_answers,
         visitorId: null,
@@ -1557,6 +1586,7 @@ app.post('/calendly-webhook', async (req, res) => {
           metadata: {
             bookingId: newBooking?.bookingId,
             eventUri: payload?.scheduled_event?.uri,
+            inviteeTimezone: inviteeTimezone, // ✅ Pass invitee_timezone to CallScheduler
             meetingEndISO: meetingEndTime
           }
         });
