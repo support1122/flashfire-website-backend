@@ -77,6 +77,10 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  inviteeTimezone: {
+    type: String,
+    default: null
+  },
   // Additional information
   anythingToKnow: {
     type: String,

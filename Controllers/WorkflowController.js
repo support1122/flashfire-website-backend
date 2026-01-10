@@ -7,6 +7,137 @@ import watiService from '../Utils/WatiService.js';
 import { DateTime } from 'luxon';
 import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 
+function normalizePhoneForMatching(phone) {
+  if (!phone) return null;
+  const cleaned = phone.replace(/[\s\-\(\)]/g, '');
+  if (cleaned.startsWith('+1') && cleaned.length >= 12) {
+    return cleaned.slice(-10);
+  } else if (cleaned.startsWith('1') && cleaned.length >= 11 && /^\d+$/.test(cleaned)) {
+    return cleaned.slice(-10);
+  } else if (cleaned.length >= 10 && /^\d+$/.test(cleaned)) {
+    return cleaned.slice(-10);
+  }
+  const digitsOnly = cleaned.replace(/\D/g, '');
+  return digitsOnly.length >= 10 ? digitsOnly.slice(-10) : null;
+}
+
+function getCountryCodeFromPhone(phone) {
+  if (!phone) return null;
+  const cleaned = phone.replace(/[\s\-\(\)]/g, '').trim();
+  
+  if (!cleaned.startsWith('+')) {
+    return null;
+  }
+  
+  if (cleaned.startsWith('+91')) {
+    return 'IN';
+  }
+  
+  if (cleaned.startsWith('+1')) {
+    return 'US';
+  }
+  
+  return null;
+}
+
+function filterByCountryCode(bookings, includeCountries) {
+  if (!includeCountries || includeCountries.length === 0) return bookings;
+  
+  return bookings.filter(booking => {
+    if (!booking.clientPhone) return false;
+    
+    const phone = String(booking.clientPhone).trim();
+    if (!phone || !phone.startsWith('+')) return false;
+    
+    if (includeCountries.includes('IN') && phone.startsWith('+91')) {
+      return true;
+    }
+    
+    if (includeCountries.includes('US') && phone.startsWith('+1')) {
+      return true;
+    }
+    
+    return false;
+  });
+}
+
+function deduplicateBookings(bookings) {
+  const groupedMap = new Map();
+  
+  for (const booking of bookings) {
+    if (!booking.clientEmail && !booking.clientPhone) continue;
+    
+    const normalizedEmail = booking.clientEmail ? booking.clientEmail.trim().toLowerCase() : null;
+    const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+    const groupKey = normalizedPhone || normalizedEmail;
+    
+    if (!groupKey) continue;
+    
+    if (!groupedMap.has(groupKey)) {
+      groupedMap.set(groupKey, booking);
+    } else {
+      const existing = groupedMap.get(groupKey);
+      const existingTime = existing.bookingCreatedAt ? new Date(existing.bookingCreatedAt).getTime() : 0;
+      const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+      
+      if (currentTime > existingTime) {
+        groupedMap.set(groupKey, booking);
+      }
+    }
+  }
+  
+  return Array.from(groupedMap.values());
+}
+
+
+function getTimezoneAbbreviationFromIANA(timezone, meetingStart) {
+  if (!timezone || !meetingStart) {
+    return null;
+  }
+
+  try {
+    const meetingStartUTC = DateTime.fromJSDate(new Date(meetingStart), { zone: 'utc' });
+    const meetingInTimezone = meetingStartUTC.setZone(timezone);
+    const offset = meetingInTimezone.offset / 60; // Offset in hours from UTC
+
+    // Check for PST/PDT (UTC-8 or UTC-7)
+    if (timezone.includes('Los_Angeles') || timezone.includes('Pacific')) {
+      return offset === -8 ? 'PST' : 'PDT';
+    }
+    
+    // Check for ET/EDT (UTC-5 or UTC-4)
+    if (timezone.includes('New_York') || timezone.includes('Eastern')) {
+      return offset === -5 ? 'ET' : 'EDT';
+    }
+    
+    // Check for CT/CDT (UTC-6 or UTC-5)
+    if (timezone.includes('Chicago') || timezone.includes('Central')) {
+      return offset === -6 ? 'CT' : 'CDT';
+    }
+    
+    // Check for MT/MDT (UTC-7 or UTC-6)
+    if (timezone.includes('Denver') || timezone.includes('Mountain')) {
+      return offset === -7 ? 'MT' : 'MDT';
+    }
+
+    // Default: try to determine from offset
+    if (offset === -8 || offset === -7) return 'PST';
+    if (offset === -5 || offset === -4) return 'ET';
+    if (offset === -6 || offset === -5) return 'CT';
+    if (offset === -7 || offset === -6) return 'MT';
+
+    // Fallback: return generic abbreviation
+    console.warn('⚠️ [WorkflowController] Unknown timezone, using offset-based fallback', {
+      timezone,
+      offset
+    });
+    return 'ET'; // Default fallback
+  } catch (error) {
+    console.warn('⚠️ [WorkflowController] Error converting timezone, defaulting to ET:', error.message);
+    return 'ET';
+  }
+}
+
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1 || process.env.SENDGRID_API_KEY);
 
 // ==================== CREATE WORKFLOW ====================
@@ -668,11 +799,20 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
         
         const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
-        const meetingPST = meetingStartUTC.setZone('America/Los_Angeles');
-        const pstOffset = meetingPST.offset / 60;
-        const meetingET = meetingStartUTC.setZone('America/New_York');
-        const etOffset = meetingET.offset / 60;
-        const timezone = (pstOffset === -8 || pstOffset === -7) ? 'PST' : ((etOffset === -5 || etOffset === -4) ? 'ET' : 'ET');
+        // Use invitee_timezone from webhook if available, otherwise fallback to hardcoded logic
+        let timezone;
+        if (booking.inviteeTimezone) {
+          timezone = getTimezoneAbbreviationFromIANA(booking.inviteeTimezone, booking.scheduledEventStartTime);
+          console.log(`✅ [WorkflowController] Using invitee_timezone from webhook: ${booking.inviteeTimezone} -> ${timezone}`);
+        } else {
+          // Fallback to hardcoded logic if invitee_timezone not available
+          const meetingPST = meetingStartUTC.setZone('America/Los_Angeles');
+          const pstOffset = meetingPST.offset / 60;
+          const meetingET = meetingStartUTC.setZone('America/New_York');
+          const etOffset = meetingET.offset / 60;
+          timezone = (pstOffset === -8 || pstOffset === -7) ? 'PST' : ((etOffset === -5 || etOffset === -4) ? 'ET' : 'ET');
+          console.warn('⚠️ [WorkflowController] invitee_timezone not available, using fallback logic:', timezone);
+        }
         
         const meetingTimeWithTimezone = `${meetingTimeFormatted} ${timezone}`;
 
@@ -912,7 +1052,7 @@ export const processScheduledWorkflows = async () => {
 
 export const getBookingsByStatusForBulk = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, includeCountries } = req.query;
 
     if (!status) {
       return res.status(400).json({
@@ -936,15 +1076,31 @@ export const getBookingsByStatusForBulk = async (req, res) => {
       });
     }
 
-    const bookings = await CampaignBookingModel.find({
+    let includeCountryCodes = [];
+    if (includeCountries) {
+      try {
+        includeCountryCodes = JSON.parse(includeCountries);
+      } catch (e) {
+        includeCountryCodes = Array.isArray(includeCountries) ? includeCountries : [];
+      }
+    }
+
+    const allBookings = await CampaignBookingModel.find({
       bookingStatus: dbStatus,
       scheduledEventStartTime: { $exists: true, $ne: null }
     })
-      .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows')
+      .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
+      .sort({ bookingCreatedAt: -1 })
       .lean();
 
-    // Check which bookings already have scheduled workflows
-    const bookingsWithWorkflowCheck = bookings.map(booking => {
+    let filteredBookings = allBookings;
+    if (includeCountryCodes.length > 0) {
+      filteredBookings = filterByCountryCode(allBookings, includeCountryCodes);
+    }
+
+    const uniqueBookings = deduplicateBookings(filteredBookings);
+
+    const bookingsWithWorkflowCheck = uniqueBookings.map(booking => {
       const hasScheduledWorkflows = booking.scheduledWorkflows && 
         booking.scheduledWorkflows.some(sw => sw.status === 'scheduled');
       
@@ -988,7 +1144,7 @@ export const getBookingsByStatusForBulk = async (req, res) => {
 
 export const triggerWorkflowsForAllByStatus = async (req, res) => {
   try {
-    const { status, skipExisting = true } = req.body;
+    const { status, skipExisting = true, includeCountries = [] } = req.body;
 
     if (!status) {
       return res.status(400).json({
@@ -1012,13 +1168,15 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
       });
     }
 
-    // Get all bookings with this status
-    const bookings = await CampaignBookingModel.find({
+    const allBookings = await CampaignBookingModel.find({
       bookingStatus: statusInfo.dbStatus,
       scheduledEventStartTime: { $exists: true, $ne: null }
-    }).lean();
+    })
+      .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
+      .sort({ bookingCreatedAt: -1 })
+      .lean();
 
-    if (bookings.length === 0) {
+    if (allBookings.length === 0) {
       return res.status(200).json({
         success: true,
         message: 'No bookings found with this status',
@@ -1031,6 +1189,13 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
       });
     }
 
+    let filteredBookings = allBookings;
+    if (includeCountries && includeCountries.length > 0) {
+      filteredBookings = filterByCountryCode(allBookings, includeCountries);
+    }
+
+    const bookings = deduplicateBookings(filteredBookings);
+
     const actionMap = {
       'no-show': 'no-show',
       'completed': 'complete',
@@ -1040,7 +1205,6 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
 
     const triggerAction = actionMap[statusInfo.action];
     
-    // Check for active workflows for this action
     const workflows = await WorkflowModel.find({
       triggerAction,
       isActive: true
