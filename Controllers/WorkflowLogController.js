@@ -302,3 +302,154 @@ export const sendWorkflowLogNow = async (req, res) => {
   }
 };
 
+export const deleteWorkflowLog = async (req, res) => {
+  try {
+    const { logId } = req.params;
+
+    const log = await WorkflowLogModel.findOne({ logId });
+    if (!log) {
+      return res.status(404).json({
+        success: false,
+        message: 'Workflow log not found'
+      });
+    }
+
+    if (log.status === 'executed') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete executed workflow logs'
+      });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId: log.bookingId });
+    if (booking && booking.scheduledWorkflows) {
+      const scheduledWorkflow = booking.scheduledWorkflows.find(
+        sw => sw.workflowId === log.workflowId &&
+        sw.step.channel === log.step.channel &&
+        sw.step.daysAfter === log.step.daysAfter &&
+        sw.step.templateId === log.step.templateId &&
+        sw.status === 'scheduled'
+      );
+
+      if (scheduledWorkflow) {
+        await CampaignBookingModel.updateOne(
+          { bookingId: log.bookingId, 'scheduledWorkflows._id': scheduledWorkflow._id },
+          { 
+            $set: { 
+              'scheduledWorkflows.$.status': 'cancelled',
+              'scheduledWorkflows.$.error': 'Manually deleted by user'
+            } 
+          }
+        );
+      }
+    }
+
+    await WorkflowLogModel.updateOne(
+      { logId },
+      {
+        $set: {
+          status: 'cancelled',
+          error: 'Manually deleted by user'
+        }
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Workflow log deleted successfully'
+    });
+
+  } catch (error) {
+    console.error('Error deleting workflow log:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete workflow log',
+      error: error.message
+    });
+  }
+};
+
+export const deleteAllWorkflowsForBookingByStatus = async (req, res) => {
+  try {
+    const { bookingId, triggerAction } = req.params;
+
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    const scheduledWorkflows = (booking.scheduledWorkflows || []).filter(
+      sw => sw.status === 'scheduled'
+    );
+
+    if (scheduledWorkflows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No scheduled workflows found',
+        data: {
+          deleted: 0
+        }
+      });
+    }
+
+    let deletedCount = 0;
+    const workflowIds = new Set();
+
+    for (const scheduledWorkflow of scheduledWorkflows) {
+      try {
+        const workflow = await import('../Schema_Models/Workflow.js').then(m => m.WorkflowModel.findOne({ workflowId: scheduledWorkflow.workflowId }).lean());
+        
+        if (workflow && workflow.triggerAction === triggerAction) {
+          await CampaignBookingModel.updateOne(
+            { bookingId, 'scheduledWorkflows._id': scheduledWorkflow._id },
+            { 
+              $set: { 
+                'scheduledWorkflows.$.status': 'cancelled',
+                'scheduledWorkflows.$.error': 'Manually deleted by user - all workflows for this status'
+              } 
+            }
+          );
+          workflowIds.add(scheduledWorkflow.workflowId);
+          deletedCount++;
+        }
+      } catch (error) {
+        console.error(`Error deleting scheduled workflow ${scheduledWorkflow._id}:`, error);
+      }
+    }
+
+    await WorkflowLogModel.updateMany(
+      {
+        bookingId,
+        triggerAction,
+        status: 'scheduled'
+      },
+      {
+        $set: {
+          status: 'cancelled',
+          error: 'Manually deleted by user - all workflows for this status'
+        }
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Deleted ${deletedCount} scheduled workflow(s)`,
+      data: {
+        deleted: deletedCount,
+        bookingId,
+        triggerAction
+      }
+    });
+
+  } catch (error) {
+    console.error('Error deleting workflows for booking by status:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to delete workflows',
+      error: error.message
+    });
+  }
+};

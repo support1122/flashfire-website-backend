@@ -86,7 +86,9 @@ import {
   getWorkflowLogs,
   getWorkflowLogById,
   getWorkflowLogStats,
-  sendWorkflowLogNow
+  sendWorkflowLogNow,
+  deleteWorkflowLog,
+  deleteAllWorkflowsForBookingByStatus
 } from "./Controllers/WorkflowLogController.js";
 // Bull Board imports for queue monitoring
 import { createBullBoard } from '@bull-board/api';
@@ -334,6 +336,8 @@ export default function Routes(app) {
   app.get('/api/workflow-logs/stats', getWorkflowLogStats); // Get workflow log statistics
   app.get('/api/workflow-logs/:logId', getWorkflowLogById); // Get workflow log by ID
   app.post('/api/workflow-logs/:logId/send-now', sendWorkflowLogNow); // Send workflow log email immediately
+  app.delete('/api/workflow-logs/:logId', deleteWorkflowLog); // Delete a single workflow log
+  app.delete('/api/workflow-logs/booking/:bookingId/status/:triggerAction', deleteAllWorkflowsForBookingByStatus); // Delete all workflows for a booking by status
 
   app.get('/details', renderDashboard);
   app.get('/api/dashboard/data', getDashboardData);

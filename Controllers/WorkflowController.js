@@ -77,11 +77,18 @@ function deduplicateBookings(bookings) {
       groupedMap.set(groupKey, booking);
     } else {
       const existing = groupedMap.get(groupKey);
-      const existingTime = existing.bookingCreatedAt ? new Date(existing.bookingCreatedAt).getTime() : 0;
-      const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+      const existingEventTime = existing.scheduledEventStartTime ? new Date(existing.scheduledEventStartTime).getTime() : 0;
+      const currentEventTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
       
-      if (currentTime > existingTime) {
+      if (currentEventTime > existingEventTime) {
         groupedMap.set(groupKey, booking);
+      } else if (currentEventTime === existingEventTime) {
+        const existingTime = existing.bookingCreatedAt ? new Date(existing.bookingCreatedAt).getTime() : 0;
+        const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+        
+        if (currentTime > existingTime) {
+          groupedMap.set(groupKey, booking);
+        }
       }
     }
   }
@@ -1086,21 +1093,63 @@ export const getBookingsByStatusForBulk = async (req, res) => {
     }
 
     const allBookings = await CampaignBookingModel.find({
-      bookingStatus: dbStatus,
       scheduledEventStartTime: { $exists: true, $ne: null }
     })
       .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
-      .sort({ bookingCreatedAt: -1 })
+      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .lean();
 
-    let filteredBookings = allBookings;
-    if (includeCountryCodes.length > 0) {
-      filteredBookings = filterByCountryCode(allBookings, includeCountryCodes);
+    const groupedMap = new Map();
+    
+    for (const booking of allBookings) {
+      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+      const groupKey = normalizedPhone || booking.clientEmail;
+      
+      if (!groupedMap.has(groupKey)) {
+        groupedMap.set(groupKey, {
+          booking: booking,
+          totalBookings: 1,
+          hasPaid: booking.bookingStatus === 'paid'
+        });
+      } else {
+        const existing = groupedMap.get(groupKey);
+        existing.totalBookings += 1;
+        
+        const existingIsPaid = existing.booking.bookingStatus === 'paid';
+        const currentIsPaid = booking.bookingStatus === 'paid';
+        
+        if (currentIsPaid && !existingIsPaid) {
+          existing.booking = booking;
+          existing.hasPaid = true;
+        } else if (!currentIsPaid && existingIsPaid) {
+        } else {
+          const existingEventTime = existing.booking.scheduledEventStartTime ? new Date(existing.booking.scheduledEventStartTime).getTime() : 0;
+          const currentEventTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
+          
+          if (currentEventTime > existingEventTime) {
+            existing.booking = booking;
+          } else if (currentEventTime === existingEventTime) {
+            const existingTime = existing.booking.bookingCreatedAt ? new Date(existing.booking.bookingCreatedAt).getTime() : 0;
+            const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+            
+            if (currentTime > existingTime) {
+              existing.booking = booking;
+            }
+          }
+        }
+      }
     }
 
-    const uniqueBookings = deduplicateBookings(filteredBookings);
+    let uniqueBookings = Array.from(groupedMap.values()).map(item => item.booking);
+    
+    uniqueBookings = uniqueBookings.filter(booking => booking.bookingStatus === dbStatus);
 
-    const bookingsWithWorkflowCheck = uniqueBookings.map(booking => {
+    let filteredBookings = uniqueBookings;
+    if (includeCountryCodes.length > 0) {
+      filteredBookings = filterByCountryCode(uniqueBookings, includeCountryCodes);
+    }
+
+    const bookingsWithWorkflowCheck = filteredBookings.map(booking => {
       const hasScheduledWorkflows = booking.scheduledWorkflows && 
         booking.scheduledWorkflows.some(sw => sw.status === 'scheduled');
       
@@ -1169,14 +1218,71 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
     }
 
     const allBookings = await CampaignBookingModel.find({
-      bookingStatus: statusInfo.dbStatus,
       scheduledEventStartTime: { $exists: true, $ne: null }
     })
       .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
-      .sort({ bookingCreatedAt: -1 })
+      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .lean();
 
     if (allBookings.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No bookings found',
+        data: {
+          total: 0,
+          processed: 0,
+          skipped: 0,
+          errors: []
+        }
+      });
+    }
+
+    const groupedMap = new Map();
+    
+    for (const booking of allBookings) {
+      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+      const groupKey = normalizedPhone || booking.clientEmail;
+      
+      if (!groupedMap.has(groupKey)) {
+        groupedMap.set(groupKey, {
+          booking: booking,
+          totalBookings: 1,
+          hasPaid: booking.bookingStatus === 'paid'
+        });
+      } else {
+        const existing = groupedMap.get(groupKey);
+        existing.totalBookings += 1;
+        
+        const existingIsPaid = existing.booking.bookingStatus === 'paid';
+        const currentIsPaid = booking.bookingStatus === 'paid';
+        
+        if (currentIsPaid && !existingIsPaid) {
+          existing.booking = booking;
+          existing.hasPaid = true;
+        } else if (!currentIsPaid && existingIsPaid) {
+        } else {
+          const existingEventTime = existing.booking.scheduledEventStartTime ? new Date(existing.booking.scheduledEventStartTime).getTime() : 0;
+          const currentEventTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
+          
+          if (currentEventTime > existingEventTime) {
+            existing.booking = booking;
+          } else if (currentEventTime === existingEventTime) {
+            const existingTime = existing.booking.bookingCreatedAt ? new Date(existing.booking.bookingCreatedAt).getTime() : 0;
+            const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+            
+            if (currentTime > existingTime) {
+              existing.booking = booking;
+            }
+          }
+        }
+      }
+    }
+
+    let uniqueBookings = Array.from(groupedMap.values()).map(item => item.booking);
+    
+    uniqueBookings = uniqueBookings.filter(booking => booking.bookingStatus === statusInfo.dbStatus);
+
+    if (uniqueBookings.length === 0) {
       return res.status(200).json({
         success: true,
         message: 'No bookings found with this status',
@@ -1189,12 +1295,12 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
       });
     }
 
-    let filteredBookings = allBookings;
+    let filteredBookings = uniqueBookings;
     if (includeCountries && includeCountries.length > 0) {
-      filteredBookings = filterByCountryCode(allBookings, includeCountries);
+      filteredBookings = filterByCountryCode(uniqueBookings, includeCountries);
     }
 
-    const bookings = deduplicateBookings(filteredBookings);
+    const bookings = filteredBookings;
 
     const actionMap = {
       'no-show': 'no-show',
