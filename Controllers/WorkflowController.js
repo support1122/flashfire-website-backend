@@ -77,11 +77,18 @@ function deduplicateBookings(bookings) {
       groupedMap.set(groupKey, booking);
     } else {
       const existing = groupedMap.get(groupKey);
-      const existingTime = existing.bookingCreatedAt ? new Date(existing.bookingCreatedAt).getTime() : 0;
-      const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+      const existingEventTime = existing.scheduledEventStartTime ? new Date(existing.scheduledEventStartTime).getTime() : 0;
+      const currentEventTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
       
-      if (currentTime > existingTime) {
+      if (currentEventTime > existingEventTime) {
         groupedMap.set(groupKey, booking);
+      } else if (currentEventTime === existingEventTime) {
+        const existingTime = existing.bookingCreatedAt ? new Date(existing.bookingCreatedAt).getTime() : 0;
+        const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+        
+        if (currentTime > existingTime) {
+          groupedMap.set(groupKey, booking);
+        }
       }
     }
   }
@@ -464,7 +471,8 @@ export const triggerWorkflow = async (bookingId, action) => {
       'no-show': 'no-show',
       'completed': 'complete',
       'canceled': 'cancel',
-      'rescheduled': 're-schedule'
+      'rescheduled': 're-schedule',
+      'paid': 'paid'
     };
 
     const triggerAction = actionMap[action];
@@ -847,19 +855,33 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
         });
       }
 
-      // Use templateName for WATI (not templateId)
-      // templateName should be the actual template name like 'finalkk', 'plan_followup_utility_01dd', etc.
-      const watiTemplateName = step.templateName || step.templateId;
+      const watiTemplateName = step.templateName;
+      const watiTemplateId = step.templateId;
       
       const result = await watiService.sendTemplateMessage({
         mobileNumber: booking.clientPhone,
-        templateName: watiTemplateName, // Use template name, not ID
+        templateName: watiTemplateName,
+        templateId: watiTemplateId,
         parameters: parameters,
         campaignId: `workflow_${workflowId}_${Date.now()}`
       });
 
       if (!result.success) {
-        throw new Error(result.error || 'Failed to send WhatsApp message');
+        const errorDetails = result.watiResponse ? JSON.stringify(result.watiResponse, null, 2) : '';
+        const errorMessage = result.error || 'Failed to send WhatsApp message';
+        const fullError = errorDetails ? `${errorMessage}\nWATI Response: ${errorDetails}` : errorMessage;
+        
+        console.error(`❌ [WorkflowController] WhatsApp send failed for workflow ${workflowId}:`, {
+          bookingId: booking.bookingId,
+          clientPhone: booking.clientPhone,
+          templateName: watiTemplateName,
+          templateId: watiTemplateId,
+          parameters: parameters,
+          error: errorMessage,
+          watiResponse: result.watiResponse
+        });
+        
+        throw new Error(fullError);
       }
 
       responseData = result.data;
@@ -1086,21 +1108,63 @@ export const getBookingsByStatusForBulk = async (req, res) => {
     }
 
     const allBookings = await CampaignBookingModel.find({
-      bookingStatus: dbStatus,
       scheduledEventStartTime: { $exists: true, $ne: null }
     })
       .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
-      .sort({ bookingCreatedAt: -1 })
+      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .lean();
 
-    let filteredBookings = allBookings;
-    if (includeCountryCodes.length > 0) {
-      filteredBookings = filterByCountryCode(allBookings, includeCountryCodes);
+    const groupedMap = new Map();
+    
+    for (const booking of allBookings) {
+      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+      const groupKey = normalizedPhone || booking.clientEmail;
+      
+      if (!groupedMap.has(groupKey)) {
+        groupedMap.set(groupKey, {
+          booking: booking,
+          totalBookings: 1,
+          hasPaid: booking.bookingStatus === 'paid'
+        });
+      } else {
+        const existing = groupedMap.get(groupKey);
+        existing.totalBookings += 1;
+        
+        const existingIsPaid = existing.booking.bookingStatus === 'paid';
+        const currentIsPaid = booking.bookingStatus === 'paid';
+        
+        if (currentIsPaid && !existingIsPaid) {
+          existing.booking = booking;
+          existing.hasPaid = true;
+        } else if (!currentIsPaid && existingIsPaid) {
+        } else {
+          const existingEventTime = existing.booking.scheduledEventStartTime ? new Date(existing.booking.scheduledEventStartTime).getTime() : 0;
+          const currentEventTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
+          
+          if (currentEventTime > existingEventTime) {
+            existing.booking = booking;
+          } else if (currentEventTime === existingEventTime) {
+            const existingTime = existing.booking.bookingCreatedAt ? new Date(existing.booking.bookingCreatedAt).getTime() : 0;
+            const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+            
+            if (currentTime > existingTime) {
+              existing.booking = booking;
+            }
+          }
+        }
+      }
     }
 
-    const uniqueBookings = deduplicateBookings(filteredBookings);
+    let uniqueBookings = Array.from(groupedMap.values()).map(item => item.booking);
+    
+    uniqueBookings = uniqueBookings.filter(booking => booking.bookingStatus === dbStatus);
 
-    const bookingsWithWorkflowCheck = uniqueBookings.map(booking => {
+    let filteredBookings = uniqueBookings;
+    if (includeCountryCodes.length > 0) {
+      filteredBookings = filterByCountryCode(uniqueBookings, includeCountryCodes);
+    }
+
+    const bookingsWithWorkflowCheck = filteredBookings.map(booking => {
       const hasScheduledWorkflows = booking.scheduledWorkflows && 
         booking.scheduledWorkflows.some(sw => sw.status === 'scheduled');
       
@@ -1142,6 +1206,185 @@ export const getBookingsByStatusForBulk = async (req, res) => {
   }
 };
 
+export const resendAllFailedWhatsApp = async (req, res) => {
+  try {
+    const failedLogs = await WorkflowLogModel.find({
+      status: 'failed',
+      'step.channel': 'whatsapp'
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (failedLogs.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No failed WhatsApp workflow logs found',
+        data: {
+          total: 0,
+          resent: 0,
+          deleted: 0,
+          errors: []
+        }
+      });
+    }
+
+    const results = {
+      total: failedLogs.length,
+      resent: 0,
+      deleted: 0,
+      errors: []
+    };
+
+    const bookingCache = new Map();
+    const workflowCache = new Map();
+
+    for (const log of failedLogs) {
+      try {
+        let booking = bookingCache.get(log.bookingId);
+        if (!booking) {
+          booking = await CampaignBookingModel.findOne({ bookingId: log.bookingId }).lean();
+          if (!booking) {
+            results.errors.push({
+              logId: log.logId,
+              bookingId: log.bookingId,
+              error: 'Booking not found'
+            });
+            continue;
+          }
+          bookingCache.set(log.bookingId, booking);
+        }
+
+        if (!booking.clientPhone) {
+          results.errors.push({
+            logId: log.logId,
+            bookingId: log.bookingId,
+            error: 'Client phone number not available'
+          });
+          continue;
+        }
+
+        const existingSuccess = await WorkflowLogModel.findOne({
+          bookingId: log.bookingId,
+          workflowId: log.workflowId,
+          'step.channel': 'whatsapp',
+          'step.templateId': log.step.templateId,
+          'step.daysAfter': log.step.daysAfter,
+          status: 'executed'
+        }).lean();
+
+        if (existingSuccess) {
+          await WorkflowLogModel.deleteOne({ logId: log.logId });
+          results.deleted++;
+          continue;
+        }
+
+        let workflow = workflowCache.get(log.workflowId);
+        if (!workflow) {
+          workflow = await WorkflowModel.findOne({ workflowId: log.workflowId }).lean();
+          if (!workflow) {
+            results.errors.push({
+              logId: log.logId,
+              bookingId: log.bookingId,
+              error: 'Workflow not found'
+            });
+            continue;
+          }
+          workflowCache.set(log.workflowId, workflow);
+        }
+
+        const step = workflow.steps.find(s => 
+          s.channel === log.step.channel &&
+          s.templateId === log.step.templateId &&
+          s.daysAfter === log.step.daysAfter
+        );
+
+        if (!step) {
+          results.errors.push({
+            logId: log.logId,
+            bookingId: log.bookingId,
+            error: 'Workflow step not found'
+          });
+          continue;
+        }
+
+        const stepWithConfig = {
+          ...step,
+          templateName: step.templateName || step.templateId || log.step.templateName || log.step.templateId,
+          templateConfig: step.templateConfig || {}
+        };
+
+        try {
+          const originalScheduledFor = log.scheduledFor ? new Date(log.scheduledFor) : null;
+          const now = new Date();
+          
+          if (originalScheduledFor && originalScheduledFor > now) {
+            await scheduleWorkflowStep(
+              log.bookingId,
+              stepWithConfig,
+              log.workflowId,
+              originalScheduledFor,
+              booking,
+              log.workflowName || workflow.name,
+              log.triggerAction
+            );
+            await WorkflowLogModel.deleteOne({ logId: log.logId });
+            results.resent++;
+            results.deleted++;
+          } else {
+            const result = await executeWorkflowStep(
+              stepWithConfig,
+              booking,
+              log.workflowId,
+              log.workflowName || workflow.name,
+              log.triggerAction
+            );
+
+            if (result && result.success) {
+              await WorkflowLogModel.deleteOne({ logId: log.logId });
+              results.resent++;
+              results.deleted++;
+            } else {
+              results.errors.push({
+                logId: log.logId,
+                bookingId: log.bookingId,
+                error: 'Failed to resend - unknown error'
+              });
+            }
+          }
+        } catch (stepError) {
+          console.error(`Error executing workflow step for log ${log.logId}:`, stepError);
+          results.errors.push({
+            logId: log.logId,
+            bookingId: log.bookingId,
+            error: stepError.message || 'Failed to resend'
+          });
+        }
+      } catch (error) {
+        console.error(`Error resending failed WhatsApp log ${log.logId}:`, error);
+        results.errors.push({
+          logId: log.logId,
+          bookingId: log.bookingId,
+          error: error.message
+        });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: `Resent ${results.resent} failed WhatsApp workflow(s), deleted ${results.deleted} old record(s)`,
+      data: results
+    });
+
+  } catch (error) {
+    console.error('Error resending all failed WhatsApp workflows:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to resend failed WhatsApp workflows',
+      error: error.message
+    });
+  }
+};
+
 export const triggerWorkflowsForAllByStatus = async (req, res) => {
   try {
     const { status, skipExisting = true, includeCountries = [] } = req.body;
@@ -1169,14 +1412,71 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
     }
 
     const allBookings = await CampaignBookingModel.find({
-      bookingStatus: statusInfo.dbStatus,
       scheduledEventStartTime: { $exists: true, $ne: null }
     })
       .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
-      .sort({ bookingCreatedAt: -1 })
+      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .lean();
 
     if (allBookings.length === 0) {
+      return res.status(200).json({
+        success: true,
+        message: 'No bookings found',
+        data: {
+          total: 0,
+          processed: 0,
+          skipped: 0,
+          errors: []
+        }
+      });
+    }
+
+    const groupedMap = new Map();
+    
+    for (const booking of allBookings) {
+      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+      const groupKey = normalizedPhone || booking.clientEmail;
+      
+      if (!groupedMap.has(groupKey)) {
+        groupedMap.set(groupKey, {
+          booking: booking,
+          totalBookings: 1,
+          hasPaid: booking.bookingStatus === 'paid'
+        });
+      } else {
+        const existing = groupedMap.get(groupKey);
+        existing.totalBookings += 1;
+        
+        const existingIsPaid = existing.booking.bookingStatus === 'paid';
+        const currentIsPaid = booking.bookingStatus === 'paid';
+        
+        if (currentIsPaid && !existingIsPaid) {
+          existing.booking = booking;
+          existing.hasPaid = true;
+        } else if (!currentIsPaid && existingIsPaid) {
+        } else {
+          const existingEventTime = existing.booking.scheduledEventStartTime ? new Date(existing.booking.scheduledEventStartTime).getTime() : 0;
+          const currentEventTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
+          
+          if (currentEventTime > existingEventTime) {
+            existing.booking = booking;
+          } else if (currentEventTime === existingEventTime) {
+            const existingTime = existing.booking.bookingCreatedAt ? new Date(existing.booking.bookingCreatedAt).getTime() : 0;
+            const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
+            
+            if (currentTime > existingTime) {
+              existing.booking = booking;
+            }
+          }
+        }
+      }
+    }
+
+    let uniqueBookings = Array.from(groupedMap.values()).map(item => item.booking);
+    
+    uniqueBookings = uniqueBookings.filter(booking => booking.bookingStatus === statusInfo.dbStatus);
+
+    if (uniqueBookings.length === 0) {
       return res.status(200).json({
         success: true,
         message: 'No bookings found with this status',
@@ -1189,12 +1489,12 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
       });
     }
 
-    let filteredBookings = allBookings;
+    let filteredBookings = uniqueBookings;
     if (includeCountries && includeCountries.length > 0) {
-      filteredBookings = filterByCountryCode(allBookings, includeCountries);
+      filteredBookings = filterByCountryCode(uniqueBookings, includeCountries);
     }
 
-    const bookings = deduplicateBookings(filteredBookings);
+    const bookings = filteredBookings;
 
     const actionMap = {
       'no-show': 'no-show',

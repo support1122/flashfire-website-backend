@@ -163,12 +163,13 @@ class WatiService {
    * Send WhatsApp template message using WATI API
    * @param {Object} params
    * @param {string} params.mobileNumber - Recipient's mobile number
-   * @param {string} params.templateName - Template name
+   * @param {string} params.templateName - Template name (approved template name)
+   * @param {string} params.templateId - Template ID (WATI template ID, alternative to templateName)
    * @param {Array} params.parameters - Template parameters
    * @param {string} params.campaignId - Campaign ID for tracking
    * @returns {Promise<{success: boolean, data?: any, error?: string}>}
    */
-  async sendTemplateMessage({ mobileNumber, templateName, parameters = [], campaignId }) {
+  async sendTemplateMessage({ mobileNumber, templateName, templateId, parameters = [], campaignId }) {
     try {
       // Normalize mobile number - remove + and any non-digits
       const mobile = mobileNumber.replace(/\D/g, '');
@@ -189,9 +190,15 @@ class WatiService {
         value
       }));
 
+      const templateIdentifier = templateId || templateName;
+      
+      if (!templateId && !templateName) {
+        throw new Error('Either templateId or templateName must be provided');
+      }
+      
       const messageData = {
-        template_name: templateName,
-        broadcast_name: `Campaign_${campaignId}_${templateName}`,
+        template_name: templateName || templateId,
+        broadcast_name: `Campaign_${campaignId}_${templateIdentifier}`,
         ...(digitsOnly ? { channel_number: parseInt(digitsOnly) } : {}),
         parameters: formattedParameters
       };
@@ -199,7 +206,8 @@ class WatiService {
       console.log('📤 Sending WATI message:', {
         url,
         mobile,
-        templateName,
+        templateName: templateName || 'N/A',
+        templateId: templateId || 'N/A',
         parametersCount: formattedParameters.length,
         hasTenant: !!this.tenantId,
         payload: messageData
@@ -225,28 +233,82 @@ class WatiService {
             data: data
           };
         } else {
+          let errorMessage = 'Unknown error from WATI';
+          
+          if (data.error) {
+            errorMessage = data.error;
+          } else if (data.items && Array.isArray(data.items) && data.items.length > 0) {
+            const errorItems = data.items.map(item => {
+              if (item.description) {
+                return `${item.code || 'Error'}: ${item.description}`;
+              }
+              return item.code || JSON.stringify(item);
+            });
+            errorMessage = errorItems.join('; ');
+          } else if (data.message) {
+            errorMessage = data.message;
+          }
+          
+          console.error('❌ WATI API returned error:', {
+            status: response.status,
+            error: errorMessage,
+            fullResponse: data
+          });
+          
           return {
             success: false,
-            error: data.message || 'Unknown error from WATI'
+            error: errorMessage,
+            watiResponse: data
           };
         }
       } else {
+        const errorMsg = `WATI API HTTP error: ${response.status} - ${response.statusText}`;
+        console.error('❌ WATI API HTTP error:', errorMsg);
         return {
           success: false,
-          error: `WATI API HTTP error: ${response.status} - ${response.statusText}`
+          error: errorMsg
         };
       }
     } catch (error) {
-      console.error('❌ Error sending WATI message:', error.message, {
+      let errorMessage = error.message;
+      let watiErrorDetails = null;
+      
+      if (error.response?.data) {
+        const data = error.response.data;
+        
+        if (data.error) {
+          errorMessage = data.error;
+          watiErrorDetails = data;
+        } else if (data.items && Array.isArray(data.items) && data.items.length > 0) {
+          const errorItems = data.items.map(item => {
+            if (item.description) {
+              return `${item.code || 'Error'}: ${item.description}`;
+            }
+            return item.code || JSON.stringify(item);
+          });
+          errorMessage = errorItems.join('; ');
+          watiErrorDetails = data;
+        } else if (data.message) {
+          errorMessage = data.message;
+          watiErrorDetails = data;
+        } else {
+          errorMessage = JSON.stringify(data);
+          watiErrorDetails = data;
+        }
+      }
+      
+      console.error('❌ Error sending WATI message:', {
+        error: errorMessage,
         responseStatus: error.response?.status,
-        responseData: error.response?.data,
-        responseText: error.response?.data ? JSON.stringify(error.response.data) : '',
+        responseData: watiErrorDetails || error.response?.data,
         url: error.config?.url,
-        requestPayload: error.config?.data
+        requestPayload: error.config?.data ? JSON.parse(error.config.data) : null
       });
+      
       return {
         success: false,
-        error: error.response?.data?.message || error.message
+        error: errorMessage,
+        watiResponse: watiErrorDetails || error.response?.data
       };
     }
   }

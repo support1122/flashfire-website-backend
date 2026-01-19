@@ -169,21 +169,20 @@ export const updateLeadDetails = async (req, res) => {
       });
     }
 
+    if (booking.claimedBy && booking.claimedBy.email) {
+      if (paymentPlan) {
+        return res.status(403).json({
+          success: false,
+          message: 'Cannot change payment plan or amount for claimed leads'
+        });
+      }
+    }
+
     if (clientName) booking.clientName = clientName;
     if (clientPhone !== undefined) booking.clientPhone = clientPhone;
     if (scheduledEventStartTime) booking.scheduledEventStartTime = new Date(scheduledEventStartTime);
     if (meetingNotes !== undefined) booking.meetingNotes = meetingNotes;
     if (anythingToKnow !== undefined) booking.anythingToKnow = anythingToKnow;
-
-    if (paymentPlan) {
-      if (paymentPlan.name) booking.paymentPlan.name = paymentPlan.name;
-      if (paymentPlan.price !== undefined) booking.paymentPlan.price = paymentPlan.price;
-      if (paymentPlan.currency) booking.paymentPlan.currency = paymentPlan.currency;
-      if (paymentPlan.displayPrice) booking.paymentPlan.displayPrice = paymentPlan.displayPrice;
-      if (!booking.paymentPlan.selectedAt) {
-        booking.paymentPlan.selectedAt = new Date();
-      }
-    }
 
     await booking.save();
 
@@ -350,3 +349,43 @@ export const getMyClaimedLeads = async (req, res) => {
   }
 };
 
+export const getBdaLeadsByEmail = async (req, res) => {
+  try {
+    const { email } = req.params;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email is required'
+      });
+    }
+
+    const bookings = await CampaignBookingModel.find({
+      'claimedBy.email': email.toLowerCase().trim(),
+      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+    })
+      .sort({ 'claimedBy.claimedAt': -1 })
+      .lean();
+
+    const bdaInfo = bookings.length > 0 ? {
+      email: bookings[0].claimedBy.email,
+      name: bookings[0].claimedBy.name,
+      claimedAt: bookings[0].claimedBy.claimedAt
+    } : null;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        bda: bdaInfo,
+        leads: bookings
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching BDA leads:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch BDA leads',
+      error: error.message
+    });
+  }
+};
