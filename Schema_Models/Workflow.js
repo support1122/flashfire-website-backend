@@ -9,7 +9,7 @@ export const WorkflowSchema = new mongoose.Schema({
   },
   triggerAction: {
     type: String,
-    enum: ['no-show', 'complete', 'cancel', 're-schedule'],
+    enum: ['no-show', 'complete', 'cancel', 're-schedule', 'paid'],
     required: true,
     index: true
   },

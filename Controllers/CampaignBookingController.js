@@ -884,7 +884,7 @@ export const updateBookingStatus = async (req, res) => {
     }
 
     // Trigger workflows for specific status changes
-    const workflowTriggerStatuses = ['completed', 'canceled', 'rescheduled', 'no-show'];
+    const workflowTriggerStatuses = ['completed', 'canceled', 'rescheduled', 'no-show', 'paid'];
     if (workflowTriggerStatuses.includes(status)) {
       try {
         Logger.info('Triggering workflows for status change', {
@@ -1693,6 +1693,13 @@ export const updateBookingAmount = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Can only update amount for paid bookings'
+      });
+    }
+
+    if (booking.claimedBy && booking.claimedBy.email) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cannot change amount or plan for claimed leads'
       });
     }
 

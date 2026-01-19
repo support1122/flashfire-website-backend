@@ -60,6 +60,7 @@ import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } f
 // Payment Controllers
 import { createPayment, getAllPayments, getPaymentById, getPaymentsByEmail } from "./Controllers/PaymentController.js";
 import { getMessageTypes, sendMessage, testConnection, sendSimpleMessage } from "./Controllers/WhatsAppController.js";
+import { testWhatsAppTemplate, testNoShowTemplate } from "./Controllers/WhatsAppTestController.js";
 // WhatsApp Campaign Controllers
 import { 
   getWatiTemplates, 
@@ -79,7 +80,8 @@ import {
   processScheduledWorkflows,
   getBookingsByStatusForBulk,
   triggerWorkflowsForAllByStatus,
-  checkWorkflowsNeedPlanDetails
+  checkWorkflowsNeedPlanDetails,
+  resendAllFailedWhatsApp
 } from "./Controllers/WorkflowController.js";
 // Workflow Log Controllers
 import {
@@ -104,7 +106,8 @@ import {
   claimLead,
   updateLeadDetails,
   getBdaAnalysis,
-  getMyClaimedLeads
+  getMyClaimedLeads,
+  getBdaLeadsByEmail
 } from './Controllers/BdaLeadController.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
@@ -214,6 +217,7 @@ export default function Routes(app) {
   app.put('/api/bda/update-lead/:bookingId', requireCrmUser, updateLeadDetails);
   app.get('/api/bda/my-leads', requireCrmUser, getMyClaimedLeads);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
+  app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
   
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);
@@ -317,6 +321,8 @@ export default function Routes(app) {
   app.post('/api/whatsapp/send-message', sendMessage); // Send WhatsApp message
   app.get('/api/whatsapp/test', testConnection); // Test WhatsApp connection
   app.post('/api/whatsapp/send-simple', sendSimpleMessage); // Send simple WhatsApp message (mobile + message only)
+  app.post('/api/whatsapp/test-template', testWhatsAppTemplate); // Test WhatsApp template with custom parameters
+  app.post('/api/whatsapp/test-noshow', testNoShowTemplate); // Test no-show WhatsApp template with default values
 
   // ==================== WORKFLOW ROUTES ====================
   app.post('/api/workflows', createWorkflow); // Create new workflow
@@ -325,6 +331,7 @@ export default function Routes(app) {
   app.post('/api/workflows/process-scheduled', processScheduledWorkflows); // Process scheduled workflows (cron job)
   app.get('/api/workflows/bulk/bookings-by-status', getBookingsByStatusForBulk); // Get bookings by status for bulk actions
   app.post('/api/workflows/bulk/trigger-by-status', triggerWorkflowsForAllByStatus); // Trigger workflows for all bookings with status
+  app.post('/api/workflows/bulk/resend-failed-whatsapp', resendAllFailedWhatsApp); // Resend all failed WhatsApp workflow logs
   app.get('/api/workflows/check-plan-details', checkWorkflowsNeedPlanDetails); // Check if workflows need plan details for an action
   // Parameterized routes come last
   app.get('/api/workflows/:workflowId', getWorkflowById); // Get workflow by ID
