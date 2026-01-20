@@ -25,7 +25,7 @@ export const createCampaign = async (req, res) => {
 
     // Build the URL with UTM parameters
     // Use environment variable for base URL (for local testing vs production)
-    const baseUrl = process.env.CAMPAIGN_BASE_URL || process.env.BASE_URL || 'https://www.flashfirejobs.com';
+    const baseUrl  = 'https://www.flashfirejobs.com';
     const urlParams = new URLSearchParams();
     urlParams.append('utm_source', utmSource);
     if (utmMedium) urlParams.append('utm_medium', utmMedium);
