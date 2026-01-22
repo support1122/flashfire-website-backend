@@ -55,6 +55,7 @@ import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 import TestCallStatus from "./test/TestCallStatus.js";
 // Webhook Controllers
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
+import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
 // Payment Controllers
@@ -301,6 +302,8 @@ export default function Routes(app) {
   // Calendly Webhooks
   app.post('/api/webhooks/calendly', handleCalendlyWebhook); // Handle Calendly webhook events
   app.get('/api/webhooks/test', testWebhook); // Test webhook functionality
+  // PayPal Webhooks
+  app.post('/api/webhooks/paypal', handlePayPalWebhook); // Handle PayPal webhook events (PAYMENT.CAPTURE.COMPLETED, etc.)
 
   // ==================== TEST ROUTES ====================
   app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number
