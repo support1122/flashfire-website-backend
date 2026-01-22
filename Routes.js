@@ -53,6 +53,7 @@ import {
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 import TestCallStatus from "./test/TestCallStatus.js";
+import TestPayPalEmail from "./test/TestPayPalEmail.js";
 // Webhook Controllers
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
@@ -307,6 +308,7 @@ export default function Routes(app) {
 
   // ==================== TEST ROUTES ====================
   app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number
+  app.get('/test/paypal', TestPayPalEmail); // Test PayPal payment confirmation email
 
   // ==================== PAYMENT REMINDER ROUTES ====================
   app.post('/api/payment-reminders', schedulePaymentReminder); // Schedule payment reminder
