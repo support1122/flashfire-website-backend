@@ -1,5 +1,6 @@
 import { PaymentModel } from "../Schema_Models/Payment.js";
 import { DiscordConnect } from "../Utils/DiscordConnect.js";
+import { sendPaymentConfirmationEmail } from "../Utils/PaymentEmailHelper.js";
 
 /**
  * Create a new payment record
@@ -73,16 +74,45 @@ export const createPayment = async (req, res) => {
       planName: payment.planName
     });
 
-    // ✅ Send to Discord
+    // ✅ Send payment confirmation email to client
+    let emailResult = { success: false, error: null };
+    try {
+      emailResult = await sendPaymentConfirmationEmail({
+        customerEmail: payment.customerEmail,
+        customerFirstName: payment.customerFirstName,
+        customerLastName: payment.customerLastName,
+        amount: payment.amount,
+        currency: payment.currency,
+        planName: payment.planName,
+        planSubtitle: payment.planSubtitle,
+        paypalOrderId: payment.paypalOrderId,
+        paymentDate: payment.paymentDate || new Date()
+      });
+
+      if (emailResult.success) {
+        console.log('✅ Payment confirmation email sent to client:', payment.customerEmail);
+      } else {
+        console.error('❌ Failed to send payment confirmation email:', emailResult.error);
+      }
+    } catch (emailError) {
+      console.error('❌ Error sending payment confirmation email:', emailError);
+      emailResult.error = emailError.message || 'Unknown error';
+      // Don't fail the payment creation if email fails
+    }
+
+    // ✅ Send to Discord with email status
     try {
       const discordMessage = {
-        "Message": "A New Payment Received!",
+        "Message": "💳 A New Payment Received!",
         "Client Name": `${customerFirstName} ${customerLastName}`,
         "Client Email": customerEmail,
         "Client Mobile": customerMobile,
         "Amount Paid": `${currency} ${amount.toFixed(2)}`,
         "Plan": `${planName} - ${planSubtitle}`,
+        "Transaction ID": paypalOrderId,
         "Payment Status": "Completed",
+        "Confirmation Email": emailResult.success ? "✅ Sent Successfully" : `❌ Failed: ${emailResult.error || 'Unknown error'}`,
+        "Email Message ID": emailResult.messageId || "N/A",
         "Payment Date": new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
       };
       
