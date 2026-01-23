@@ -1,6 +1,7 @@
 import sgMail from "@sendgrid/mail";
 import dotenv from "dotenv";
 dotenv.config();
+import { DiscordConnect } from "./DiscordConnect.js";
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1 || process.env.SENDGRID_API_KEY);
 
@@ -178,6 +179,41 @@ This is an automated confirmation email. Please do not reply to this message.
     };
 
     const result = await sgMail.send(msg);
+    
+    // Send Discord notification about email being sent
+    try {
+      const discordWebhookUrl = process.env.DISCORD_PAYMENT_URL || process.env.DISCORD_WEB_HOOK_URL;
+      
+      if (discordWebhookUrl) {
+        const formattedDate = new Date(paymentDate).toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'long',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          timeZoneName: 'short'
+        });
+
+        const planDisplay = planSubtitle ? `${planName} - ${planSubtitle}` : planName;
+
+        const discordMessage = `Email Sent to Client
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Name:        ${customerName}
+Email:       ${customerEmail}
+Plan:        ${planDisplay}
+Amount:      ${currency} ${formattedAmount}
+Date:        ${formattedDate}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+
+        await DiscordConnect(discordWebhookUrl, discordMessage, false);
+        console.log('✅ Discord notification sent for payment email');
+      }
+    } catch (discordError) {
+      console.error('❌ Failed to send Discord notification:', discordError);
+    }
     
     return {
       success: true,
