@@ -3,7 +3,7 @@ dotenv.config();
 
 // const webhookURL = process.env.DISCORD_WEB_HOOK_URL;
 
-export const DiscordConnect = async (url,message) => {
+export const DiscordConnect = async (url, message, usePrefix = true) => {
   try {
     // Check if URL is provided
     if (!url) {
@@ -11,13 +11,15 @@ export const DiscordConnect = async (url,message) => {
       return;
     }
 
+    const content = usePrefix ? `🚨 App Update: ${message}` : message;
+
     const response = await fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        content: `🚨 App Update: ${message}`,
+        content: content,
       }),
     });
 
