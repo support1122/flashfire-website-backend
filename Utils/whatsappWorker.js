@@ -31,11 +31,12 @@ async function checkUserHasBooking(mobileNumber) {
 /**
  * Send WhatsApp message using WATI
  */
-async function sendWhatsAppMessage(mobileNumber, templateName, parameters, campaignId) {
+async function sendWhatsAppMessage(mobileNumber, templateName, templateId, parameters, campaignId) {
     try {
         const result = await WatiService.sendTemplateMessage({
             mobileNumber,
             templateName,
+            templateId,
             parameters,
             campaignId
         });
@@ -159,8 +160,14 @@ if (!workerConnection) {
                             continue;
                         }
 
-                        // Send WhatsApp message
-                        const result = await sendWhatsAppMessage(mobile, templateName, parameters, campaignId);
+                        // Send WhatsApp message - use templateId from campaign if available
+                        const result = await sendWhatsAppMessage(
+                            mobile, 
+                            campaign.templateName, 
+                            campaign.templateId, 
+                            parameters, 
+                            campaignId
+                        );
 
                         // Update message status
                         const messageIndex = campaign.messageStatuses.findIndex(m => m.mobileNumber === mobile);

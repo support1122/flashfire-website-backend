@@ -95,16 +95,29 @@ async function handlePaymentCaptureCompleted(webhookEvent) {
       payment = await PaymentModel.findOne({ paypalOrderId: orderId });
     }
 
-    // If payment record exists, send confirmation email
+    // If payment record exists and email hasn't been sent yet, send confirmation email
+    // Note: Frontend payment creation already sends email, so webhook is mainly for backup/redundancy
     if (payment && payment.paymentStatus === 'completed') {
-      await sendPaymentConfirmationAndNotify(payment, {
-        captureId,
-        webhookEventId: webhookEvent.id
-      });
+      const paymentAge = Date.now() - new Date(payment.createdAt || payment.paymentDate).getTime();
+      const fiveMinutes = 5 * 60 * 1000;
+      
+      if (paymentAge > fiveMinutes) {
+        console.log('sending webhook Discord notification only (email likely already sent)');
+        await sendWebhookDiscordNotification(payment, {
+          captureId,
+          webhookEventId: webhookEvent.id,
+          eventType: 'PAYMENT.CAPTURE.COMPLETED'
+        });
+      } else {
+        // Payment is recent, might not have email sent yet, send both
+        console.log('ℹ️ Recent payment, sending confirmation email via webhook');
+        await sendPaymentConfirmationAndNotify(payment, {
+          captureId,
+          webhookEventId: webhookEvent.id
+        });
+      }
     } else {
       console.log('ℹ️ Payment record not found in database. Payment may be processed via frontend form.');
-      // Optionally, you could create a payment record here if needed
-      // But typically, the frontend form creates the payment record
     }
 
   } catch (error) {
@@ -153,10 +166,23 @@ async function handleOrderCompleted(webhookEvent) {
     const payment = await PaymentModel.findOne({ paypalOrderId: orderId });
 
     if (payment && payment.paymentStatus === 'completed') {
-      await sendPaymentConfirmationAndNotify(payment, {
-        captureId: capture.id,
-        webhookEventId: webhookEvent.id
-      });
+      const paymentAge = Date.now() - new Date(payment.createdAt || payment.paymentDate).getTime();
+      const fiveMinutes = 5 * 60 * 1000;
+      
+      if (paymentAge > fiveMinutes) {
+        console.log('ℹ️ Payment exists, sending webhook Discord notification only');
+        await sendWebhookDiscordNotification(payment, {
+          captureId: capture.id,
+          webhookEventId: webhookEvent.id,
+          eventType: 'CHECKOUT.ORDER.COMPLETED'
+        });
+      } else {
+        console.log('ℹ️ Recent payment, sending confirmation email via webhook');
+        await sendPaymentConfirmationAndNotify(payment, {
+          captureId: capture.id,
+          webhookEventId: webhookEvent.id
+        });
+      }
     } else {
       console.log('ℹ️ Payment record not found. Payment may be processed via frontend form.');
     }
@@ -195,6 +221,35 @@ async function handlePaymentRefunded(webhookEvent) {
   } catch (error) {
     console.error('❌ Error handling PAYMENT.CAPTURE.REFUNDED:', error);
     throw error;
+  }
+}
+
+/**
+ * Send webhook Discord notification only (no email to avoid duplicates)
+ */
+async function sendWebhookDiscordNotification(payment, metadata = {}) {
+  try {
+    const discordMessage = {
+      "Message": "PayPal Webhook Received",
+      "Event Type": metadata.eventType || "PAYMENT.CAPTURE.COMPLETED",
+      "Client Name": `${payment.customerFirstName} ${payment.customerLastName}`,
+      "Client Email": payment.customerEmail,
+      "Amount": `${payment.currency} ${payment.amount.toFixed(2)}`,
+      "Plan": `${payment.planName}${payment.planSubtitle ? ` - ${payment.planSubtitle}` : ''}`,
+      "Transaction ID": payment.paypalOrderId,
+      "Webhook Event ID": metadata.webhookEventId || "N/A",
+      "Note": "Email already sent via frontend payment creation",
+      "Timestamp": new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
+    };
+
+    await DiscordConnect(
+      process.env.DISCORD_WEB_HOOK_URL,
+      JSON.stringify(discordMessage, null, 2)
+    );
+
+    console.log('✅ Webhook Discord notification posted');
+  } catch (error) {
+    console.error('❌ Error sending webhook Discord notification:', error);
   }
 }
 
