@@ -196,8 +196,9 @@ class WatiService {
         throw new Error('Either templateId or templateName must be provided');
       }
       
+      // Use template_id when templateId is provided, otherwise use template_name
       const messageData = {
-        template_name: templateName || templateId,
+        ...(templateId ? { template_id: templateId } : { template_name: templateName }),
         broadcast_name: `Campaign_${campaignId}_${templateIdentifier}`,
         ...(digitsOnly ? { channel_number: parseInt(digitsOnly) } : {}),
         parameters: formattedParameters

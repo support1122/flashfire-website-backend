@@ -137,7 +137,8 @@ export async function executeWorkflowLog(log) {
 
       const result = await watiService.sendTemplateMessage({
         mobileNumber: booking.clientPhone,
-        templateName: log.step.templateId,
+        templateId: log.step.templateId,
+        templateName: log.step.templateName,
         parameters: [],
         campaignId: `workflow_${log.workflowId}_${Date.now()}`
       });
@@ -350,6 +351,7 @@ export async function executeWhatsAppCampaign(campaign) {
         const result = await watiService.sendTemplateMessage({
           mobileNumber: mobile,
           templateName: campaignDoc.templateName,
+          templateId: campaignDoc.templateId,
           parameters: campaignDoc.parameters || [],
           campaignId: `${campaignDoc.campaignId}_${Date.now()}`
         });
