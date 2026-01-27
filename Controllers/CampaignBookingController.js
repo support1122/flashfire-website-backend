@@ -315,6 +315,7 @@ export const getAllBookingsPaginated = async (req, res) => {
       paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1,
+        firefliesTranscriptId: 1,
         reminderCallJobId: 1,
         paymentReminders: 1,
         rescheduledCount: 1,
@@ -378,6 +379,7 @@ export const getMeetingsBookedToday = async (req, res) => {
       paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1,
+        firefliesTranscriptId: 1,
         reminderCallJobId: 1,
         paymentReminders: 1,
         rescheduledCount: 1,
@@ -454,6 +456,7 @@ export const getMeetingsByDate = async (req, res) => {
       paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1,
+        firefliesTranscriptId: 1,
         reminderCallJobId: 1,
         paymentReminders: 1,
         rescheduledCount: 1,
@@ -521,7 +524,8 @@ export const getAllBookings = async (req, res) => {
         bookingStatus: 1,
         paymentPlan: 1,
         meetingNotes: 1,
-        anythingToKnow: 1
+        anythingToKnow: 1,
+        firefliesTranscriptId: 1
       })
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .limit(5000)
@@ -1696,13 +1700,6 @@ export const updateBookingAmount = async (req, res) => {
       });
     }
 
-    if (booking.claimedBy && booking.claimedBy.email) {
-      return res.status(403).json({
-        success: false,
-        message: 'Cannot change amount or plan for claimed leads'
-      });
-    }
-
     const normalizedPlanName = planName ? String(planName).toUpperCase() : booking.paymentPlan?.name;
     if (!normalizedPlanName || !PLAN_CATALOG[normalizedPlanName]) {
       return res.status(400).json({
@@ -1877,6 +1874,123 @@ export const handlePaidClientFromMicroservice = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to process paid client webhook',
+      error: error.message
+    });
+  }
+};
+
+export const getMeetingNotes = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const { transcriptId } = req.body;
+
+    if (!bookingId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Booking ID is required'
+      });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Booking not found'
+      });
+    }
+
+    const transcriptIdToUse = transcriptId || booking.firefliesTranscriptId;
+
+    if (!transcriptIdToUse) {
+      return res.status(404).json({
+        success: false,
+        message: 'No transcript ID found. Please provide a transcript ID.',
+        hasTranscriptId: false
+      });
+    }
+
+    const FIREFLIES_API_KEY = process.env.FIREFLIES_API_KEY;
+    if (!FIREFLIES_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        message: 'Fireflies API key not configured'
+      });
+    }
+
+    const query = `
+      query Transcript($transcriptId: String!) {
+        transcript(id: $transcriptId) {
+          id
+          title
+          date
+          duration
+          organizer_email
+          participants
+          transcript_url
+          audio_url
+          video_url
+          sentences {
+            speaker_name
+            text
+            start_time
+            end_time
+          }
+          summary {
+            overview
+            action_items
+            keywords
+          }
+        }
+      }
+    `;
+
+    const variables = { transcriptId: transcriptIdToUse };
+
+    const axios = (await import('axios')).default;
+    const response = await axios.post(
+      'https://api.fireflies.ai/graphql',
+      {
+        query,
+        variables
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${FIREFLIES_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    if (response.data.errors) {
+      return res.status(400).json({
+        success: false,
+        message: 'Failed to fetch transcript from Fireflies',
+        error: response.data.errors[0]?.message || 'Unknown error'
+      });
+    }
+
+    const transcriptData = response.data.data.transcript;
+    if (!transcriptData) {
+      return res.status(404).json({
+        success: false,
+        message: 'Transcript not found'
+      });
+    }
+
+    if (transcriptId && !booking.firefliesTranscriptId) {
+      booking.firefliesTranscriptId = transcriptId;
+      await booking.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: transcriptData
+    });
+  } catch (error) {
+    console.error('Error fetching meeting notes:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch meeting notes',
       error: error.message
     });
   }

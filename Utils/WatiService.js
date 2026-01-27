@@ -36,6 +36,12 @@ class WatiService {
       'Content-Type': 'application/json'
     };
 
+    // In-memory cache for template mappings (id <-> name)
+    this.templateIdToName = new Map();
+    this.templateNameToId = new Map();
+    this.templatesCacheLoaded = false;
+    this.templatesCacheLastLoadedAt = null;
+
     console.log('✅ WATI Service initialized:', {
       baseUrl: this.apiBaseUrl,
       hasToken: !!token,
@@ -105,6 +111,93 @@ class WatiService {
     }
     const template = res.templates.find(t => t.name === templateName);
     return template ? template.id : null;
+  }
+
+  /**
+   * Refresh in-memory template cache (id <-> name)
+   */
+  async refreshTemplatesCache() {
+    const res = await this.getTemplates();
+    if (!res.success || !Array.isArray(res.templates)) {
+      console.error('❌ Failed to refresh WATI templates cache:', res.error);
+      return;
+    }
+
+    this.templateIdToName.clear();
+    this.templateNameToId.clear();
+
+    for (const t of res.templates) {
+      if (!t || !t.id || !t.name) continue;
+      const name = String(t.name).trim();
+      const id = String(t.id).trim();
+      if (!name || !id) continue;
+
+      this.templateIdToName.set(id, name);
+      this.templateNameToId.set(name, id);
+    }
+
+    this.templatesCacheLoaded = true;
+    this.templatesCacheLastLoadedAt = new Date();
+
+    console.log('✅ WATI templates cache loaded:', {
+      count: this.templateIdToName.size,
+      loadedAt: this.templatesCacheLastLoadedAt.toISOString()
+    });
+  }
+
+  /**
+   * Ensure template cache is loaded (lazy-load on first use)
+   */
+  async ensureTemplatesCache() {
+    if (this.templatesCacheLoaded && this.templateIdToName.size > 0) {
+      return;
+    }
+    await this.refreshTemplatesCache();
+  }
+
+  /**
+   * Resolve a usable template name, preferring templateName but falling back
+   * to mapping templateId -> name via cached templates.
+   *
+   * @param {string|null} templateName
+   * @param {string|null} templateId
+   * @returns {Promise<string|null>}
+   */
+  async resolveTemplateName(templateName, templateId) {
+    // If caller already passed a name, prefer that
+    if (templateName && String(templateName).trim() !== '') {
+      return String(templateName).trim();
+    }
+
+    // If only ID is available, try to map it to a name
+    if (templateId && String(templateId).trim() !== '') {
+      const id = String(templateId).trim();
+
+      // Try cache first
+      if (!this.templatesCacheLoaded || !this.templateIdToName.size) {
+        await this.ensureTemplatesCache();
+      }
+
+      let nameFromCache = this.templateIdToName.get(id);
+      if (!nameFromCache) {
+        // Cache miss – force a refresh once
+        await this.refreshTemplatesCache();
+        nameFromCache = this.templateIdToName.get(id);
+      }
+
+      if (nameFromCache) {
+        return nameFromCache;
+      }
+
+      // As a last resort, fall back to treating ID as name (old behaviour),
+      // but log clearly so we can see this in logs.
+      console.warn('⚠️ WATI template ID not found in cache, falling back to ID as name', {
+        templateId: id
+      });
+      return id;
+    }
+
+    return null;
   }
 
   /**
@@ -190,15 +283,20 @@ class WatiService {
         value
       }));
 
-      const templateIdentifier = templateId || templateName;
-      
-      if (!templateId && !templateName) {
-        throw new Error('Either templateId or templateName must be provided');
+      // Always send by template NAME to WATI.
+      // If we only have an ID from older workflows, map it to a name via cached templates.
+      const finalTemplateName = await this.resolveTemplateName(templateName, templateId);
+
+      if (!finalTemplateName) {
+        throw new Error('Either templateName or templateId (mappable to a name) must be provided');
       }
-      
-      // Use template_id when templateId is provided, otherwise use template_name
+
+      const templateIdentifier = finalTemplateName;
+
+      // Use template_name (and TemplateName for backward compatibility with WATI variants)
       const messageData = {
-        ...(templateId ? { template_id: templateId } : { template_name: templateName }),
+        template_name: finalTemplateName,
+        TemplateName: finalTemplateName,
         broadcast_name: `Campaign_${campaignId}_${templateIdentifier}`,
         ...(digitsOnly ? { channel_number: parseInt(digitsOnly) } : {}),
         parameters: formattedParameters

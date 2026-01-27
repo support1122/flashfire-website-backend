@@ -2,6 +2,10 @@ import { PaymentModel } from "../Schema_Models/Payment.js";
 import { DiscordConnect } from "../Utils/DiscordConnect.js";
 import { sendPaymentConfirmationEmail } from "../Utils/PaymentEmailHelper.js";
 
+// Hardcoded Discord webhook for PayPal events (requested explicitly)
+const PAYPAL_DISCORD_WEBHOOK =
+  "https://discord.com/api/webhooks/1465669920179228735/fdeuTWT2kIaENKSeOtecn0DmPe-fOQgSXPLnvb2GOH305ZSIO17rvT8lTgq109Hyq-Cb";
+
 /**
  * Handle PayPal webhook events
  * PayPal sends webhook notifications for various events like PAYMENT.CAPTURE.COMPLETED
@@ -20,6 +24,30 @@ export const handlePayPalWebhook = async (req, res) => {
       createTime: webhookEvent.create_time,
       resourceType: webhookEvent.resource_type
     });
+
+    // Always send a simple Discord notification for ANY PayPal webhook event
+    try {
+      const basicMessageLines = [
+        'PayPal webhook event received',
+        '────────────────────────────────',
+        `Type:   ${webhookEvent.event_type || 'N/A'}`,
+        `ID:     ${webhookEvent.id || 'N/A'}`,
+        `Time:   ${webhookEvent.create_time || 'N/A'}`,
+      ];
+
+      const basicMessage = basicMessageLines.join('\n');
+
+      await DiscordConnect(
+        PAYPAL_DISCORD_WEBHOOK,
+        basicMessage,
+        false // no emoji / prefix, just clean text
+      );
+
+      console.log('✅ Basic PayPal webhook notification sent to Discord');
+    } catch (discordError) {
+      console.error('❌ Failed to send basic PayPal webhook Discord notification:', discordError);
+      // Do not throw – webhook handling should continue
+    }
 
     // Handle different event types
     switch (webhookEvent.event_type) {
@@ -243,7 +271,7 @@ async function sendWebhookDiscordNotification(payment, metadata = {}) {
     };
 
     await DiscordConnect(
-      process.env.DISCORD_WEB_HOOK_URL,
+      PAYPAL_DISCORD_WEBHOOK,
       JSON.stringify(discordMessage, null, 2)
     );
 
@@ -286,7 +314,7 @@ async function sendPaymentConfirmationAndNotify(payment, metadata = {}) {
     };
 
     await DiscordConnect(
-      process.env.DISCORD_WEB_HOOK_URL,
+      PAYPAL_DISCORD_WEBHOOK,
       JSON.stringify(discordMessage, null, 2)
     );
 

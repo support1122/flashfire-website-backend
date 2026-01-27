@@ -232,6 +232,11 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  firefliesTranscriptId: {
+    type: String,
+    default: null,
+    index: true
+  },
   scheduledWorkflows: [{
     workflowId: {
       type: String,

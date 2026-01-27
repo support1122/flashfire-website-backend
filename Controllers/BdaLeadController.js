@@ -169,18 +169,18 @@ export const updateLeadDetails = async (req, res) => {
       });
     }
 
-    if (booking.claimedBy && booking.claimedBy.email) {
-      if (paymentPlan) {
-        return res.status(403).json({
-          success: false,
-          message: 'Cannot change payment plan or amount for claimed leads'
-        });
-      }
-    }
-
     if (clientName) booking.clientName = clientName;
     if (clientPhone !== undefined) booking.clientPhone = clientPhone;
     if (scheduledEventStartTime) booking.scheduledEventStartTime = new Date(scheduledEventStartTime);
+    if (paymentPlan) {
+      booking.paymentPlan = {
+        name: paymentPlan.name,
+        price: paymentPlan.price,
+        currency: paymentPlan.currency || 'USD',
+        displayPrice: paymentPlan.displayPrice || `$${paymentPlan.price}`,
+        selectedAt: new Date()
+      };
+    }
     if (meetingNotes !== undefined) booking.meetingNotes = meetingNotes;
     if (anythingToKnow !== undefined) booking.anythingToKnow = anythingToKnow;
 
@@ -203,22 +203,56 @@ export const updateLeadDetails = async (req, res) => {
 
 export const getBdaAnalysis = async (req, res) => {
   try {
-    const totalLeads = await CampaignBookingModel.countDocuments({
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
-    });
+    const { fromDate, toDate, status, planName, bdaEmail } = req.query;
 
-    const claimedLeads = await CampaignBookingModel.countDocuments({
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] },
+    const matchBase = {};
+
+    const validStatuses = ['paid', 'scheduled', 'completed'];
+    if (status && status !== 'all') {
+      matchBase.bookingStatus = status;
+    } else {
+      matchBase.bookingStatus = { $in: validStatuses };
+    }
+
+    const normalizedPlanName = planName ? String(planName).toUpperCase() : null;
+    if (normalizedPlanName && normalizedPlanName !== 'ALL') {
+      matchBase['paymentPlan.name'] = normalizedPlanName;
+    }
+
+    if (fromDate || toDate) {
+      matchBase.scheduledEventStartTime = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        matchBase.scheduledEventStartTime.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        matchBase.scheduledEventStartTime.$lte = to;
+      }
+    }
+
+    const totalLeads = await CampaignBookingModel.countDocuments(matchBase);
+
+    const claimedMatch = {
+      ...matchBase,
       'claimedBy.email': { $exists: true, $ne: null }
-    });
+    };
+
+    const claimedLeads = await CampaignBookingModel.countDocuments(claimedMatch);
 
     const unclaimedLeads = totalLeads - claimedLeads;
+
+    const performanceMatch = { ...claimedMatch };
+    if (bdaEmail) {
+      performanceMatch['claimedBy.email'] = bdaEmail.toLowerCase().trim();
+    }
 
     const bdaPerformance = await CampaignBookingModel.aggregate([
       {
         $match: {
-          bookingStatus: { $in: ['paid', 'scheduled', 'completed'] },
-          'claimedBy.email': { $exists: true, $ne: null }
+          ...performanceMatch
         }
       },
       {
@@ -254,7 +288,7 @@ export const getBdaAnalysis = async (req, res) => {
     const statusBreakdown = await CampaignBookingModel.aggregate([
       {
         $match: {
-          bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+          ...matchBase
         }
       },
       {
@@ -385,6 +419,217 @@ export const getBdaLeadsByEmail = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch BDA leads',
+      error: error.message
+    });
+  }
+};
+
+export const getMyBdaPerformance = async (req, res) => {
+  try {
+    const email = req.crmUser?.email;
+
+    if (!email) {
+      return res.status(401).json({
+        success: false,
+        message: 'User authentication required'
+      });
+    }
+
+    const {
+      fromDate,
+      toDate,
+      status,
+      plan,
+      page = 1,
+      limit = 50
+    } = req.query;
+
+    const matchConditions = {
+      'claimedBy.email': email.toLowerCase().trim(),
+      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+    };
+
+    if (fromDate || toDate) {
+      matchConditions['claimedBy.claimedAt'] = {};
+      if (fromDate) {
+        matchConditions['claimedBy.claimedAt'].$gte = new Date(fromDate);
+      }
+      if (toDate) {
+        const toDateEnd = new Date(toDate);
+        toDateEnd.setHours(23, 59, 59, 999);
+        matchConditions['claimedBy.claimedAt'].$lte = toDateEnd;
+      }
+    }
+
+    if (status && status !== 'all') {
+      matchConditions.bookingStatus = status;
+    }
+
+    if (plan && plan !== 'all') {
+      matchConditions['paymentPlan.name'] = plan;
+    }
+
+    const pageNum = parseInt(page);
+    const limitNum = parseInt(limit);
+    const skip = (pageNum - 1) * limitNum;
+
+    const [bookings, total] = await Promise.all([
+      CampaignBookingModel.find(matchConditions)
+        .sort({ 'claimedBy.claimedAt': -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      CampaignBookingModel.countDocuments(matchConditions)
+    ]);
+
+    const overview = await CampaignBookingModel.aggregate([
+      {
+        $match: {
+          'claimedBy.email': email.toLowerCase().trim(),
+          bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalClaimed: { $sum: 1 },
+          paid: {
+            $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] }
+          },
+          scheduled: {
+            $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] }
+          },
+          completed: {
+            $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] }
+          },
+          totalRevenue: {
+            $sum: {
+              $cond: [
+                { $eq: ['$bookingStatus', 'paid'] },
+                { $ifNull: ['$paymentPlan.price', 0] },
+                0
+              ]
+            }
+          }
+        }
+      }
+    ]);
+
+    const statusBreakdown = await CampaignBookingModel.aggregate([
+      {
+        $match: {
+          'claimedBy.email': email.toLowerCase().trim(),
+          bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+        }
+      },
+      {
+        $group: {
+          _id: '$bookingStatus',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const planBreakdown = await CampaignBookingModel.aggregate([
+      {
+        $match: {
+          'claimedBy.email': email.toLowerCase().trim(),
+          bookingStatus: { $in: ['paid', 'scheduled', 'completed'] },
+          'paymentPlan.name': { $exists: true }
+        }
+      },
+      {
+        $group: {
+          _id: '$paymentPlan.name',
+          count: { $sum: 1 },
+          revenue: {
+            $sum: {
+              $cond: [
+                { $eq: ['$bookingStatus', 'paid'] },
+                { $ifNull: ['$paymentPlan.price', 0] },
+                0
+              ]
+            }
+          }
+        }
+      },
+      {
+        $sort: { count: -1 }
+      }
+    ]);
+
+    const monthlyTrend = await CampaignBookingModel.aggregate([
+      {
+        $match: {
+          'claimedBy.email': email.toLowerCase().trim(),
+          bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$claimedBy.claimedAt' },
+            month: { $month: '$claimedBy.claimedAt' }
+          },
+          count: { $sum: 1 },
+          revenue: {
+            $sum: {
+              $cond: [
+                { $eq: ['$bookingStatus', 'paid'] },
+                { $ifNull: ['$paymentPlan.price', 0] },
+                0
+              ]
+            }
+          }
+        }
+      },
+      {
+        $sort: { '_id.year': -1, '_id.month': -1 }
+      },
+      {
+        $limit: 12
+      }
+    ]);
+
+    const statusMap = {
+      paid: 0,
+      scheduled: 0,
+      completed: 0
+    };
+
+    statusBreakdown.forEach(item => {
+      statusMap[item._id] = item.count;
+    });
+
+    const overviewData = overview[0] || {
+      totalClaimed: 0,
+      paid: 0,
+      scheduled: 0,
+      completed: 0,
+      totalRevenue: 0
+    };
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        overview: overviewData,
+        statusBreakdown: statusMap,
+        planBreakdown,
+        monthlyTrend,
+        leads: bookings,
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total,
+          pages: Math.ceil(total / limitNum)
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching BDA performance:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch BDA performance',
       error: error.message
     });
   }
