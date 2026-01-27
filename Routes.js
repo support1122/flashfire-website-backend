@@ -49,7 +49,8 @@ import {
   getLeadsPaginated,
   updateBookingAmount,
   bulkCreateLeads,
-  handlePaidClientFromMicroservice
+  handlePaidClientFromMicroservice,
+  getMeetingNotes
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 import TestCallStatus from "./test/TestCallStatus.js";
@@ -57,6 +58,7 @@ import TestPayPalEmail from "./test/TestPayPalEmail.js";
 // Webhook Controllers
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
+import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
 // Payment Controllers
@@ -109,8 +111,10 @@ import {
   updateLeadDetails,
   getBdaAnalysis,
   getMyClaimedLeads,
-  getBdaLeadsByEmail
+  getBdaLeadsByEmail,
+  getMyBdaPerformance
 } from './Controllers/BdaLeadController.js';
+import { getIncentiveConfig, saveIncentiveConfig } from './Controllers/BdaIncentiveController.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -118,6 +122,8 @@ import {
 
 //these routes are defined and codes are written only requires minor modification to suit on a case by case basis..
 
+
+import express from 'express';
 
 export default function Routes(app) {
   try {
@@ -218,8 +224,12 @@ export default function Routes(app) {
   app.post('/api/bda/claim-lead/:bookingId', requireCrmUser, claimLead);
   app.put('/api/bda/update-lead/:bookingId', requireCrmUser, updateLeadDetails);
   app.get('/api/bda/my-leads', requireCrmUser, getMyClaimedLeads);
+  app.get('/api/bda/performance', requireCrmUser, getMyBdaPerformance);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
+  app.get('/api/crm/admin/bda-incentives/config', requireCrmAdmin, getIncentiveConfig);
+  app.put('/api/crm/admin/bda-incentives/config', requireCrmAdmin, saveIncentiveConfig);
+  app.get('/api/bda/incentives/config', requireCrmUser, getIncentiveConfig);
   
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);
@@ -289,6 +299,7 @@ export default function Routes(app) {
   app.put('/api/campaign-bookings/:bookingId/status', updateBookingStatus); // Update booking status
   app.post('/api/campaign-bookings/:bookingId/reschedule', rescheduleBooking); // Reschedule booking and refresh queue
   app.put('/api/campaign-bookings/:bookingId/notes', updateBookingNotes); // Update booking notes
+  app.post('/api/campaign-bookings/:bookingId/meeting-notes', getMeetingNotes); // Get meeting notes from Fireflies
   app.put('/api/campaign-bookings/:bookingId/amount', updateBookingAmount); // Update booking amount (leads only)
   app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
@@ -305,6 +316,16 @@ export default function Routes(app) {
   app.get('/api/webhooks/test', testWebhook); // Test webhook functionality
   // PayPal Webhooks
   app.post('/api/webhooks/paypal', handlePayPalWebhook); // Handle PayPal webhook events (PAYMENT.CAPTURE.COMPLETED, etc.)
+  // Fireflies Webhooks
+  app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
+    try {
+      req.rawBody = req.body.toString('utf8');
+      req.body = JSON.parse(req.rawBody);
+      next();
+    } catch (err) {
+      return res.status(400).json({ success: false, message: 'Invalid JSON' });
+    }
+  }, handleFirefliesWebhook); // Handle Fireflies webhook events (Transcription completed)
 
   // ==================== TEST ROUTES ====================
   app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number

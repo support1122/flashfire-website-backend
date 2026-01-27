@@ -74,31 +74,38 @@ export const createPayment = async (req, res) => {
       planName: payment.planName
     });
 
-    // ✅ Send payment confirmation email to client
-    let emailResult = { success: false, error: null };
-    try {
-      emailResult = await sendPaymentConfirmationEmail({
-        customerEmail: payment.customerEmail,
-        customerFirstName: payment.customerFirstName,
-        customerLastName: payment.customerLastName,
-        amount: payment.amount,
-        currency: payment.currency,
-        planName: payment.planName,
-        planSubtitle: payment.planSubtitle,
-        paypalOrderId: payment.paypalOrderId,
-        paymentDate: payment.paymentDate || new Date()
-      });
+    // ✅ Schedule payment confirmation email to be sent after 1 minute
+    // PayPal sends its default email immediately, we send our custom email after 1 minute
+    console.log('⏰ Scheduling payment confirmation email to be sent in 1 minute...');
+    
+    setTimeout(async () => {
+      try {
+        console.log('📧 Sending delayed payment confirmation email to:', payment.customerEmail);
+        
+        const emailResult = await sendPaymentConfirmationEmail({
+          customerEmail: payment.customerEmail,
+          customerFirstName: payment.customerFirstName,
+          customerLastName: payment.customerLastName,
+          amount: payment.amount,
+          currency: payment.currency,
+          planName: payment.planName,
+          planSubtitle: payment.planSubtitle,
+          paypalOrderId: payment.paypalOrderId,
+          paymentDate: payment.paymentDate || new Date()
+        });
 
-      if (emailResult.success) {
-        console.log('✅ Payment confirmation email sent to client:', payment.customerEmail);
-      } else {
-        console.error('❌ Failed to send payment confirmation email:', emailResult.error);
+        if (emailResult.success) {
+          console.log('✅ Delayed payment confirmation email sent successfully to:', payment.customerEmail);
+        } else {
+          console.error('❌ Failed to send delayed payment confirmation email:', emailResult.error);
+        }
+      } catch (emailError) {
+        console.error('❌ Error sending delayed payment confirmation email:', emailError);
+        // Don't fail the payment creation if email fails
       }
-    } catch (emailError) {
-      console.error('❌ Error sending payment confirmation email:', emailError);
-      emailResult.error = emailError.message || 'Unknown error';
-      // Don't fail the payment creation if email fails
-    }
+    }, 60 * 1000); // 1 minute delay (60 seconds * 1000 milliseconds)
+
+    console.log('✅ Payment confirmation email scheduled for 1 minute delay');
 
     // ✅ Send to Discord with email status
     try {
@@ -111,8 +118,7 @@ export const createPayment = async (req, res) => {
         "Plan": `${planName} - ${planSubtitle}`,
         "Transaction ID": paypalOrderId,
         "Payment Status": "Completed",
-        "Confirmation Email": emailResult.success ? "✅ Sent Successfully" : `❌ Failed: ${emailResult.error || 'Unknown error'}`,
-        "Email Message ID": emailResult.messageId || "N/A",
+        "Confirmation Email": "✅ Scheduled (will send in 1 minute after PayPal email)",
         "Payment Date": new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })
       };
       
