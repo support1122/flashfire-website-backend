@@ -1208,6 +1208,24 @@ export const getBookingsByStatusForBulk = async (req, res) => {
 
 export const resendAllFailedWhatsApp = async (req, res) => {
   try {
+    const { status } = req.body || {};
+
+    const statusMap = {
+      'no-show': 'no-show',
+      'completed': 'completed',
+      'canceled': 'canceled',
+      'rescheduled': 'rescheduled'
+    };
+
+    if (!status || !statusMap[status]) {
+      return res.status(400).json({
+        success: false,
+        message: 'Valid status is required (no-show, completed, canceled, rescheduled)'
+      });
+    }
+
+    const targetBookingStatus = statusMap[status];
+
     const failedLogs = await WorkflowLogModel.find({
       status: 'failed',
       'step.channel': 'whatsapp'
@@ -1237,6 +1255,9 @@ export const resendAllFailedWhatsApp = async (req, res) => {
 
     const bookingCache = new Map();
     const workflowCache = new Map();
+    // Dedupe key to avoid sending multiple WhatsApps to the same client
+    // for the same workflow step (bookingId + templateId + daysAfter)
+    const dedupeKeys = new Set();
 
     for (const log of failedLogs) {
       try {
@@ -1252,6 +1273,14 @@ export const resendAllFailedWhatsApp = async (req, res) => {
             continue;
           }
           bookingCache.set(log.bookingId, booking);
+        }
+
+        // Skip and delete logs where the booking's current status no longer matches
+        // the status selected in the CRM ("Send to All Failed WhatsApp").
+        if (booking.bookingStatus !== targetBookingStatus) {
+          await WorkflowLogModel.deleteOne({ logId: log.logId });
+          results.deleted++;
+          continue;
         }
 
         if (!booking.clientPhone) {
@@ -1273,6 +1302,15 @@ export const resendAllFailedWhatsApp = async (req, res) => {
         }).lean();
 
         if (existingSuccess) {
+          await WorkflowLogModel.deleteOne({ logId: log.logId });
+          results.deleted++;
+          continue;
+        }
+
+        // Dedupe: if we've already re-scheduled this exact client/template/day,
+        // don't schedule another message – just delete the extra failed log.
+        const dedupeKey = `${log.bookingId || booking.bookingId}_${log.step.templateId || ''}_${log.step.daysAfter || 0}`;
+        if (dedupeKeys.has(dedupeKey)) {
           await WorkflowLogModel.deleteOne({ logId: log.logId });
           results.deleted++;
           continue;
@@ -1316,41 +1354,32 @@ export const resendAllFailedWhatsApp = async (req, res) => {
         try {
           const originalScheduledFor = log.scheduledFor ? new Date(log.scheduledFor) : null;
           const now = new Date();
-          
-          if (originalScheduledFor && originalScheduledFor > now) {
-            await scheduleWorkflowStep(
-              log.bookingId,
-              stepWithConfig,
-              log.workflowId,
-              originalScheduledFor,
-              booking,
-              log.workflowName || workflow.name,
-              log.triggerAction
-            );
-            await WorkflowLogModel.deleteOne({ logId: log.logId });
-            results.resent++;
-            results.deleted++;
-          } else {
-            const result = await executeWorkflowStep(
-              stepWithConfig,
-              booking,
-              log.workflowId,
-              log.workflowName || workflow.name,
-              log.triggerAction
-            );
 
-            if (result && result.success) {
-              await WorkflowLogModel.deleteOne({ logId: log.logId });
-              results.resent++;
-              results.deleted++;
-            } else {
-              results.errors.push({
-                logId: log.logId,
-                bookingId: log.bookingId,
-                error: 'Failed to resend - unknown error'
-              });
-            }
-          }
+          // Always (re)schedule via the workflow scheduler rather than sending immediately.
+          // If the original scheduled time is still in the future, keep it.
+          // Otherwise, schedule a new send a few minutes from now.
+          const scheduledFor =
+            originalScheduledFor && originalScheduledFor > now
+              ? originalScheduledFor
+              : new Date(now.getTime() + 5 * 60 * 1000); // 5 minutes from now
+
+          await scheduleWorkflowStep(
+            log.bookingId,
+            stepWithConfig,
+            log.workflowId,
+            scheduledFor,
+            booking,
+            log.workflowName || workflow.name,
+            log.triggerAction
+          );
+
+          // Mark this combination as processed to avoid duplicate sends
+          const dedupeKey = `${log.bookingId || booking.bookingId}_${log.step.templateId || ''}_${log.step.daysAfter || 0}`;
+          dedupeKeys.add(dedupeKey);
+
+          await WorkflowLogModel.deleteOne({ logId: log.logId });
+          results.resent++;
+          results.deleted++;
         } catch (stepError) {
           console.error(`Error executing workflow step for log ${log.logId}:`, stepError);
           results.errors.push({

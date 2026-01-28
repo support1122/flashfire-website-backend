@@ -36,11 +36,11 @@ class WatiService {
       'Content-Type': 'application/json'
     };
 
-    // In-memory cache for template mappings (id <-> name)
     this.templateIdToName = new Map();
     this.templateNameToId = new Map();
     this.templatesCacheLoaded = false;
     this.templatesCacheLastLoadedAt = null;
+    this.CACHE_TTL_MS = 60 * 60 * 1000;
 
     console.log('✅ WATI Service initialized:', {
       baseUrl: this.apiBaseUrl,
@@ -145,14 +145,15 @@ class WatiService {
     });
   }
 
-  /**
-   * Ensure template cache is loaded (lazy-load on first use)
-   */
   async ensureTemplatesCache() {
-    if (this.templatesCacheLoaded && this.templateIdToName.size > 0) {
-      return;
+    const now = Date.now();
+    const needsRefresh = !this.templatesCacheLoaded || 
+      !this.templatesCacheLastLoadedAt ||
+      (now - this.templatesCacheLastLoadedAt.getTime() > this.CACHE_TTL_MS);
+    
+    if (needsRefresh) {
+      await this.refreshTemplatesCache();
     }
-    await this.refreshTemplatesCache();
   }
 
   /**

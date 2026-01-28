@@ -316,16 +316,16 @@ export default function Routes(app) {
   app.get('/api/webhooks/test', testWebhook); // Test webhook functionality
   // PayPal Webhooks
   app.post('/api/webhooks/paypal', handlePayPalWebhook); // Handle PayPal webhook events (PAYMENT.CAPTURE.COMPLETED, etc.)
-  // Fireflies Webhooks
-  app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
-    try {
-      req.rawBody = req.body.toString('utf8');
-      req.body = JSON.parse(req.rawBody);
-      next();
-    } catch (err) {
-      return res.status(400).json({ success: false, message: 'Invalid JSON' });
-    }
-  }, handleFirefliesWebhook); // Handle Fireflies webhook events (Transcription completed)
+  // Fireflies Webhooks (DISABLED - Fireflies integration removed)
+  // app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
+  //   try {
+  //     req.rawBody = req.body.toString('utf8');
+  //     req.body = JSON.parse(req.rawBody);
+  //     next();
+  //   } catch (err) {
+  //     return res.status(400).json({ success: false, message: 'Invalid JSON' });
+  //   }
+  // }, handleFirefliesWebhook); // Handle Fireflies webhook events (Transcription completed)
 
   // ==================== TEST ROUTES ====================
   app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number

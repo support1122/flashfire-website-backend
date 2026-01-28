@@ -166,17 +166,37 @@ export async function scheduleCall({
       
       const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
       const meetingEndUTC = DateTime.fromJSDate(meetingEnd, { zone: 'utc' });
+
+      // Decide which timezone to use for the client-facing meeting time:
+      // 1) Prefer explicit invitee timezone from Calendly (metadata.inviteeTimezone)
+      // 2) Otherwise, infer US timezone (PST vs ET) from UTC offsets
+      let displayZone = metadata?.inviteeTimezone || null;
+      if (!displayZone) {
+        const pstCheck = meetingStartUTC.setZone('America/Los_Angeles');
+        const pstOffsetHours = pstCheck.offset / 60;
+        const etCheck = meetingStartUTC.setZone('America/New_York');
+        const etOffsetHours = etCheck.offset / 60;
+
+        if (pstOffsetHours === -8 || pstOffsetHours === -7) {
+          displayZone = 'America/Los_Angeles';
+        } else if (etOffsetHours === -5 || etOffsetHours === -4) {
+          displayZone = 'America/New_York';
+        } else {
+          // Default to Pacific if we can't confidently determine (majority of bookings are PST)
+          displayZone = 'America/Los_Angeles';
+        }
+      }
       
-      // Format date: "Saturday Dec 27, 2025" (America/New_York)
-      const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('EEEE MMM d, yyyy');
+      // Format date: "Saturday Dec 27, 2025" in the client's timezone
+      const meetingDateFormatted = meetingStartUTC.setZone(displayZone).toFormat('EEEE MMM d, yyyy');
       
-      const startTimeET = meetingStartUTC.setZone('America/New_York');
+      const startTimeET = meetingStartUTC.setZone(displayZone);
       const startTimeFormatted = startTimeET.minute === 0 
         ? startTimeET.toFormat('ha').toLowerCase()
         : startTimeET.toFormat('h:mma').toLowerCase();
       
-      // End time: always include minutes if present
-      const endTimeET = meetingEndUTC.setZone('America/New_York');
+      // End time: always include minutes if present, in the same client timezone
+      const endTimeET = meetingEndUTC.setZone(displayZone);
       const endTimeFormatted = endTimeET.minute === 0
         ? endTimeET.toFormat('ha').toLowerCase()
         : endTimeET.toFormat('h:mma').toLowerCase();

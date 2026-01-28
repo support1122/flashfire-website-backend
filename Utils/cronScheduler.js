@@ -7,6 +7,7 @@ import sgMail from '@sendgrid/mail';
 import watiService from './WatiService.js';
 import { EmailCampaignModel } from '../Schema_Models/EmailCampaign.js';
 import { DateTime } from 'luxon';
+import { scheduleEmailBatch, scheduleWhatsAppBatch } from './JobScheduler.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
@@ -184,12 +185,6 @@ export async function executeScheduledEmailCampaign(campaign, scheduleItem) {
     campaign.sendSchedule[scheduleIndex].status = 'processing';
     await campaign.save();
 
-    const results = {
-      successful: [],
-      failed: [],
-      skipped: []
-    };
-
     let senderEmail = campaign.senderEmail;
     if (!senderEmail) {
       const stepDomainName = campaign.domainName || process.env.DOMAIN_NAME || null;
@@ -200,94 +195,89 @@ export async function executeScheduledEmailCampaign(campaign, scheduleItem) {
       }
     }
 
-    for (const email of campaign.recipientEmails) {
-      const trimmedEmail = email.trim().toLowerCase();
-      if (!trimmedEmail) continue;
+    const normalizedEmails = campaign.recipientEmails
+      .map(email => email.trim().toLowerCase())
+      .filter(email => email.length > 0);
 
-      const hasBooking = await CampaignBookingModel.findOne({
-        clientEmail: trimmedEmail,
-        bookingStatus: { $in: ['scheduled', 'completed'] }
-      }).lean();
+    const existingBookings = await CampaignBookingModel.find({
+      clientEmail: { $in: normalizedEmails },
+      bookingStatus: { $in: ['scheduled', 'completed'] }
+    }).select('clientEmail').lean();
 
-      if (hasBooking) {
-        results.skipped.push({
-          email: trimmedEmail,
+    const bookedEmails = new Set(existingBookings.map(b => b.clientEmail));
+    
+    const validRecipients = [];
+    const skippedEmails = [];
+    
+    for (const email of normalizedEmails) {
+      if (bookedEmails.has(email)) {
+        skippedEmails.push({
+          email: email,
           reason: 'User has booking',
           skippedAt: new Date()
         });
-        continue;
+      } else {
+        validRecipients.push(email);
       }
+    }
 
-      try {
-        const msg = {
-          to: trimmedEmail,
-          from: senderEmail,
-          templateId: campaign.templateId,
-          dynamicTemplateData: {
-            domain: campaign.domainName
+    // Use JobScheduler to schedule emails with time spreading (over 1 hour)
+    // This will spread the emails evenly and process only 3 at a time
+    if (validRecipients.length > 0) {
+      const schedulingResult = await scheduleEmailBatch({
+        recipients: validRecipients,
+        templateId: campaign.templateId,
+        templateName: campaign.templateName,
+        domainName: campaign.domainName,
+        senderEmail,
+        scheduledStartTime: new Date(), // Start immediately, will spread over 1 hour
+        campaignId: campaign._id?.toString(),
+        dynamicTemplateData: {
+          domain: campaign.domainName
+        }
+      });
+
+      if (schedulingResult.success) {
+        console.log(`✅ [CronScheduler] Scheduled ${validRecipients.length} emails with time spreading over ${schedulingResult.spreadMinutes} minutes`);
+        
+        campaign.logs.push({
+          timestamp: new Date(),
+          level: 'info',
+          message: `Scheduled ${validRecipients.length} emails with time spreading`,
+          details: {
+            sendDay: scheduleItem.day,
+            totalRecipients: validRecipients.length,
+            skipped: skippedEmails.length,
+            batchId: schedulingResult.batchId,
+            spreadMinutes: schedulingResult.spreadMinutes,
+            firstSendTime: schedulingResult.firstSendTime,
+            lastSendTime: schedulingResult.lastSendTime
           }
-        };
-
-        await sgMail.send(msg);
-        results.successful.push({
-          email: trimmedEmail,
-          sentAt: new Date(),
-          sendDay: scheduleItem.day,
-          scheduledSendDate: scheduleItem.scheduledDate
         });
-      } catch (error) {
-        results.failed.push({
-          email: trimmedEmail,
-          error: error.message,
-          failedAt: new Date(),
-          sendDay: scheduleItem.day,
-          scheduledSendDate: scheduleItem.scheduledDate
-        });
+      } else {
+        throw new Error(schedulingResult.error || 'Failed to schedule emails');
       }
     }
 
-    const emailCampaign = new EmailCampaignModel({
-      templateName: campaign.templateName,
-      domainName: campaign.domainName,
-      templateId: campaign.templateId,
-      provider: 'sendgrid',
-      total: campaign.recipientEmails.length,
-      success: results.successful.length,
-      failed: results.failed.length,
-      successfulEmails: results.successful,
-      failedEmails: results.failed,
-      status: results.failed.length === 0 ? 'SUCCESS' : (results.successful.length > 0 ? 'PARTIAL' : 'FAILED'),
-      isScheduled: true,
-      scheduledCampaignId: campaign._id
-    });
-    await emailCampaign.save();
-
-    campaign.sendSchedule[scheduleIndex].status = 'completed';
-    campaign.sendSchedule[scheduleIndex].sentCount = results.successful.length;
-    campaign.sendSchedule[scheduleIndex].failedCount = results.failed.length;
-    campaign.sendSchedule[scheduleIndex].skippedCount = results.skipped.length;
-    campaign.sendSchedule[scheduleIndex].completedAt = new Date();
-
-    const allCompleted = campaign.sendSchedule.every(s => s.status === 'completed');
-    if (allCompleted) {
-      campaign.status = 'completed';
-      campaign.completedAt = new Date();
-    }
+    // Mark as processing (actual completion will be tracked by JobScheduler)
+    // We don't mark as completed yet since emails will be sent over time
+    campaign.sendSchedule[scheduleIndex].status = 'processing';
+    campaign.sendSchedule[scheduleIndex].skippedCount = skippedEmails.length;
 
     campaign.logs.push({
       timestamp: new Date(),
       level: 'success',
-      message: `Completed email send for day ${scheduleItem.day}`,
+      message: `Queued email send for day ${scheduleItem.day} with time spreading`,
       details: {
         sendDay: scheduleItem.day,
-        successful: results.successful.length,
-        failed: results.failed.length,
-        skipped: results.skipped.length
+        queued: validRecipients.length,
+        skipped: skippedEmails.length,
+        note: 'Emails will be sent over 1 hour with 3 concurrent max'
       }
     });
 
     await campaign.save();
-    console.log(`✅ Scheduled email campaign ${campaign._id} day ${scheduleItem.day} completed`);
+    console.log(`✅ Scheduled email campaign ${campaign._id} day ${scheduleItem.day} queued (${validRecipients.length} emails over 1 hour)`);
   } catch (error) {
     console.error(`❌ Error executing scheduled email campaign:`, error);
     const scheduleIndex = campaign.sendSchedule.findIndex(s => s.day === scheduleItem.day);
@@ -341,60 +331,36 @@ export async function executeWhatsAppCampaign(campaign) {
     campaignDoc.status = 'IN_PROGRESS';
     await campaignDoc.save();
 
-    const results = {
-      successful: 0,
-      failed: 0
-    };
+    // Use JobScheduler to schedule WhatsApp messages with time spreading
+    // This will spread messages over 1 hour and process sequentially
+    if (mobilesToSend.length > 0) {
+      const schedulingResult = await scheduleWhatsAppBatch({
+        mobileNumbers: mobilesToSend,
+        templateName: campaignDoc.templateName,
+        templateId: campaignDoc.templateId,
+        parameters: campaignDoc.parameters || [],
+        scheduledStartTime: new Date(), // Start immediately, will spread over 1 hour
+        campaignId: `${campaignDoc.campaignId}_day${nextDay}`
+      });
 
-    for (const mobile of mobilesToSend) {
-      try {
-        const result = await watiService.sendTemplateMessage({
-          mobileNumber: mobile,
-          templateName: campaignDoc.templateName,
-          templateId: campaignDoc.templateId,
-          parameters: campaignDoc.parameters || [],
-          campaignId: `${campaignDoc.campaignId}_${Date.now()}`
-        });
-
-        if (result.success) {
-          results.successful++;
+      if (schedulingResult.success) {
+        console.log(`✅ [CronScheduler] Scheduled ${mobilesToSend.length} WhatsApp messages with time spreading over ${schedulingResult.spreadMinutes} minutes`);
+        
+        // Mark messages as scheduled (actual completion will be tracked by JobScheduler)
+        for (const mobile of mobilesToSend) {
           const msgStatus = campaignDoc.messageStatuses.find(m => m.mobileNumber === mobile && m.sendDay === nextDay);
           if (msgStatus) {
-            msgStatus.status = 'sent';
-            msgStatus.sentAt = new Date();
-            msgStatus.watiResponse = result.data;
-          }
-        } else {
-          results.failed++;
-          const msgStatus = campaignDoc.messageStatuses.find(m => m.mobileNumber === mobile && m.sendDay === nextDay);
-          if (msgStatus) {
-            msgStatus.status = 'failed';
-            msgStatus.errorMessage = result.error || 'Failed to send';
+            msgStatus.status = 'scheduled';
+            msgStatus.scheduledSendDate = schedulingResult.firstSendTime;
           }
         }
-      } catch (error) {
-        results.failed++;
-        const msgStatus = campaignDoc.messageStatuses.find(m => m.mobileNumber === mobile && m.sendDay === nextDay);
-        if (msgStatus) {
-          msgStatus.status = 'failed';
-          msgStatus.errorMessage = error.message;
-        }
+        
+        await campaignDoc.save();
+        console.log(`✅ WhatsApp campaign ${campaignDoc.campaignId} day ${nextDay} queued (${mobilesToSend.length} messages over 1 hour)`);
+      } else {
+        throw new Error(schedulingResult.error || 'Failed to schedule WhatsApp messages');
       }
     }
-
-    campaignDoc.successCount += results.successful;
-    campaignDoc.failedCount += results.failed;
-
-    const allSent = campaignDoc.messageStatuses.every(msg => msg.status === 'sent' || msg.status === 'failed');
-    if (allSent) {
-      campaignDoc.status = campaignDoc.failedCount === 0 ? 'COMPLETED' : (campaignDoc.successCount > 0 ? 'PARTIAL' : 'FAILED');
-      campaignDoc.completedAt = new Date();
-    } else {
-      campaignDoc.status = 'IN_PROGRESS';
-    }
-
-    await campaignDoc.save();
-    console.log(`✅ WhatsApp campaign ${campaignDoc.campaignId} day ${nextDay} completed: ${results.successful} sent, ${results.failed} failed`);
   } catch (error) {
     console.error(`❌ Error executing WhatsApp campaign:`, error);
     try {

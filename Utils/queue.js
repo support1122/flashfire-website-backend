@@ -5,8 +5,16 @@ import { URL } from 'url';
 
 dotenv.config();
 
+// Flag to disable Redis completely (use MongoDB-based JobScheduler instead)
+// Set to true to avoid Redis rate limiting issues
+const DISABLE_REDIS = process.env.DISABLE_REDIS === 'true' || false;
+
 // Determine Redis URL in order of preference
 const getRedisUrl = () => {
+  if (DISABLE_REDIS) {
+    console.log('⚠️ [Queue] Redis disabled via DISABLE_REDIS env var - using MongoDB-based JobScheduler');
+    return null;
+  }
   if (process.env.UPSTASH_REDIS_URL) return process.env.UPSTASH_REDIS_URL;
   if (process.env.REDIS_CLOUD_URL) return process.env.REDIS_CLOUD_URL;
   if (process.env.REDIS_URL) return process.env.REDIS_URL;

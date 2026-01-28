@@ -116,6 +116,7 @@ WorkflowLogSchema.index({ bookingId: 1, createdAt: -1 });
 WorkflowLogSchema.index({ status: 1, scheduledFor: 1 });
 WorkflowLogSchema.index({ createdAt: -1 });
 WorkflowLogSchema.index({ triggerAction: 1, status: 1 });
+WorkflowLogSchema.index({ bookingId: 1, workflowId: 1, 'step.templateId': 1 });
 
 export const WorkflowLogModel = mongoose.model('WorkflowLog', WorkflowLogSchema);
 

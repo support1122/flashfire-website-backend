@@ -48,7 +48,7 @@ export const getWatiTemplates = async (req, res) => {
 // ==================== GET MOBILE NUMBERS BY BOOKING STATUS ====================
 export const getMobileNumbersByStatus = async (req, res) => {
   try {
-    const { status } = req.query;
+    const { status, fromDate, toDate } = req.query;
 
     if (!status) {
       return res.status(400).json({
@@ -57,10 +57,29 @@ export const getMobileNumbersByStatus = async (req, res) => {
       });
     }
 
-    const bookings = await CampaignBookingModel.find({
+    const query = {
       bookingStatus: status,
       clientPhone: { $exists: true, $ne: null, $ne: '' }
-    }).select('clientPhone clientName').lean();
+    };
+
+    // Optional date range filter on meeting start time
+    if (fromDate || toDate) {
+      query.scheduledEventStartTime = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        query.scheduledEventStartTime.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        query.scheduledEventStartTime.$lte = to;
+      }
+    }
+
+    const bookings = await CampaignBookingModel.find(query)
+      .select('clientPhone clientName scheduledEventStartTime')
+      .lean();
 
     // Extract unique mobile numbers
     const uniqueMobiles = [...new Set(bookings.map(b => b.clientPhone).filter(Boolean))];
