@@ -1563,101 +1563,135 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
 
-    // Only add scheduledEventStartTime filter if it wasn't already set by date filters
     if (!matchQuery.scheduledEventStartTime) {
       matchQuery.scheduledEventStartTime = { $exists: true, $ne: null };
     }
 
-    // First, get all bookings matching the query
-    const allBookings = await CampaignBookingModel.find(matchQuery)
-      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
-      .lean();
+    const pipeline = [
+      { $match: matchQuery },
+      {
+        $addFields: {
+          groupKey: {
+            $ifNull: ['$clientPhone', '$clientEmail']
+          }
+        }
+      },
+      {
+        $sort: {
+          scheduledEventStartTime: -1,
+          bookingCreatedAt: -1
+        }
+      },
+      {
+        $group: {
+          _id: '$groupKey',
+          booking: { $first: '$$ROOT' },
+          totalBookings: { $sum: 1 }
+        }
+      },
+      {
+        $replaceRoot: {
+          newRoot: {
+            $mergeObjects: ['$booking', { totalBookings: '$totalBookings' }]
+          }
+        }
+      },
+      {
+        $sort: {
+          scheduledEventStartTime: -1,
+          bookingCreatedAt: -1
+        }
+      }
+    ];
 
-    // Group by normalized phone or email
-    // Since MongoDB already filtered by search, all bookings in allBookings match the search
+    if (search) {
+      const trimmedSearch = search.trim();
+      if (trimmedSearch) {
+        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        pipeline.splice(1, 0, {
+          $match: {
+            $or: [
+              { clientName: { $regex: escapedSearch, $options: 'i' } },
+              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
+              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
+              { utmSource: { $regex: escapedSearch, $options: 'i' } }
+            ]
+          }
+        });
+      }
+    }
+
+    const countPipeline = [
+      ...pipeline.slice(0, -1),
+      { $count: 'total' }
+    ];
+
+    const [countResult] = await CampaignBookingModel.aggregate(countPipeline);
+    const total = countResult?.total || 0;
+
+    pipeline.push({ $skip: skip });
+    pipeline.push({ $limit: limitNum });
+
+    const bookings = await CampaignBookingModel.aggregate(pipeline);
+
     const groupedMap = new Map();
-    
-    for (const booking of allBookings) {
+    for (const booking of bookings) {
       const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
       const groupKey = normalizedPhone || booking.clientEmail;
       
       if (!groupedMap.has(groupKey)) {
-        groupedMap.set(groupKey, {
-          booking: booking,
-          totalBookings: 1
-        });
+        groupedMap.set(groupKey, booking);
       } else {
         const existing = groupedMap.get(groupKey);
-        existing.totalBookings += 1;
-        // Keep the latest booking (already sorted by MongoDB query)
-        // Since all bookings already match the search (filtered by MongoDB), 
-        // we can safely keep the latest one
-        existing.booking = booking;
+        const existingTime = existing.scheduledEventStartTime ? new Date(existing.scheduledEventStartTime).getTime() : 0;
+        const currentTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
+        if (currentTime > existingTime || (currentTime === existingTime && new Date(booking.bookingCreatedAt).getTime() > new Date(existing.bookingCreatedAt).getTime())) {
+          groupedMap.set(groupKey, booking);
+        }
       }
     }
 
-    // Convert map to array and add totalBookings
-    let groupedBookings = Array.from(groupedMap.values()).map(item => ({
-      ...item.booking,
-      totalBookings: item.totalBookings
-    }));
-
-    // Post-filter: If search exists, ensure all results match the search term
-    // This is important because grouping might have included non-matching contacts
-    if (search) {
-      const trimmedSearch = search.trim().toLowerCase();
-      if (trimmedSearch) {
-        groupedBookings = groupedBookings.filter(booking => {
-          const nameMatch = booking.clientName && booking.clientName.toLowerCase().includes(trimmedSearch);
-          const emailMatch = booking.clientEmail && booking.clientEmail.toLowerCase().includes(trimmedSearch);
-          const phoneMatch = booking.clientPhone && booking.clientPhone.toLowerCase().includes(trimmedSearch);
-          const sourceMatch = booking.utmSource && booking.utmSource.toLowerCase().includes(trimmedSearch);
-          return nameMatch || emailMatch || phoneMatch || sourceMatch;
-        });
-      }
-    }
-
-    // Sort by scheduledEventStartTime descending
-    groupedBookings.sort((a, b) => {
+    const finalBookings = Array.from(groupedMap.values()).sort((a, b) => {
       const aTime = a.scheduledEventStartTime ? new Date(a.scheduledEventStartTime).getTime() : 0;
       const bTime = b.scheduledEventStartTime ? new Date(b.scheduledEventStartTime).getTime() : 0;
       if (bTime !== aTime) return bTime - aTime;
       return new Date(b.bookingCreatedAt).getTime() - new Date(a.bookingCreatedAt).getTime();
     });
 
-    const total = groupedBookings.length;
-    const bookings = groupedBookings.slice(skip, skip + limitNum);
-
-    // Calculate stats from the same grouped bookings (ensures consistency)
-    const uniqueBookings = groupedBookings;
-    const planBreakdownMap = new Map();
-    let totalRevenue = 0;
-
-    for (const booking of uniqueBookings) {
-      if (booking.paymentPlan && booking.paymentPlan.name) {
-        const planName = booking.paymentPlan.name;
-        const price = booking.paymentPlan.price || 0;
-        
-        if (!planBreakdownMap.has(planName)) {
-          planBreakdownMap.set(planName, { count: 0, revenue: 0 });
+    const statsPipeline = [
+      { $match: matchQuery },
+      {
+        $group: {
+          _id: '$paymentPlan.name',
+          count: {
+            $sum: {
+              $cond: [
+                { $and: [{ $ne: ['$paymentPlan.name', null] }, { $eq: ['$bookingStatus', 'paid'] }] },
+                1,
+                0
+              ]
+            }
+          },
+          revenue: {
+            $sum: {
+              $cond: [
+                { $eq: ['$bookingStatus', 'paid'] },
+                { $ifNull: ['$paymentPlan.price', 0] },
+                0
+              ]
+            }
+          }
         }
-        
-        const planStats = planBreakdownMap.get(planName);
-        planStats.count += 1;
-        planStats.revenue += price;
-        totalRevenue += price;
-      }
-    }
+      },
+      { $match: { _id: { $ne: null } } }
+    ];
 
-    const planBreakdown = Array.from(planBreakdownMap.entries()).map(([name, stats]) => ({
-      _id: name,
-      count: stats.count,
-      revenue: stats.revenue
-    }));
+    const planBreakdown = await CampaignBookingModel.aggregate(statsPipeline);
+    const totalRevenue = planBreakdown.reduce((sum, plan) => sum + (plan.revenue || 0), 0);
 
     return res.status(200).json({
       success: true,
-      data: bookings,
+      data: finalBookings,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -1882,7 +1916,8 @@ export const handlePaidClientFromMicroservice = async (req, res) => {
 export const getMeetingNotes = async (req, res) => {
   try {
     const { bookingId } = req.params;
-    const { transcriptId } = req.body;
+    // Fireflies integration has been disabled.
+    // This endpoint now simply returns an informative response without calling external APIs.
 
     if (!bookingId) {
       return res.status(400).json({
@@ -1899,92 +1934,10 @@ export const getMeetingNotes = async (req, res) => {
       });
     }
 
-    const transcriptIdToUse = transcriptId || booking.firefliesTranscriptId;
-
-    if (!transcriptIdToUse) {
-      return res.status(404).json({
-        success: false,
-        message: 'No transcript ID found. Please provide a transcript ID.',
-        hasTranscriptId: false
-      });
-    }
-
-    const FIREFLIES_API_KEY = process.env.FIREFLIES_API_KEY;
-    if (!FIREFLIES_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        message: 'Fireflies API key not configured'
-      });
-    }
-
-    const query = `
-      query Transcript($transcriptId: String!) {
-        transcript(id: $transcriptId) {
-          id
-          title
-          date
-          duration
-          organizer_email
-          participants
-          transcript_url
-          audio_url
-          video_url
-          sentences {
-            speaker_name
-            text
-            start_time
-            end_time
-          }
-          summary {
-            overview
-            action_items
-            keywords
-          }
-        }
-      }
-    `;
-
-    const variables = { transcriptId: transcriptIdToUse };
-
-    const axios = (await import('axios')).default;
-    const response = await axios.post(
-      'https://api.fireflies.ai/graphql',
-      {
-        query,
-        variables
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${FIREFLIES_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
-
-    if (response.data.errors) {
-      return res.status(400).json({
-        success: false,
-        message: 'Failed to fetch transcript from Fireflies',
-        error: response.data.errors[0]?.message || 'Unknown error'
-      });
-    }
-
-    const transcriptData = response.data.data.transcript;
-    if (!transcriptData) {
-      return res.status(404).json({
-        success: false,
-        message: 'Transcript not found'
-      });
-    }
-
-    if (transcriptId && !booking.firefliesTranscriptId) {
-      booking.firefliesTranscriptId = transcriptId;
-      await booking.save();
-    }
-
     return res.status(200).json({
-      success: true,
-      data: transcriptData
+      success: false,
+      message: 'Fireflies meeting-notes integration is currently disabled. Use manual notes instead.',
+      hasTranscriptId: !!booking.firefliesTranscriptId
     });
   } catch (error) {
     console.error('Error fetching meeting notes:', error);

@@ -224,6 +224,9 @@ import Routes from './Routes.js';
 import Connection from './Utils/ConnectDB.js';
 import cors from 'cors';
 import 'dotenv/config';
+// Import callQueue - may be null if Redis is not available
+// Primary call scheduling is handled by MongoDB-based CallScheduler
+// BullMQ is only used as backup
 import { callQueue } from './Utils/queue.js';
 import Twilio from 'twilio';
 import { DateTime } from 'luxon';
@@ -235,13 +238,18 @@ import { CampaignBookingModel } from './Schema_Models/CampaignBooking.js';
 import { UserModel } from './Schema_Models/User.js';
 import { CampaignModel } from './Schema_Models/Campaign.js';
 import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
-import emailWorker from './Utils/emailWorker.js';
-import whatsappWorker from './Utils/whatsappWorker.js';
-import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs)
-import { redisConnection } from './Utils/queue.js'; // Import shared ioredis connection
-import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js'; // MongoDB-based scheduler
-import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderScheduler.js'; // WhatsApp reminder scheduler
+// DISABLED: Redis workers causing "Too many requests" rate limiting issues
+// Using MongoDB-based JobScheduler instead for email and WhatsApp campaigns
+// import emailWorker from './Utils/emailWorker.js';
+// import whatsappWorker from './Utils/whatsappWorker.js';
+// import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs)
+// import { redisConnection } from './Utils/queue.js'; // Import shared ioredis connection
+
+import { startJobScheduler, getJobSchedulerStats } from './Utils/JobScheduler.js';
+import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js';
+import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderScheduler.js';
 import { getRescheduleLinkForBooking } from './Utils/CalendlyAPIHelper.js';
+import watiService from './Utils/WatiService.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -1322,7 +1330,15 @@ app.post('/calendly-webhook', async (req, res) => {
       }
 
       const meetingStartUTC = DateTime.fromISO(payload?.scheduled_event?.start_time, { zone: 'utc' });
-      const meetingTimeUS = meetingStartUTC.setZone('America/New_York').toFormat('ff');
+      
+      // Determine invitee timezone (from Calendly webhook) if available
+      const inviteeTimezone = payload?.invitee?.timezone || payload?.timezone || null;
+
+      // Use the invitee's timezone for the client-facing time (PST/ET/etc).
+      // Fallback to America/Los_Angeles (PST/PDT) if Calendly doesn't send a timezone.
+      const clientZone = inviteeTimezone || 'America/Los_Angeles';
+
+      const meetingTimeUS = meetingStartUTC.setZone(clientZone).toFormat('ff');
       const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
       const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
       const bookedAt = new Date(req.body?.created_at).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
@@ -1425,9 +1441,6 @@ app.post('/calendly-webhook', async (req, res) => {
         }
       }
 
-      // Extract invitee_timezone from webhook payload
-      const inviteeTimezone = payload?.invitee?.timezone || payload?.timezone || null;
-      
       Logger.info('Extracted invitee timezone from webhook', {
         inviteeTimezone,
         hasInviteeTimezone: !!inviteeTimezone,
@@ -1763,6 +1776,19 @@ app.listen(PORT || 4001, async () => {
   console.log('🚀 [Server] Starting MongoDB-based Call Scheduler...');
   startScheduler();
   startWhatsAppReminderScheduler(); // Start WhatsApp reminder scheduler
+  
+  // NEW: Start MongoDB-based Job Scheduler for email and WhatsApp campaigns
+  // This replaces Redis/BullMQ workers with time-spreading and rate limiting
+  console.log('🚀 [Server] Starting MongoDB-based Job Scheduler (replaces Redis workers)...');
+  startJobScheduler();
+  console.log('✅ [Server] Job Scheduler started - emails: 3 concurrent max, messages spread over 1 hour');
+  
+  try {
+    await watiService.refreshTemplatesCache();
+    console.log('✅ [Server] WATI template cache pre-warmed');
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to pre-warm WATI template cache:', error.message);
+  }
 });
 
 // Initialize GeoIP after server startup
@@ -1789,8 +1815,16 @@ app.get('/api/scheduler/upcoming', async (req, res) => {
   }
 });
 
-
-
+// -------------------- Job Scheduler API Endpoints (Email/WhatsApp) --------------------
+// Get job scheduler stats (MongoDB-based, replaces Redis)
+app.get('/api/job-scheduler/stats', async (req, res) => {
+  try {
+    const stats = await getJobSchedulerStats();
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 
 
