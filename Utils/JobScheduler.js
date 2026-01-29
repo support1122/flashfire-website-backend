@@ -1,5 +1,6 @@
 
 import { ScheduledJobModel } from '../Schema_Models/ScheduledJob.js';
+import { WhatsAppCampaignModel } from '../Schema_Models/WhatsAppCampaign.js';
 import sgMail from '@sendgrid/mail';
 import watiService from './WatiService.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
@@ -167,6 +168,7 @@ export async function scheduleEmailBatch({
  * @param {string[]} params.parameters - Template parameters
  * @param {Date} params.scheduledStartTime - When to start sending (base time)
  * @param {string} params.campaignId - Campaign reference ID
+ * @param {Object} params.metadata - Optional metadata (e.g. sendDay for campaign sync)
  * @returns {Promise<Object>} Scheduling result
  */
 export async function scheduleWhatsAppBatch({
@@ -175,7 +177,8 @@ export async function scheduleWhatsAppBatch({
   templateId = null,
   parameters = [],
   scheduledStartTime = new Date(),
-  campaignId = null
+  campaignId = null,
+  metadata = null
 }) {
   try {
     const batchId = `whatsapp_batch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -186,6 +189,15 @@ export async function scheduleWhatsAppBatch({
     for (let i = 0; i < mobileNumbers.length; i++) {
       const mobile = mobileNumbers[i];
       if (!mobile) continue;
+      
+      const jobMeta = {
+        originalRecipientIndex: i,
+        totalRecipients: mobileNumbers.length,
+        timeSpreadWindow: CONFIG.TIME_SPREAD_WINDOW_MS
+      };
+      if (metadata && typeof metadata === 'object') {
+        Object.assign(jobMeta, metadata);
+      }
       
       const job = new ScheduledJobModel({
         jobType: 'whatsapp',
@@ -199,15 +211,11 @@ export async function scheduleWhatsAppBatch({
           mobileNumber: mobile,
           templateName,
           templateId,
-          parameters,
+          parameters: Array.isArray(parameters) ? parameters : [],
           campaignId: campaignId || batchId
         },
         campaignId,
-        metadata: {
-          originalRecipientIndex: i,
-          totalRecipients: mobileNumbers.length,
-          timeSpreadWindow: CONFIG.TIME_SPREAD_WINDOW_MS
-        }
+        metadata: jobMeta
       });
       
       jobs.push(job);
@@ -473,7 +481,7 @@ async function processWhatsAppJob(job) {
       mobileNumber,
       templateName,
       templateId,
-      parameters,
+      parameters: Array.isArray(parameters) ? parameters : [],
       campaignId: campaignId || `job_${job.jobId}`
     });
     
@@ -486,7 +494,32 @@ async function processWhatsAppJob(job) {
           response: result.data
         }
       );
-      
+      if (campaignId && String(campaignId).startsWith('whatsapp_')) {
+        const mobileNorm = String(mobileNumber).replace(/\D/g, '');
+        const sendDay = job.metadata?.sendDay;
+        const doc = await WhatsAppCampaignModel.findOne({ campaignId });
+        let idx = -1;
+        if (doc?.messageStatuses?.length) {
+          if (sendDay !== undefined) {
+            idx = doc.messageStatuses.findIndex(
+              m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && m.sendDay === sendDay
+            );
+          }
+          if (idx === -1) {
+            idx = doc.messageStatuses.findIndex(
+              m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && (m.status === 'pending' || m.status === 'scheduled')
+            );
+          }
+        }
+        if (doc && idx >= 0) {
+          doc.messageStatuses[idx].status = 'sent';
+          doc.messageStatuses[idx].sentAt = new Date();
+          doc.messageStatuses[idx].watiResponse = result.data;
+          doc.successCount = (doc.successCount || 0) + 1;
+          doc.markModified('messageStatuses');
+          await doc.save();
+        }
+      }
       console.log(`✅ [JobScheduler] WhatsApp sent to ${mobileNumber}`);
       return { success: true };
     } else {
@@ -504,11 +537,34 @@ async function processWhatsAppJob(job) {
         attempts,
         lastAttemptAt: new Date(),
         error: error.message,
-        // If retrying, schedule for 5 minutes later
         ...(shouldRetry ? { scheduledFor: new Date(Date.now() + 5 * 60 * 1000) } : {})
       }
     );
-    
+    if (!shouldRetry && campaignId && String(campaignId).startsWith('whatsapp_')) {
+      const mobileNorm = String(mobileNumber).replace(/\D/g, '');
+      const sendDay = job.metadata?.sendDay;
+      const doc = await WhatsAppCampaignModel.findOne({ campaignId });
+      let idx = -1;
+      if (doc?.messageStatuses?.length) {
+        if (sendDay !== undefined) {
+          idx = doc.messageStatuses.findIndex(
+            m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && m.sendDay === sendDay
+          );
+        }
+        if (idx === -1) {
+          idx = doc.messageStatuses.findIndex(
+            m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && (m.status === 'pending' || m.status === 'scheduled')
+          );
+        }
+      }
+      if (doc && idx >= 0) {
+        doc.messageStatuses[idx].status = 'failed';
+        doc.messageStatuses[idx].errorMessage = error.message;
+        doc.failedCount = (doc.failedCount || 0) + 1;
+        doc.markModified('messageStatuses');
+        await doc.save();
+      }
+    }
     console.error(`❌ [JobScheduler] WhatsApp to ${mobileNumber} failed:`, error.message);
     return { success: false, error: error.message, willRetry: shouldRetry };
   }

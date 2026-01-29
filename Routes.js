@@ -69,6 +69,7 @@ import { testWhatsAppTemplate, testNoShowTemplate } from "./Controllers/WhatsApp
 import { 
   getWatiTemplates, 
   getMobileNumbersByStatus, 
+  getWhatsAppCampaignById,
   createWhatsAppCampaign, 
   getAllWhatsAppCampaigns, 
   getScheduledWhatsAppCampaigns,
@@ -242,6 +243,7 @@ export default function Routes(app) {
   app.get('/api/whatsapp-campaigns/mobile-numbers', getMobileNumbersByStatus);
   app.post('/api/whatsapp-campaigns', createWhatsAppCampaign);
   app.get('/api/whatsapp-campaigns/scheduled', getScheduledWhatsAppCampaigns);
+  app.get('/api/whatsapp-campaigns/:campaignId', getWhatsAppCampaignById);
   app.post('/api/whatsapp-campaigns/:campaignId/send-now', sendWhatsAppCampaignNow);
   app.get('/api/whatsapp-campaigns', getAllWhatsAppCampaigns);
   
