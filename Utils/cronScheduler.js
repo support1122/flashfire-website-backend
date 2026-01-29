@@ -28,6 +28,11 @@ function getIST730PM(date) {
   return istDate.set({ hour: SEND_HOUR, minute: SEND_MINUTE, second: 0, millisecond: 0 }).toJSDate();
 }
 
+function getIST10AM(date) {
+  const istDate = DateTime.fromJSDate(date).setZone(IST_TIMEZONE);
+  return istDate.set({ hour: 10, minute: 0, second: 0, millisecond: 0 }).toJSDate();
+}
+
 /**
  * Get WhatsApp workflow send time: 11 PM IST
  */
@@ -338,9 +343,10 @@ export async function executeWhatsAppCampaign(campaign) {
         mobileNumbers: mobilesToSend,
         templateName: campaignDoc.templateName,
         templateId: campaignDoc.templateId,
-        parameters: campaignDoc.parameters || [],
-        scheduledStartTime: new Date(), // Start immediately, will spread over 1 hour
-        campaignId: `${campaignDoc.campaignId}_day${nextDay}`
+        parameters: Array.isArray(campaignDoc.parameters) ? campaignDoc.parameters : [],
+        scheduledStartTime: new Date(),
+        campaignId: campaignDoc.campaignId,
+        metadata: { sendDay: nextDay }
       });
 
       if (schedulingResult.success) {
@@ -490,4 +496,4 @@ export function startCronScheduler() {
   processScheduledItems();
 }
 
-export { calculateScheduledDate, getIST730PM, getIST11PM, getISTEmailWindow };
+export { calculateScheduledDate, getIST730PM, getIST11PM, getISTEmailWindow, getIST10AM };

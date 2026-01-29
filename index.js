@@ -248,6 +248,7 @@ import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
 import { startJobScheduler, getJobSchedulerStats } from './Utils/JobScheduler.js';
 import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js';
 import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderScheduler.js';
+import { scheduleDiscordMeetReminder, startDiscordMeetReminderScheduler } from './Utils/DiscordMeetReminderScheduler.js';
 import { getRescheduleLinkForBooking } from './Utils/CalendlyAPIHelper.js';
 import watiService from './Utils/WatiService.js';
 
@@ -1441,12 +1442,6 @@ app.post('/calendly-webhook', async (req, res) => {
         }
       }
 
-      Logger.info('Extracted invitee timezone from webhook', {
-        inviteeTimezone,
-        hasInviteeTimezone: !!inviteeTimezone,
-        inviteeKeys: payload?.invitee ? Object.keys(payload.invitee) : []
-      });
-
       // Create booking object
       const newBooking = new CampaignBookingModel({
         campaignId,
@@ -1545,6 +1540,33 @@ app.post('/calendly-webhook', async (req, res) => {
           inviteeEmail,
           inviteePhone,
           scheduledStartISO
+        });
+      }
+
+      // Schedule Discord "meeting in 2 minutes" reminder (independent of phone/WhatsApp logic)
+      try {
+        const startISO = payload?.scheduled_event?.start_time;
+        if (startISO) {
+          await scheduleDiscordMeetReminder({
+            bookingId: newBooking.bookingId,
+            clientName: inviteeName || 'Valued Client',
+            clientEmail: inviteeEmail || null,
+            meetingStartISO: startISO,
+            meetingLink: meetLink && meetLink !== 'Not Provided' ? meetLink : null,
+            inviteeTimezone,
+            source: 'calendly',
+            metadata: {
+              campaignId: newBooking.campaignId,
+              utmSource: newBooking.utmSource,
+            },
+          });
+        } else {
+          Logger.warn('No scheduled_event.start_time found in Calendly payload for Discord reminder');
+        }
+      } catch (discordReminderError) {
+        Logger.warn('Failed to schedule Discord 2-minute meeting reminder', {
+          error: discordReminderError.message,
+          inviteeEmail,
         });
       }
 
@@ -1776,6 +1798,7 @@ app.listen(PORT || 4001, async () => {
   console.log('🚀 [Server] Starting MongoDB-based Call Scheduler...');
   startScheduler();
   startWhatsAppReminderScheduler(); // Start WhatsApp reminder scheduler
+  startDiscordMeetReminderScheduler(); // Start Discord 2-minute meeting reminder scheduler
   
   // NEW: Start MongoDB-based Job Scheduler for email and WhatsApp campaigns
   // This replaces Redis/BullMQ workers with time-spreading and rate limiting
