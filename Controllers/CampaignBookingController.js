@@ -15,6 +15,16 @@ const PLAN_CATALOG = {
   EXECUTIVE: { price: 599, currency: 'USD', displayPrice: '$599' },
 };
 
+const MQL_STATUSES = ['scheduled', 'rescheduled', 'no-show', 'canceled', 'ignored'];
+const SQL_STATUSES = ['completed'];
+const CONVERTED_STATUSES = ['paid'];
+
+function getQualificationFromStatus(bookingStatus) {
+  if (CONVERTED_STATUSES.includes(bookingStatus)) return 'Converted';
+  if (SQL_STATUSES.includes(bookingStatus)) return 'SQL';
+  return 'MQL';
+}
+
 // ==================== SAVE CALENDLY BOOKING WITH UTM ====================
 export const saveCalendlyBooking = async (bookingData) => {
   try {
@@ -1501,7 +1511,8 @@ export const getLeadsPaginated = async (req, res) => {
       planName,
       minAmount,
       maxAmount,
-      status
+      status,
+      qualification
     } = req.query;
 
     const pageNum = parseInt(page);
@@ -1511,7 +1522,12 @@ export const getLeadsPaginated = async (req, res) => {
     let matchQuery = {};
     const normalizedPlanName = planName ? String(planName).toUpperCase() : null;
 
-    if (status && status !== 'all') {
+    const qual = qualification ? String(qualification).toLowerCase() : null;
+    if (qual === 'mql' || qual === 'sql' || qual === 'converted') {
+      matchQuery.bookingStatus = {
+        $in: qual === 'mql' ? MQL_STATUSES : qual === 'sql' ? SQL_STATUSES : CONVERTED_STATUSES
+      };
+    } else if (status && status !== 'all') {
       matchQuery.bookingStatus = status;
     }
 
@@ -1656,7 +1672,48 @@ export const getLeadsPaginated = async (req, res) => {
       const bTime = b.scheduledEventStartTime ? new Date(b.scheduledEventStartTime).getTime() : 0;
       if (bTime !== aTime) return bTime - aTime;
       return new Date(b.bookingCreatedAt).getTime() - new Date(a.bookingCreatedAt).getTime();
-    });
+    }).map((b) => ({ ...b, qualification: getQualificationFromStatus(b.bookingStatus) }));
+
+    const baseMatchQuery = { ...matchQuery };
+    delete baseMatchQuery.bookingStatus;
+    const qualStatsPipeline = [
+      { $match: baseMatchQuery },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
+      {
+        $addFields: {
+          qualification: {
+            $cond: [
+              { $in: ['$bookingStatus', CONVERTED_STATUSES] },
+              'Converted',
+              { $cond: [{ $in: ['$bookingStatus', SQL_STATUSES] }, 'SQL', 'MQL'] }
+            ]
+          }
+        }
+      },
+      { $group: { _id: '$qualification', count: { $sum: 1 } } }
+    ];
+    if (search) {
+      const trimmedSearch = search.trim();
+      if (trimmedSearch) {
+        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        qualStatsPipeline.splice(1, 0, {
+          $match: {
+            $or: [
+              { clientName: { $regex: escapedSearch, $options: 'i' } },
+              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
+              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
+              { utmSource: { $regex: escapedSearch, $options: 'i' } }
+            ]
+          }
+        });
+      }
+    }
+    const qualStatsResult = await CampaignBookingModel.aggregate(qualStatsPipeline);
+    const mqlCount = qualStatsResult.find((r) => r._id === 'MQL')?.count ?? 0;
+    const sqlCount = qualStatsResult.find((r) => r._id === 'SQL')?.count ?? 0;
+    const convertedCount = qualStatsResult.find((r) => r._id === 'Converted')?.count ?? 0;
 
     const statsPipeline = [
       { $match: matchQuery },
@@ -1700,7 +1757,10 @@ export const getLeadsPaginated = async (req, res) => {
       },
       stats: {
         totalRevenue: totalRevenue || 0,
-        planBreakdown: planBreakdown
+        planBreakdown: planBreakdown,
+        mqlCount,
+        sqlCount,
+        convertedCount
       }
     });
 
