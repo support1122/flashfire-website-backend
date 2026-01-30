@@ -53,6 +53,7 @@ import {
   getMeetingNotes
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
+import { syncDiscordBdaReminders } from "./Controllers/SyncController.js";
 import TestCallStatus from "./test/TestCallStatus.js";
 import TestPayPalEmail from "./test/TestPayPalEmail.js";
 // Webhook Controllers
@@ -104,7 +105,7 @@ import { ExpressAdapter } from '@bull-board/express';
 import { callQueue, emailQueue, whatsappQueue, redisConnection } from './Utils/queue.js';
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
-import { requireCrmAdmin, requireCrmUser } from './Middlewares/CrmAuth.js';
+import { requireCrmAdmin, requireCrmUser, requireCrmPermission } from './Middlewares/CrmAuth.js';
 import {
   getAvailableLeads,
   getLeadByEmail,
@@ -305,7 +306,7 @@ export default function Routes(app) {
   app.put('/api/campaign-bookings/:bookingId/amount', updateBookingAmount); // Update booking amount (leads only)
   app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
-  app.get('/api/leads/paginated', getLeadsPaginated); // Get paginated leads (paid bookings only)
+  app.get('/api/leads/paginated', requireCrmUser, requireCrmPermission('leads'), getLeadsPaginated);
 
   // Microservice Integration
   app.get('/api/campaign-bookings/export', exportBookingsForMicroservice); // Export bookings
@@ -328,6 +329,10 @@ export default function Routes(app) {
   //     return res.status(400).json({ success: false, message: 'Invalid JSON' });
   //   }
   // }, handleFirefliesWebhook); // Handle Fireflies webhook events (Transcription completed)
+
+  // ==================== SYNC ROUTES ====================
+  app.get('/sync/discordbdareminders', syncDiscordBdaReminders); // Backfill 3-min Discord reminders for all upcoming meetings
+  app.post('/sync/discordbdareminders', syncDiscordBdaReminders);
 
   // ==================== TEST ROUTES ====================
   app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number

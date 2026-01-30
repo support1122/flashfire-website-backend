@@ -351,17 +351,6 @@ export async function executeWhatsAppCampaign(campaign) {
 
       if (schedulingResult.success) {
         console.log(`✅ [CronScheduler] Scheduled ${mobilesToSend.length} WhatsApp messages with time spreading over ${schedulingResult.spreadMinutes} minutes`);
-        
-        // Mark messages as scheduled (actual completion will be tracked by JobScheduler)
-        for (const mobile of mobilesToSend) {
-          const msgStatus = campaignDoc.messageStatuses.find(m => m.mobileNumber === mobile && m.sendDay === nextDay);
-          if (msgStatus) {
-            msgStatus.status = 'scheduled';
-            msgStatus.scheduledSendDate = schedulingResult.firstSendTime;
-          }
-        }
-        
-        await campaignDoc.save();
         console.log(`✅ WhatsApp campaign ${campaignDoc.campaignId} day ${nextDay} queued (${mobilesToSend.length} messages over 1 hour)`);
       } else {
         throw new Error(schedulingResult.error || 'Failed to schedule WhatsApp messages');

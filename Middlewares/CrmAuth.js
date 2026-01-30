@@ -47,4 +47,14 @@ export function requireCrmUser(req, res, next) {
   }
 }
 
+export function requireCrmPermission(permission) {
+  return (req, res, next) => {
+    const perms = req.crmUser?.permissions;
+    if (!Array.isArray(perms) || !perms.includes(permission)) {
+      return res.status(403).json({ success: false, error: 'Insufficient permission' });
+    }
+    return next();
+  };
+}
+
 

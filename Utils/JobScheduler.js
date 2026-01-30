@@ -497,28 +497,23 @@ async function processWhatsAppJob(job) {
       if (campaignId && String(campaignId).startsWith('whatsapp_')) {
         const mobileNorm = String(mobileNumber).replace(/\D/g, '');
         const sendDay = job.metadata?.sendDay;
-        const doc = await WhatsAppCampaignModel.findOne({ campaignId });
-        let idx = -1;
-        if (doc?.messageStatuses?.length) {
-          if (sendDay !== undefined) {
-            idx = doc.messageStatuses.findIndex(
-              m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && m.sendDay === sendDay
-            );
-          }
-          if (idx === -1) {
-            idx = doc.messageStatuses.findIndex(
-              m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && (m.status === 'pending' || m.status === 'scheduled')
-            );
-          }
-        }
-        if (doc && idx >= 0) {
-          doc.messageStatuses[idx].status = 'sent';
-          doc.messageStatuses[idx].sentAt = new Date();
-          doc.messageStatuses[idx].watiResponse = result.data;
-          doc.successCount = (doc.successCount || 0) + 1;
-          doc.markModified('messageStatuses');
-          await doc.save();
-        }
+        const regexSafe = mobileNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const mobileRegex = new RegExp('^\\+?' + regexSafe + '$');
+        const filter = sendDay !== undefined
+          ? { 'elem.sendDay': sendDay, 'elem.mobileNumber': { $regex: mobileRegex } }
+          : { 'elem.mobileNumber': { $regex: mobileRegex }, 'elem.status': { $in: ['pending', 'scheduled'] } };
+        await WhatsAppCampaignModel.updateOne(
+          { campaignId },
+          {
+            $set: {
+              'messageStatuses.$[elem].status': 'sent',
+              'messageStatuses.$[elem].sentAt': new Date(),
+              'messageStatuses.$[elem].watiResponse': result.data
+            },
+            $inc: { successCount: 1 }
+          },
+          { arrayFilters: [ filter ] }
+        );
       }
       console.log(`✅ [JobScheduler] WhatsApp sent to ${mobileNumber}`);
       return { success: true };
@@ -543,27 +538,22 @@ async function processWhatsAppJob(job) {
     if (!shouldRetry && campaignId && String(campaignId).startsWith('whatsapp_')) {
       const mobileNorm = String(mobileNumber).replace(/\D/g, '');
       const sendDay = job.metadata?.sendDay;
-      const doc = await WhatsAppCampaignModel.findOne({ campaignId });
-      let idx = -1;
-      if (doc?.messageStatuses?.length) {
-        if (sendDay !== undefined) {
-          idx = doc.messageStatuses.findIndex(
-            m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && m.sendDay === sendDay
-          );
-        }
-        if (idx === -1) {
-          idx = doc.messageStatuses.findIndex(
-            m => String(m.mobileNumber).replace(/\D/g, '') === mobileNorm && (m.status === 'pending' || m.status === 'scheduled')
-          );
-        }
-      }
-      if (doc && idx >= 0) {
-        doc.messageStatuses[idx].status = 'failed';
-        doc.messageStatuses[idx].errorMessage = error.message;
-        doc.failedCount = (doc.failedCount || 0) + 1;
-        doc.markModified('messageStatuses');
-        await doc.save();
-      }
+      const regexSafe = mobileNorm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const mobileRegex = new RegExp('^\\+?' + regexSafe + '$');
+      const filter = sendDay !== undefined
+        ? { 'elem.sendDay': sendDay, 'elem.mobileNumber': { $regex: mobileRegex } }
+        : { 'elem.mobileNumber': { $regex: mobileRegex }, 'elem.status': { $in: ['pending', 'scheduled'] } };
+      await WhatsAppCampaignModel.updateOne(
+        { campaignId },
+        {
+          $set: {
+            'messageStatuses.$[elem].status': 'failed',
+            'messageStatuses.$[elem].errorMessage': error.message
+          },
+          $inc: { failedCount: 1 }
+        },
+        { arrayFilters: [ filter ] }
+      );
     }
     console.error(`❌ [JobScheduler] WhatsApp to ${mobileNumber} failed:`, error.message);
     return { success: false, error: error.message, willRetry: shouldRetry };

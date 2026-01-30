@@ -16,7 +16,8 @@ let isRunning = false;
 let pollInterval = null;
 
 /**
- * Schedule a Discord reminder 2 minutes before a meeting start time.
+ * Schedule a Discord reminder 3 minutes before a meeting start time.
+ * Uses DISCORD_MEET_2MIN_WEBHOOK_URL env (same webhook).
  */
 export async function scheduleDiscordMeetReminder({
   bookingId = null,
@@ -49,7 +50,7 @@ export async function scheduleDiscordMeetReminder({
       return { success: false, error: 'Invalid meetingStartISO' };
     }
 
-    const reminderTime = new Date(meetingStart.getTime() - 2 * 60 * 1000);
+    const reminderTime = new Date(meetingStart.getTime() - 3 * 60 * 1000);
     const now = new Date();
 
     // If reminder time is already past, skip scheduling
@@ -65,7 +66,7 @@ export async function scheduleDiscordMeetReminder({
     }
 
     const baseId = bookingId || clientEmail || clientName || 'unknown';
-    const reminderId = `discord_meet_2min_${baseId}_${meetingStart.getTime()}`;
+    const reminderId = `discord_meet_3min_${baseId}_${meetingStart.getTime()}`;
 
     // Idempotency: do not create duplicates
     const existing = await ScheduledDiscordMeetReminderModel.findOne({ reminderId });
@@ -157,30 +158,18 @@ async function processDueDiscordMeetReminders() {
         const meetingStart = reminder.meetingStartISO;
         const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
 
-        const clientZone = reminder.inviteeTimezone || 'America/Los_Angeles';
-        const meetingTimeClient = meetingStartUTC.setZone(clientZone).toFormat('ff');
         const meetingTimeIndia = meetingStartUTC
           .setZone('Asia/Kolkata')
           .toFormat('ff');
 
-        const timezoneLabel =
-          reminder.inviteeTimezone && reminder.inviteeTimezone.includes('New_York')
-            ? 'ET'
-            : reminder.inviteeTimezone && reminder.inviteeTimezone.includes('Los_Angeles')
-            ? 'PT'
-            : '';
-
         const messageLines = [
-          '⚡ **Meeting in 2 minutes**',
+          '🔥 **Hot Lead — Meeting in 2 Minutes**',
           '',
-          `👤 **Client:** ${reminder.clientName}${
-            reminder.clientEmail ? ` (${reminder.clientEmail})` : ''
-          }`,
-          `🕒 **Client Time${timezoneLabel ? ` (${timezoneLabel})` : ''}:** ${meetingTimeClient}`,
-          `🇮🇳 **Team India Time (IST):** ${meetingTimeIndia}`,
-          `🔗 **Meet Link:** ${reminder.meetingLink || 'Not provided'}`,
+          `Client: ${reminder.clientName}`,
+          `Time: ${meetingTimeIndia}`,
+          `Link: ${reminder.meetingLink || 'Not provided'}`,
           '',
-          `Meeting in 2 minutes. Do make your attendance by typing I'm in.`,
+          "BDA team, confirm attendance by typing **\"I'm in.\"** Let's close this.",
         ];
 
         const content = messageLines.join('\n');

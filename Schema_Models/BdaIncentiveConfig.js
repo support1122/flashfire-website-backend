@@ -8,9 +8,14 @@ const BdaIncentiveConfigSchema = new mongoose.Schema(
       required: true,
       unique: true
     },
-    incentivePercent: {
+    basePriceUsd: {
       type: Number,
-      required: true,
+      default: null,
+      min: 0
+    },
+    incentivePerLeadInr: {
+      type: Number,
+      default: 0,
       min: 0
     },
     updatedAt: {
@@ -23,4 +28,3 @@ const BdaIncentiveConfigSchema = new mongoose.Schema(
 
 export const BdaIncentiveConfigModel =
   mongoose.models.BdaIncentiveConfig || mongoose.model('BdaIncentiveConfig', BdaIncentiveConfigSchema);
-
