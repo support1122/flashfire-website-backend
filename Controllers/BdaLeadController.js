@@ -1,4 +1,13 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
+
+// Current plan prices (fallback when basePriceUsd not in DB). Admin can override via BdaIncentiveConfig.basePriceUsd.
+const PLAN_CATALOG = {
+  PRIME: { price: 99 },
+  IGNITE: { price: 199 },
+  PROFESSIONAL: { price: 349 },
+  EXECUTIVE: { price: 599 }
+};
 
 export const getAvailableLeads = async (req, res) => {
   try {
@@ -115,6 +124,28 @@ export const claimLead = async (req, res) => {
       claimedAt: new Date()
     };
 
+    const paymentPlan = req.body?.paymentPlan;
+    if (paymentPlan && paymentPlan.name) {
+      const amountPaid = Number(paymentPlan.price);
+      if (amountPaid <= 0 || Number.isNaN(amountPaid)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Amount paid by client must be greater than 0'
+        });
+      }
+      const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
+      const name = String(paymentPlan.name).toUpperCase();
+      if (allowed.includes(name)) {
+        booking.paymentPlan = {
+          name,
+          price: amountPaid,
+          currency: paymentPlan.currency || 'USD',
+          displayPrice: paymentPlan.displayPrice || `$${amountPaid}`,
+          selectedAt: new Date()
+        };
+      }
+    }
+
     await booking.save();
 
     return res.status(200).json({
@@ -173,13 +204,24 @@ export const updateLeadDetails = async (req, res) => {
     if (clientPhone !== undefined) booking.clientPhone = clientPhone;
     if (scheduledEventStartTime) booking.scheduledEventStartTime = new Date(scheduledEventStartTime);
     if (paymentPlan) {
-      booking.paymentPlan = {
-        name: paymentPlan.name,
-        price: paymentPlan.price,
-        currency: paymentPlan.currency || 'USD',
-        displayPrice: paymentPlan.displayPrice || `$${paymentPlan.price}`,
-        selectedAt: new Date()
-      };
+      const name = String(paymentPlan.name || '').toUpperCase();
+      const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
+      const amountPaid = Number(paymentPlan.price);
+      if (allowed.includes(name)) {
+        if (amountPaid <= 0 || Number.isNaN(amountPaid)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Amount paid by client must be greater than 0'
+          });
+        }
+        booking.paymentPlan = {
+          name,
+          price: amountPaid,
+          currency: paymentPlan.currency || 'USD',
+          displayPrice: paymentPlan.displayPrice || `$${amountPaid}`,
+          selectedAt: new Date()
+        };
+      }
     }
     if (meetingNotes !== undefined) booking.meetingNotes = meetingNotes;
     if (anythingToKnow !== undefined) booking.anythingToKnow = anythingToKnow;
@@ -285,6 +327,43 @@ export const getBdaAnalysis = async (req, res) => {
       }
     ]);
 
+    const paidBookings = await CampaignBookingModel.find({
+      ...performanceMatch,
+      bookingStatus: 'paid',
+      'paymentPlan.name': { $in: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'] },
+      'paymentPlan.price': { $gt: 0 }
+    })
+      .select('claimedBy.email paymentPlan.name paymentPlan.price')
+      .lean();
+
+    const incentiveRows = await BdaIncentiveConfigModel.find({}).lean();
+    const configByPlan = new Map();
+    incentiveRows.forEach((r) => {
+      configByPlan.set(r.planName, {
+        basePriceUsd: r.basePriceUsd != null ? r.basePriceUsd : (PLAN_CATALOG[r.planName]?.price ?? 0),
+        incentivePerLeadInr: r.incentivePerLeadInr != null ? r.incentivePerLeadInr : 0
+      });
+    });
+
+    const incentiveByBda = new Map();
+    for (const b of paidBookings) {
+      const email = b.claimedBy?.email;
+      if (!email) continue;
+      const planName = b.paymentPlan?.name;
+      const amountPaid = Number(b.paymentPlan?.price);
+      if (!planName || !amountPaid || amountPaid <= 0) continue;
+      const config = configByPlan.get(planName);
+      if (!config) continue;
+      const currentPlanPrice = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
+      const paymentRatio = Math.min(1, amountPaid / currentPlanPrice);
+      const prorated = config.incentivePerLeadInr * paymentRatio;
+      incentiveByBda.set(email, (incentiveByBda.get(email) ?? 0) + prorated);
+    }
+
+    bdaPerformance.forEach((bda) => {
+      bda.totalIncentiveInr = incentiveByBda.get(bda._id) ?? 0;
+    });
+
     const statusBreakdown = await CampaignBookingModel.aggregate([
       {
         $match: {
@@ -342,26 +421,67 @@ export const getMyClaimedLeads = async (req, res) => {
       });
     }
 
-    const { page = 1, limit = 50 } = req.query;
+    const { page = 1, limit = 50, fromDate, toDate, status, planName } = req.query;
 
-    const pageNum = parseInt(page);
-    const limitNum = parseInt(limit);
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
     const skip = (pageNum - 1) * limitNum;
 
-    const [bookings, total] = await Promise.all([
-      CampaignBookingModel.find({
-        'claimedBy.email': email,
-        bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
-      })
+    const match = {
+      'claimedBy.email': email,
+      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+    };
+
+    if (fromDate) {
+      const start = new Date(fromDate);
+      start.setUTCHours(0, 0, 0, 0);
+      match['claimedBy.claimedAt'] = match['claimedBy.claimedAt'] || {};
+      match['claimedBy.claimedAt'].$gte = start;
+    }
+    if (toDate) {
+      const end = new Date(toDate);
+      end.setUTCHours(23, 59, 59, 999);
+      match['claimedBy.claimedAt'] = match['claimedBy.claimedAt'] || {};
+      match['claimedBy.claimedAt'].$lte = end;
+    }
+    if (status && ['paid', 'scheduled', 'completed'].includes(status)) {
+      match.bookingStatus = status;
+    }
+    if (planName && ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'].includes(String(planName).toUpperCase())) {
+      match['paymentPlan.name'] = String(planName).toUpperCase();
+    }
+
+    const paidMatch = { ...match, bookingStatus: 'paid', 'paymentPlan.name': { $in: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'] }, 'paymentPlan.price': { $gt: 0 } };
+
+    const [bookings, total, incentiveRows, paidBookings] = await Promise.all([
+      CampaignBookingModel.find(match)
         .sort({ 'claimedBy.claimedAt': -1 })
         .skip(skip)
         .limit(limitNum)
         .lean(),
-      CampaignBookingModel.countDocuments({
-        'claimedBy.email': email,
-        bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
-      })
+      CampaignBookingModel.countDocuments(match),
+      BdaIncentiveConfigModel.find({}).lean(),
+      CampaignBookingModel.find(paidMatch).select('paymentPlan').lean()
     ]);
+
+    const configByPlan = new Map();
+    incentiveRows.forEach((r) => {
+      configByPlan.set(r.planName, {
+        basePriceUsd: r.basePriceUsd != null ? r.basePriceUsd : (PLAN_CATALOG[r.planName]?.price ?? 0),
+        incentivePerLeadInr: r.incentivePerLeadInr != null ? r.incentivePerLeadInr : 0
+      });
+    });
+    let totalIncentivesForFilter = 0;
+    for (const b of paidBookings) {
+      const planName = b.paymentPlan?.name;
+      const amountPaid = Number(b.paymentPlan?.price);
+      if (!planName || !amountPaid || amountPaid <= 0) continue;
+      const config = configByPlan.get(planName);
+      if (!config) continue;
+      const currentPlanPrice = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
+      const paymentRatio = Math.min(1, amountPaid / currentPlanPrice);
+      totalIncentivesForFilter += config.incentivePerLeadInr * paymentRatio;
+    }
 
     return res.status(200).json({
       success: true,
@@ -370,8 +490,9 @@ export const getMyClaimedLeads = async (req, res) => {
         page: pageNum,
         limit: limitNum,
         total,
-        pages: Math.ceil(total / limitNum)
-      }
+        pages: Math.ceil(Math.max(0, total) / limitNum)
+      },
+      totalIncentivesForFilter
     });
   } catch (error) {
     console.error('Error fetching my claimed leads:', error);

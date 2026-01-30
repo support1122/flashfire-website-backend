@@ -9,7 +9,7 @@ import { cancelCall } from '../Utils/CallScheduler.js';
 import { Logger } from '../Utils/Logger.js';
 
 const PLAN_CATALOG = {
-  PRIME: { price: 119, currency: 'USD', displayPrice: '$119' },
+  PRIME: { price: 99, currency: 'USD', displayPrice: '$99' },
   IGNITE: { price: 199, currency: 'USD', displayPrice: '$199' },
   PROFESSIONAL: { price: 349, currency: 'USD', displayPrice: '$349' },
   EXECUTIVE: { price: 599, currency: 'USD', displayPrice: '$599' },
@@ -647,13 +647,20 @@ export const updateBookingStatus = async (req, res) => {
           message: 'A valid plan is required when marking a booking as paid'
         });
       }
+      const amountPaid = plan?.price != null ? Number(plan.price) : PLAN_CATALOG[normalizedPlanName].price;
+      if (amountPaid <= 0 || Number.isNaN(amountPaid)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Amount paid by client must be greater than 0'
+        });
+      }
 
       const catalogPlan = PLAN_CATALOG[normalizedPlanName];
       paymentPlanUpdate = {
         name: normalizedPlanName,
-        price: plan?.price ?? catalogPlan.price,
+        price: amountPaid,
         currency: plan?.currency || catalogPlan.currency,
-        displayPrice: plan?.displayPrice || catalogPlan.displayPrice,
+        displayPrice: plan?.displayPrice || `$${amountPaid}`,
         selectedAt: new Date()
       };
     }

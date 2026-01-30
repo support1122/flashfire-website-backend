@@ -4,6 +4,7 @@ import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
 import watiService from './WatiService.js';
 import { DateTime } from 'luxon';
+import { scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
 
 dotenv.config();
 
@@ -346,6 +347,32 @@ export async function scheduleAllWhatsAppReminders({
       `   • Immediate: ${results['immediate'].success ? '✅' : (results['immediate'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
       `   • 3h: ${results['3h'].success ? '✅' : (results['3h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
       `   • 5min: ${results['5min'].success ? '✅' : (results['5min'].skipped ? '⏭️ Skipped' : '❌ Failed')}`
+    );
+  }
+
+  // Ensure Discord 3-min meeting reminder exists (idempotent: no duplicate if already in DB)
+  // Covers previously booked meetings that get WA reminders but weren't in Calendly webhook flow
+  try {
+    const inviteeTimezone =
+      timezone === 'ET'
+        ? 'America/New_York'
+        : timezone === 'PST'
+          ? 'America/Los_Angeles'
+          : null;
+    await scheduleDiscordMeetReminder({
+      bookingId: metadata?.bookingId ?? null,
+      clientName,
+      clientEmail,
+      meetingStartISO,
+      meetingLink,
+      inviteeTimezone,
+      source,
+      metadata,
+    });
+  } catch (discordErr) {
+    console.warn(
+      '[WhatsAppReminderScheduler] Discord 3-min meet reminder schedule failed (non-fatal):',
+      discordErr?.message ?? discordErr
     );
   }
 

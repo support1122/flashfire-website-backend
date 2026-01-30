@@ -1,7 +1,7 @@
 import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
 
 const PLAN_CATALOG = {
-  PRIME: { price: 119, currency: 'USD' },
+  PRIME: { price: 99, currency: 'USD' },
   IGNITE: { price: 199, currency: 'USD' },
   PROFESSIONAL: { price: 349, currency: 'USD' },
   EXECUTIVE: { price: 599, currency: 'USD' }
@@ -20,9 +20,9 @@ export const getIncentiveConfig = async (req, res) => {
       const row = map.get(planName);
       return {
         planName,
-        basePrice: base.price,
+        basePriceUsd: row?.basePriceUsd != null ? row.basePriceUsd : base.price,
         currency: base.currency,
-        incentivePercent: row ? row.incentivePercent : 0
+        incentivePerLeadInr: row?.incentivePerLeadInr != null ? row.incentivePerLeadInr : 0
       };
     });
 
@@ -52,17 +52,29 @@ export const saveIncentiveConfig = async (req, res) => {
 
     for (const cfg of configs) {
       const planName = cfg.planName;
-      const percent = Number(cfg.incentivePercent);
       if (!PLAN_CATALOG[planName]) {
         continue;
       }
-      if (Number.isNaN(percent) || percent < 0) {
+      const basePriceUsd = cfg.basePriceUsd != null ? Number(cfg.basePriceUsd) : null;
+      const incentivePerLeadInr = cfg.incentivePerLeadInr != null ? Number(cfg.incentivePerLeadInr) : 0;
+      if (basePriceUsd != null && (Number.isNaN(basePriceUsd) || basePriceUsd < 0)) {
         continue;
+      }
+      if (Number.isNaN(incentivePerLeadInr) || incentivePerLeadInr < 0) {
+        continue;
+      }
+
+      const update = {
+        updatedAt: new Date(),
+        incentivePerLeadInr
+      };
+      if (basePriceUsd != null) {
+        update.basePriceUsd = basePriceUsd;
       }
 
       await BdaIncentiveConfigModel.findOneAndUpdate(
         { planName },
-        { incentivePercent: percent, updatedAt: new Date() },
+        update,
         { upsert: true, new: true }
       );
     }
@@ -82,4 +94,3 @@ export const saveIncentiveConfig = async (req, res) => {
     });
   }
 };
-
