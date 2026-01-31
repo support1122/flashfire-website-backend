@@ -4,6 +4,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnectForMeet } from '../Utils/DiscordConnect.js';
 import { cancelCall, scheduleCall } from '../Utils/CallScheduler.js';
 import { cancelWhatsAppReminder, scheduleAllWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler.js';
+import { cancelDiscordMeetRemindersForMeeting } from '../Utils/DiscordMeetReminderScheduler.js';
 import { DateTime } from 'luxon';
 
 /**
@@ -388,6 +389,29 @@ async function handleRescheduledEvent(req, res, payload) {
       }
     }
 
+    // Cancel old Discord BDA meeting alert (3-min "I'm in" reminder) for the old time
+    let oldDiscordMeetCancelled = false;
+    try {
+      const cancelDiscordResult = await cancelDiscordMeetRemindersForMeeting({
+        meetingStartISO: oldStartTime,
+        clientEmail,
+      });
+      if (cancelDiscordResult.success && cancelDiscordResult.cancelledCount > 0) {
+        oldDiscordMeetCancelled = true;
+        Logger.info('Cancelled old Discord meet reminder', {
+          clientEmail,
+          oldStartTime,
+          cancelledCount: cancelDiscordResult.cancelledCount
+        });
+      }
+    } catch (discordError) {
+      Logger.error('Failed to cancel old Discord meet reminder', {
+        error: discordError.message,
+        clientEmail,
+        oldStartTime
+      });
+    }
+
     // Update booking record with reschedule information
     if (bookingRecord) {
       try {
@@ -717,6 +741,29 @@ async function handleCanceledEvent(req, res, payload) {
       }
     }
 
+    // Cancel Discord BDA meeting alert (3-min "I'm in" reminder) for this meeting
+    let discordMeetCancelled = false;
+    try {
+      const cancelDiscordResult = await cancelDiscordMeetRemindersForMeeting({
+        meetingStartISO,
+        clientEmail,
+      });
+      if (cancelDiscordResult.success && cancelDiscordResult.cancelledCount > 0) {
+        discordMeetCancelled = true;
+        Logger.info('Cancelled Discord meet reminder for canceled meeting', {
+          clientEmail,
+          meetingStartISO,
+          cancelledCount: cancelDiscordResult.cancelledCount
+        });
+      }
+    } catch (discordError) {
+      Logger.error('Failed to cancel Discord meet reminder for canceled meeting', {
+        error: discordError.message,
+        clientEmail,
+        meetingStartISO
+      });
+    }
+
     // Update booking record status to canceled
     if (bookingRecord) {
       try {
@@ -760,7 +807,8 @@ async function handleCanceledEvent(req, res, payload) {
         "Cancellation Reason": cancelReason,
         "Reminders Cancelled": {
           "Call Reminder": callCancelled ? "✅ Cancelled" : "❌ Not Found",
-          "WhatsApp Reminder": whatsappCancelled ? "✅ Cancelled" : "❌ Not Found"
+          "WhatsApp Reminder": whatsappCancelled ? "✅ Cancelled" : "❌ Not Found",
+          "Discord BDA Meet Alert": discordMeetCancelled ? "✅ Cancelled" : "❌ Not Found"
         },
         "Booking Status": bookingRecord ? "✅ Updated to 'canceled'" : "⚠️ Booking not found"
       };
@@ -770,7 +818,8 @@ async function handleCanceledEvent(req, res, payload) {
       Logger.info('Sent Discord notification for canceled meeting', {
         clientEmail,
         callCancelled,
-        whatsappCancelled
+        whatsappCancelled,
+        discordMeetCancelled
       });
     } catch (discordError) {
       Logger.error('Failed to send Discord notification for cancellation', {
@@ -786,6 +835,7 @@ async function handleCanceledEvent(req, res, payload) {
         clientEmail,
         callCancelled,
         whatsappCancelled,
+        discordMeetCancelled,
         bookingUpdated: !!bookingRecord,
         canceledBy,
         cancelReason

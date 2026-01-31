@@ -246,8 +246,67 @@ export function stopDiscordMeetReminderScheduler() {
   console.log('🛑 [DiscordMeetReminder] Scheduler stopped');
 }
 
+/**
+ * Cancel Discord meeting reminders for a given meeting (by start time).
+ * Used when a meeting is rescheduled (old time) or canceled via Calendly webhook.
+ * @param {{ meetingStartISO: string|Date, clientEmail?: string }} options
+ * @returns {{ success: boolean, cancelledCount: number }}
+ */
+export async function cancelDiscordMeetRemindersForMeeting({
+  meetingStartISO,
+  clientEmail = null,
+}) {
+  try {
+    if (!meetingStartISO) {
+      console.warn('[DiscordMeetReminder] cancelDiscordMeetRemindersForMeeting: meetingStartISO required');
+      return { success: true, cancelledCount: 0 };
+    }
+
+    const meetingStart = new Date(meetingStartISO);
+    if (Number.isNaN(meetingStart.getTime())) {
+      console.warn('[DiscordMeetReminder] cancelDiscordMeetRemindersForMeeting: invalid meetingStartISO', {
+        meetingStartISO,
+      });
+      return { success: true, cancelledCount: 0 };
+    }
+
+    const filter = {
+      status: { $in: ['pending', 'processing'] },
+      meetingStartISO: meetingStart,
+    };
+    if (clientEmail) {
+      filter.clientEmail = clientEmail;
+    }
+
+    const updateResult = await ScheduledDiscordMeetReminderModel.updateMany(filter, {
+      $set: {
+        status: 'cancelled',
+        errorMessage: 'Cancelled: meeting rescheduled or canceled',
+      },
+    });
+
+    const cancelledCount = updateResult.modifiedCount || 0;
+    if (cancelledCount > 0) {
+      console.log('✅ [DiscordMeetReminder] Cancelled Discord meet reminder(s)', {
+        meetingStartISO: meetingStart.toISOString(),
+        clientEmail: clientEmail || 'any',
+        cancelledCount,
+      });
+    }
+
+    return { success: true, cancelledCount };
+  } catch (error) {
+    console.error('❌ [DiscordMeetReminder] Error cancelling Discord meet reminders', {
+      error: error.message,
+      meetingStartISO,
+    });
+    return { success: false, cancelledCount: 0, error: error.message };
+  }
+}
+
 export default {
   scheduleDiscordMeetReminder,
+  cancelDiscordMeetRemindersForMeeting,
   startDiscordMeetReminderScheduler,
   stopDiscordMeetReminderScheduler,
 };

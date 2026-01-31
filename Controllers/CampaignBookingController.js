@@ -5,6 +5,7 @@ import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
 import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
 import { cancelWhatsAppRemindersForClient } from '../Utils/WhatsAppReminderScheduler.js';
+import { cancelDiscordMeetRemindersForMeeting } from '../Utils/DiscordMeetReminderScheduler.js';
 import { cancelCall } from '../Utils/CallScheduler.js';
 import { Logger } from '../Utils/Logger.js';
 
@@ -705,6 +706,7 @@ export const updateBookingStatus = async (req, res) => {
       try {
         const cancellationResults = {
           whatsappReminders: { cancelled: 0 },
+          discordMeetReminders: { cancelled: 0 },
           callReminders: { cancelled: 0 },
           paymentReminders: { cancelled: 0 },
           scheduledWorkflows: { cancelled: 0 }
@@ -724,6 +726,29 @@ export const updateBookingStatus = async (req, res) => {
               bookingId,
               clientEmail: existingBooking.clientEmail,
               cancelledCount: whatsappResult.cancelledCount
+            });
+          }
+        }
+
+        // Cancel Discord BDA meeting alert (3-min "I'm in" reminder)
+        if (existingBooking.scheduledEventStartTime) {
+          try {
+            const discordResult = await cancelDiscordMeetRemindersForMeeting({
+              meetingStartISO: existingBooking.scheduledEventStartTime,
+              clientEmail: existingBooking.clientEmail
+            });
+            if (discordResult.success && discordResult.cancelledCount > 0) {
+              cancellationResults.discordMeetReminders.cancelled = discordResult.cancelledCount;
+              Logger.info('Discord meet reminders cancelled for paid booking', {
+                bookingId,
+                clientEmail: existingBooking.clientEmail,
+                cancelledCount: discordResult.cancelledCount
+              });
+            }
+          } catch (discordError) {
+            Logger.warn('Error cancelling Discord meet reminders for paid booking', {
+              bookingId,
+              error: discordError.message
             });
           }
         }

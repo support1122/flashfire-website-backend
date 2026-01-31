@@ -504,6 +504,54 @@ export const getMyClaimedLeads = async (req, res) => {
   }
 };
 
+/**
+ * Admin only: remove claim from a lead (revert claim). Lead becomes unclaimed and can be claimed again.
+ */
+export const adminUnclaimLead = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+
+    if (!bookingId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Booking ID is required'
+      });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Lead not found'
+      });
+    }
+
+    if (!booking.claimedBy || !booking.claimedBy.email) {
+      return res.status(400).json({
+        success: false,
+        message: 'This lead is not claimed by any BDA'
+      });
+    }
+
+    booking.claimedBy = { email: null, name: null, claimedAt: null };
+    await booking.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Lead unclaimed successfully. It can be claimed again by any BDA.',
+      data: { bookingId, clientName: booking.clientName, clientEmail: booking.clientEmail }
+    });
+  } catch (error) {
+    console.error('Error unclaiming lead (admin):', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to unclaim lead',
+      error: error.message
+    });
+  }
+};
+
 export const getBdaLeadsByEmail = async (req, res) => {
   try {
     const { email } = req.params;
