@@ -114,7 +114,8 @@ import {
   getBdaAnalysis,
   getMyClaimedLeads,
   getBdaLeadsByEmail,
-  getMyBdaPerformance
+  getMyBdaPerformance,
+  adminUnclaimLead
 } from './Controllers/BdaLeadController.js';
 import { getIncentiveConfig, saveIncentiveConfig } from './Controllers/BdaIncentiveController.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
@@ -229,6 +230,7 @@ export default function Routes(app) {
   app.get('/api/bda/performance', requireCrmUser, getMyBdaPerformance);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
+  app.post('/api/crm/admin/booking/:bookingId/unclaim', requireCrmAdmin, adminUnclaimLead);
   app.get('/api/crm/admin/bda-incentives/config', requireCrmAdmin, getIncentiveConfig);
   app.put('/api/crm/admin/bda-incentives/config', requireCrmAdmin, saveIncentiveConfig);
   app.get('/api/bda/incentives/config', requireCrmUser, getIncentiveConfig);
