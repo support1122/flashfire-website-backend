@@ -47,6 +47,7 @@ import {
   updateBookingNotes,
   createBookingManually,
   getLeadsPaginated,
+  getMeetingLinks,
   updateBookingAmount,
   bulkCreateLeads,
   handlePaidClientFromMicroservice,
@@ -60,6 +61,7 @@ import TestPayPalEmail from "./test/TestPayPalEmail.js";
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
 import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController.js";
+import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
 // Payment Controllers
@@ -87,7 +89,11 @@ import {
   getBookingsByStatusForBulk,
   triggerWorkflowsForAllByStatus,
   checkWorkflowsNeedPlanDetails,
-  resendAllFailedWhatsApp
+  resendAllFailedWhatsApp,
+  getCustomWorkflowsForBooking,
+  attachCustomWorkflowToBooking,
+  detachCustomWorkflowFromBooking,
+  triggerCustomWorkflowForBooking
 } from "./Controllers/WorkflowController.js";
 // Workflow Log Controllers
 import {
@@ -309,6 +315,12 @@ export default function Routes(app) {
   app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
   app.get('/api/leads/paginated', requireCrmUser, requireCrmPermission('leads'), getLeadsPaginated);
+  app.get('/api/meeting-links', requireCrmUser, requireCrmPermission('meeting_links'), getMeetingLinks);
+
+  app.get('/api/campaign-bookings/:bookingId/custom-workflows', requireCrmUser, getCustomWorkflowsForBooking);
+  app.post('/api/campaign-bookings/:bookingId/custom-workflows/:workflowId/attach', requireCrmUser, attachCustomWorkflowToBooking);
+  app.delete('/api/campaign-bookings/:bookingId/custom-workflows/:workflowId/detach', requireCrmUser, detachCustomWorkflowFromBooking);
+  app.post('/api/campaign-bookings/:bookingId/custom-workflows/:workflowId/trigger', requireCrmUser, triggerCustomWorkflowForBooking);
 
   // Microservice Integration
   app.get('/api/campaign-bookings/export', exportBookingsForMicroservice); // Export bookings
@@ -321,6 +333,8 @@ export default function Routes(app) {
   app.get('/api/webhooks/test', testWebhook); // Test webhook functionality
   // PayPal Webhooks
   app.post('/api/webhooks/paypal', handlePayPalWebhook); // Handle PayPal webhook events (PAYMENT.CAPTURE.COMPLETED, etc.)
+  // Google Meet / recording metadata (from n8n or other automations)
+  app.post('/api/webhooks/google-meet-metadata', handleGoogleMeetMetadataWebhook); // Attach Google Meet / video URLs to CRM leads
   // Fireflies Webhooks (DISABLED - Fireflies integration removed)
   // app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
   //   try {
