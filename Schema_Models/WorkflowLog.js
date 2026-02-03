@@ -18,7 +18,7 @@ export const WorkflowLogSchema = new mongoose.Schema({
   },
   triggerAction: {
     type: String,
-    enum: ['no-show', 'complete', 'cancel', 're-schedule', 'paid'],
+    enum: ['no-show', 'complete', 'cancel', 're-schedule', 'paid', 'custom'],
     required: true,
     index: true
   },

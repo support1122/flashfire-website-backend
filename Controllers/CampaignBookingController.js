@@ -319,6 +319,8 @@ export const getAllBookingsPaginated = async (req, res) => {
         clientEmail: 1,
         clientPhone: 1,
         calendlyMeetLink: 1,
+        googleMeetUrl: 1,
+        meetingVideoUrl: 1,
         scheduledEventStartTime: 1,
         scheduledEventEndTime: 1,
         bookingCreatedAt: 1,
@@ -2036,6 +2038,36 @@ export const getMeetingNotes = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch meeting notes',
+      error: error.message
+    });
+  }
+};
+
+export const getMeetingLinks = async (req, res) => {
+  try {
+    const bookings = await CampaignBookingModel.find(
+      { meetingVideoUrl: { $exists: true, $ne: null, $ne: '' } },
+      { clientName: 1, scheduledEventStartTime: 1, meetingVideoUrl: 1, bookingId: 1 }
+    )
+      .sort({ scheduledEventStartTime: -1 })
+      .lean();
+
+    const data = bookings.map((b) => ({
+      bookingId: b.bookingId,
+      clientName: b.clientName || '—',
+      dateOfMeet: b.scheduledEventStartTime || null,
+      meetingVideoUrl: b.meetingVideoUrl
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data
+    });
+  } catch (error) {
+    console.error('Error fetching meeting info:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch meeting info',
       error: error.message
     });
   }

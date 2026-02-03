@@ -5,39 +5,48 @@ import crypto from 'crypto';
 // ==================== CREATE CAMPAIGN ====================
 export const createCampaign = async (req, res) => {
   try {
-    const { campaignName, utmMedium, utmCampaign, utmContent, utmTerm } = req.body;
+    const { campaignName, utmSource: explicitUtmSource, utmMedium, utmCampaign, utmContent, utmTerm } = req.body;
 
-    if (!campaignName) {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Campaign name is required' 
+    if (!campaignName && !explicitUtmSource) {
+      return res.status(400).json({
+        success: false,
+        message: 'Campaign name or utmSource is required'
       });
     }
 
-    // Generate a unique UTM source from campaign name
-    const baseUtmSource = campaignName
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_+|_+$/g, '');
-    
-    // Add random suffix to ensure uniqueness
-    const utmSource = `${baseUtmSource}_${Date.now().toString().slice(-6)}`;
+    const baseUrl = 'https://www.flashfirejobs.com';
+    let utmSource;
+    let generatedUrl;
 
-    // Build the URL with UTM parameters
-    // Use environment variable for base URL (for local testing vs production)
-    const baseUrl  = 'https://www.flashfirejobs.com';
-    const urlParams = new URLSearchParams();
-    urlParams.append('utm_source', utmSource);
-    if (utmMedium) urlParams.append('utm_medium', utmMedium);
-    if (utmCampaign) urlParams.append('utm_campaign', utmCampaign);
-    if (utmContent) urlParams.append('utm_content', utmContent);
-    if (utmTerm) urlParams.append('utm_term', utmTerm);
+    if (explicitUtmSource && typeof explicitUtmSource === 'string' && /^[a-z0-9_-]+$/i.test(explicitUtmSource.trim())) {
+      utmSource = explicitUtmSource.trim().toLowerCase();
+      generatedUrl = `${baseUrl}/?utm_source=${encodeURIComponent(utmSource)}`;
+    } else {
+      const name = (campaignName || '').trim();
+      if (!name) {
+        return res.status(400).json({
+          success: false,
+          message: 'Campaign name is required'
+        });
+      }
+      const baseUtmSource = name
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+      utmSource = `${baseUtmSource}_${Date.now().toString().slice(-6)}`;
+      const urlParams = new URLSearchParams();
+      urlParams.append('utm_source', utmSource);
+      if (utmMedium) urlParams.append('utm_medium', utmMedium);
+      if (utmCampaign) urlParams.append('utm_campaign', utmCampaign);
+      if (utmContent) urlParams.append('utm_content', utmContent);
+      if (utmTerm) urlParams.append('utm_term', utmTerm);
+      generatedUrl = `${baseUrl}?${urlParams.toString()}`;
+    }
 
-    const generatedUrl = `${baseUrl}?${urlParams.toString()}`;
+    const displayName = (campaignName && campaignName.trim()) || utmSource;
 
-    // Create campaign
     const campaign = new CampaignModel({
-      campaignName,
+      campaignName: displayName,
       utmSource,
       utmMedium: utmMedium || 'campaign',
       utmCampaign,

@@ -159,11 +159,18 @@ export const createWorkflow = async (req, res) => {
       });
     }
 
-    const validActions = ['no-show', 'complete', 'cancel', 're-schedule'];
+    const validActions = ['no-show', 'complete', 'cancel', 're-schedule', 'custom'];
     if (!validActions.includes(triggerAction)) {
       return res.status(400).json({
         success: false,
         message: `Invalid trigger action. Must be one of: ${validActions.join(', ')}`
+      });
+    }
+
+    if (triggerAction === 'custom' && (!name || typeof name !== 'string' || name.trim() === '')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Template name is required for custom workflows'
       });
     }
 
@@ -196,12 +203,14 @@ export const createWorkflow = async (req, res) => {
       order: step.order !== undefined ? step.order : index
     })).sort((a, b) => a.order - b.order);
 
+    const isCustom = triggerAction === 'custom';
     const workflow = new WorkflowModel({
       triggerAction,
       steps: sortedSteps,
       name: name || null,
       description: description || null,
-      isActive: true
+      isActive: true,
+      isCustom: isCustom
     });
 
     await workflow.save();
@@ -225,11 +234,12 @@ export const createWorkflow = async (req, res) => {
 // ==================== GET ALL WORKFLOWS ====================
 export const getAllWorkflows = async (req, res) => {
   try {
-    const { triggerAction, isActive } = req.query;
+    const { triggerAction, isActive, isCustom } = req.query;
 
     let query = {};
     if (triggerAction) query.triggerAction = triggerAction;
     if (isActive !== undefined) query.isActive = isActive === 'true';
+    if (isCustom !== undefined) query.isCustom = isCustom === 'true';
 
     const workflows = await WorkflowModel.find(query)
       .sort({ createdAt: -1 })
@@ -297,7 +307,7 @@ export const updateWorkflow = async (req, res) => {
 
     // Validate triggerAction if provided
     if (triggerAction) {
-      const validActions = ['no-show', 'complete', 'cancel', 're-schedule'];
+      const validActions = ['no-show', 'complete', 'cancel', 're-schedule', 'custom'];
       if (!validActions.includes(triggerAction)) {
         return res.status(400).json({
           success: false,
@@ -393,6 +403,176 @@ export const deleteWorkflow = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to delete workflow',
+      error: error.message
+    });
+  }
+};
+
+// ==================== CUSTOM WORKFLOWS FOR BOOKING ====================
+export const getCustomWorkflowsForBooking = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const attachedIds = booking.attachedCustomWorkflowIds || [];
+    if (attachedIds.length === 0) {
+      return res.status(200).json({ success: true, data: { workflows: [], bookingId } });
+    }
+    const workflows = await WorkflowModel.find({
+      workflowId: { $in: attachedIds },
+      isCustom: true,
+      isActive: true
+    }).sort({ createdAt: -1 }).lean();
+    return res.status(200).json({
+      success: true,
+      data: { workflows, bookingId }
+    });
+  } catch (error) {
+    console.error('Error fetching custom workflows for booking:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch custom workflows',
+      error: error.message
+    });
+  }
+};
+
+export const attachCustomWorkflowToBooking = async (req, res) => {
+  try {
+    const { bookingId, workflowId } = req.params;
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const workflow = await WorkflowModel.findOne({ workflowId, isCustom: true });
+    if (!workflow) {
+      return res.status(404).json({ success: false, message: 'Custom workflow not found' });
+    }
+    const attached = booking.attachedCustomWorkflowIds || [];
+    if (attached.includes(workflowId)) {
+      return res.status(200).json({
+        success: true,
+        message: 'Workflow already attached',
+        data: { bookingId, workflowId }
+      });
+    }
+    attached.push(workflowId);
+    booking.attachedCustomWorkflowIds = attached;
+    await booking.save();
+    return res.status(200).json({
+      success: true,
+      message: 'Custom workflow attached to lead',
+      data: { bookingId, workflowId }
+    });
+  } catch (error) {
+    console.error('Error attaching custom workflow:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to attach custom workflow',
+      error: error.message
+    });
+  }
+};
+
+export const detachCustomWorkflowFromBooking = async (req, res) => {
+  try {
+    const { bookingId, workflowId } = req.params;
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const attached = booking.attachedCustomWorkflowIds || [];
+    booking.attachedCustomWorkflowIds = attached.filter((id) => id !== workflowId);
+    await booking.save();
+    return res.status(200).json({
+      success: true,
+      message: 'Custom workflow detached from lead',
+      data: { bookingId, workflowId }
+    });
+  } catch (error) {
+    console.error('Error detaching custom workflow:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to detach custom workflow',
+      error: error.message
+    });
+  }
+};
+
+export const triggerCustomWorkflowForBooking = async (req, res) => {
+  try {
+    const { bookingId, workflowId } = req.params;
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+    const workflow = await WorkflowModel.findOne({ workflowId, isCustom: true, isActive: true }).lean();
+    if (!workflow) {
+      return res.status(404).json({ success: false, message: 'Custom workflow not found or inactive' });
+    }
+    const attached = booking.attachedCustomWorkflowIds || [];
+    if (!attached.includes(workflowId)) {
+      return res.status(400).json({
+        success: false,
+        message: 'This custom workflow is not attached to this lead'
+      });
+    }
+    const results = {
+      triggered: true,
+      workflowsTriggered: [],
+      errors: []
+    };
+    const { calculateScheduledDate } = await import('../Utils/cronScheduler.js');
+    for (const step of workflow.steps) {
+      try {
+        if (step.daysAfter === 0) {
+          await executeWorkflowStep(step, booking, workflow.workflowId, workflow.name, 'custom');
+          results.workflowsTriggered.push({
+            workflowId: workflow.workflowId,
+            workflowName: workflow.name,
+            step,
+            executed: true,
+            executedAt: new Date()
+          });
+        } else {
+          const executionDate = calculateScheduledDate(new Date(), step.daysAfter, step.channel, bookingId);
+          await scheduleWorkflowStep(bookingId, step, workflow.workflowId, executionDate, booking, workflow.name, 'custom');
+          results.workflowsTriggered.push({
+            workflowId: workflow.workflowId,
+            workflowName: workflow.name,
+            step,
+            scheduled: true,
+            scheduledFor: executionDate
+          });
+        }
+      } catch (error) {
+        console.error('Error processing custom workflow step:', error);
+        await logWorkflowExecution({
+          workflowId: workflow.workflowId,
+          workflowName: workflow.name,
+          triggerAction: 'custom',
+          bookingId,
+          booking,
+          step,
+          status: 'failed',
+          error: error.message,
+          scheduledFor: new Date()
+        });
+        results.errors.push({ step, error: error.message });
+      }
+    }
+    return res.status(200).json({
+      success: true,
+      message: 'Custom workflow triggered',
+      data: results
+    });
+  } catch (error) {
+    console.error('Error triggering custom workflow:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to trigger custom workflow',
       error: error.message
     });
   }

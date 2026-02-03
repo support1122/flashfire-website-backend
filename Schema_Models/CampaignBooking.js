@@ -65,6 +65,19 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  googleMeetCode: {
+    type: String,
+    default: null,
+    index: true
+  },
+  googleMeetUrl: {
+    type: String,
+    default: null
+  },
+  meetingVideoUrl: {
+    type: String,
+    default: null
+  },
   calendlyRescheduleLink: {
     type: String,
     default: null
@@ -309,6 +322,10 @@ export const CampaignBookingSchema = new mongoose.Schema({
       type: Date,
       default: null
     }
+  },
+  attachedCustomWorkflowIds: {
+    type: [String],
+    default: []
   }
 }, {
   timestamps: true

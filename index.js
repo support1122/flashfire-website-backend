@@ -1493,6 +1493,7 @@ app.post('/calendly-webhook', async (req, res) => {
         clientEmail: newBooking.clientEmail,
         clientPhone: newBooking.clientPhone,
         calendlyMeetLink: newBooking.calendlyMeetLink,
+        googleMeetUrl: newBooking.googleMeetUrl || null,
         rescheduleLink: newBooking.calendlyRescheduleLink // ✅ Log reschedule link
       });
 
@@ -1504,6 +1505,7 @@ app.post('/calendly-webhook', async (req, res) => {
         "Invitee Email": inviteeEmail,
         "Invitee Phone": inviteePhone || 'Not Provided',
         "Google Meet Link": meetLink,
+        "Real Google Meet Link": newBooking.googleMeetUrl || meetLink,
         "Reschedule Link": rescheduleLink || 'Not Provided', // ✅ Include in Discord
         "Meeting Time (Client US)": meetingTimeUS,
         "Meeting Time (Team India)": meetingTimeIndia,
@@ -1811,6 +1813,14 @@ app.listen(PORT || 4001, async () => {
     console.log('✅ [Server] WATI template cache pre-warmed');
   } catch (error) {
     console.warn('⚠️ [Server] Failed to pre-warm WATI template cache:', error.message);
+  }
+
+  try {
+    const { ensureDefaultCampaigns } = await import('./Scripts/seedDefaultCampaigns.js');
+    await ensureDefaultCampaigns();
+    console.log('✅ [Server] Default UTM campaigns (whatsapp, instagram) ensured');
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to seed default campaigns:', error.message);
   }
 });
 
