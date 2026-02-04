@@ -2,6 +2,7 @@ import dotenv from 'dotenv';
 import { DateTime } from 'luxon';
 import { DiscordConnect } from './DiscordConnect.js';
 import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
+import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 
 dotenv.config();
 
@@ -155,6 +156,35 @@ async function processDueDiscordMeetReminders() {
           }
         );
 
+        let booking = null;
+        if (reminder.bookingId) {
+          booking = await CampaignBookingModel.findOne({ bookingId: reminder.bookingId }).lean();
+        }
+        if (!booking && reminder.clientEmail) {
+          booking = await CampaignBookingModel.findOne({ clientEmail: reminder.clientEmail.toLowerCase().trim() })
+            .sort({ bookingCreatedAt: -1 })
+            .limit(1)
+            .lean();
+        }
+        if (booking) {
+          if (booking.bookingStatus === 'canceled') {
+            await ScheduledDiscordMeetReminderModel.updateOne(
+              { _id: reminder._id },
+              { status: 'cancelled', errorMessage: 'Cancelled: meeting canceled' }
+            );
+            continue;
+          }
+          const bookingMeetingTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : null;
+          const reminderMeetingTime = new Date(reminder.meetingStartISO).getTime();
+          if (bookingMeetingTime !== null && Math.abs(bookingMeetingTime - reminderMeetingTime) > 60000) {
+            await ScheduledDiscordMeetReminderModel.updateOne(
+              { _id: reminder._id },
+              { status: 'cancelled', errorMessage: 'Cancelled: meeting rescheduled' }
+            );
+            continue;
+          }
+        }
+
         const meetingStart = reminder.meetingStartISO;
         const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
 
@@ -275,7 +305,11 @@ export async function cancelDiscordMeetRemindersForMeeting({
       meetingStartISO: meetingStart,
     };
     if (clientEmail) {
-      filter.clientEmail = clientEmail;
+      const escaped = String(clientEmail).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      filter.$or = [
+        { clientEmail: new RegExp(`^${escaped}$`, 'i') },
+        { clientEmail: { $in: [null, ''] } },
+      ];
     }
 
     const updateResult = await ScheduledDiscordMeetReminderModel.updateMany(filter, {

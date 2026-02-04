@@ -1808,6 +1808,90 @@ export const getLeadsPaginated = async (req, res) => {
   }
 };
 
+export const getLeadsIds = async (req, res) => {
+  try {
+    const {
+      utmSource,
+      search,
+      fromDate,
+      toDate,
+      planName,
+      minAmount,
+      maxAmount,
+      status,
+      qualification,
+      limit = '5000'
+    } = req.query;
+
+    const limitNum = Math.min(5000, Math.max(1, parseInt(String(limit), 10) || 5000));
+    let matchQuery = {};
+    const normalizedPlanName = planName ? String(planName).toUpperCase() : null;
+    const qual = qualification ? String(qualification).toLowerCase() : null;
+    if (qual === 'mql' || qual === 'sql' || qual === 'converted') {
+      matchQuery.bookingStatus = {
+        $in: qual === 'mql' ? MQL_STATUSES : qual === 'sql' ? SQL_STATUSES : CONVERTED_STATUSES
+      };
+    } else if (status && status !== 'all') {
+      matchQuery.bookingStatus = status;
+    }
+    if (utmSource && utmSource !== 'all') matchQuery.utmSource = utmSource;
+    if (normalizedPlanName && normalizedPlanName !== 'ALL') matchQuery['paymentPlan.name'] = normalizedPlanName;
+    if (minAmount || maxAmount) {
+      matchQuery['paymentPlan.price'] = {};
+      if (minAmount) matchQuery['paymentPlan.price'].$gte = parseFloat(minAmount);
+      if (maxAmount) matchQuery['paymentPlan.price'].$lte = parseFloat(maxAmount);
+    }
+    if (fromDate || toDate) {
+      matchQuery.scheduledEventStartTime = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        matchQuery.scheduledEventStartTime.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        matchQuery.scheduledEventStartTime.$lte = to;
+      }
+    }
+    if (search && String(search).trim()) {
+      const escapedSearch = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      matchQuery.$or = [
+        { clientName: { $regex: escapedSearch, $options: 'i' } },
+        { clientEmail: { $regex: escapedSearch, $options: 'i' } },
+        { clientPhone: { $regex: escapedSearch, $options: 'i' } },
+        { utmSource: { $regex: escapedSearch, $options: 'i' } }
+      ];
+    }
+    if (!matchQuery.scheduledEventStartTime) {
+      matchQuery.scheduledEventStartTime = { $exists: true, $ne: null };
+    }
+
+    const idsPipeline = [
+      { $match: matchQuery },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: { _id: '$groupKey', bookingId: { $first: '$bookingId' } } },
+      { $project: { bookingId: 1, _id: 0 } },
+      { $limit: limitNum }
+    ];
+    const results = await CampaignBookingModel.aggregate(idsPipeline);
+    const bookingIds = results.map((r) => r.bookingId).filter(Boolean);
+
+    return res.status(200).json({
+      success: true,
+      data: { bookingIds, total: bookingIds.length }
+    });
+  } catch (error) {
+    console.error('Error fetching lead IDs:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch lead IDs',
+      error: error.message
+    });
+  }
+};
+
 export const updateBookingAmount = async (req, res) => {
   try {
     const { bookingId } = req.params;
@@ -2045,23 +2129,112 @@ export const getMeetingNotes = async (req, res) => {
 
 export const getMeetingLinks = async (req, res) => {
   try {
-    const bookings = await CampaignBookingModel.find(
-      { meetingVideoUrl: { $exists: true, $ne: null, $ne: '' } },
-      { clientName: 1, scheduledEventStartTime: 1, meetingVideoUrl: 1, bookingId: 1 }
-    )
-      .sort({ scheduledEventStartTime: -1 })
-      .lean();
+    const { fromDate, toDate, page = '1', limit = '20' } = req.query;
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
 
-    const data = bookings.map((b) => ({
-      bookingId: b.bookingId,
-      clientName: b.clientName || '—',
-      dateOfMeet: b.scheduledEventStartTime || null,
-      meetingVideoUrl: b.meetingVideoUrl
-    }));
+    const now = new Date();
+    const twoHoursMs = 2 * 60 * 60 * 1000;
+
+    const cutoff = new Date(now.getTime() - 15 * 60 * 1000);
+    const minMeetingDate = new Date('2026-02-03T00:00:00.000Z');
+    let gte = minMeetingDate;
+    if (fromDate) {
+      const from = new Date(String(fromDate));
+      from.setHours(0, 0, 0, 0);
+      if (from > minMeetingDate) gte = from;
+    }
+    const startTimeCond = { $exists: true, $ne: null, $gte: gte };
+    if (toDate) {
+      const to = new Date(String(toDate));
+      to.setHours(23, 59, 59, 999);
+      startTimeCond.$lte = to;
+    }
+    const startTimeCondWithCutoff = { ...startTimeCond, $lt: cutoff };
+    const match = {
+      bookingStatus: { $nin: ['canceled', 'rescheduled'] },
+      $or: [
+        {
+          scheduledEventEndTime: { $exists: true, $ne: null, $lt: now },
+          scheduledEventStartTime: startTimeCond
+        },
+        {
+          $and: [
+            { $or: [{ scheduledEventEndTime: null }, { scheduledEventEndTime: { $exists: false } }] },
+            { scheduledEventStartTime: startTimeCondWithCutoff }
+          ]
+        }
+      ]
+    };
+
+    const [bookings, totalCount, bdaAbsentResult] = await Promise.all([
+      CampaignBookingModel.find(
+        match,
+        { clientName: 1, scheduledEventStartTime: 1, scheduledEventEndTime: 1, meetingVideoUrl: 1, bookingId: 1 }
+      )
+        .sort({ scheduledEventStartTime: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      CampaignBookingModel.countDocuments(match),
+      CampaignBookingModel.aggregate([
+        { $match: match },
+        {
+          $addFields: {
+            meetEnd: {
+              $cond: {
+                if: { $and: [{ $ne: ['$scheduledEventEndTime', null] }, { $ne: ['$scheduledEventEndTime', undefined] }] },
+                then: { $toLong: '$scheduledEventEndTime' },
+                else: { $add: [{ $toLong: '$scheduledEventStartTime' }, 15 * 60 * 1000] }
+              }
+            }
+          }
+        },
+        {
+          $match: {
+            $expr: {
+              $and: [
+                { $lte: ['$meetEnd', now.getTime() - twoHoursMs] },
+                { $lte: [{ $strLenCP: { $trim: { input: { $ifNull: ['$meetingVideoUrl', ''] } } } }, 0] }
+              ]
+            }
+          }
+        },
+        { $count: 'bdaAbsentCount' }
+      ])
+    ]);
+    const bdaAbsentCount = bdaAbsentResult?.[0]?.bdaAbsentCount ?? 0;
+
+    const data = bookings.map((b) => {
+      const meetEnd = b.scheduledEventEndTime
+        ? new Date(b.scheduledEventEndTime).getTime()
+        : b.scheduledEventStartTime
+          ? new Date(b.scheduledEventStartTime).getTime() + 15 * 60 * 1000
+          : null;
+      const hasVideo = !!(b.meetingVideoUrl && String(b.meetingVideoUrl).trim());
+      const endedOver2hAgo = meetEnd !== null && now.getTime() - meetEnd >= twoHoursMs;
+      const bdaAbsent = endedOver2hAgo && !hasVideo;
+
+      return {
+        bookingId: b.bookingId,
+        clientName: b.clientName || '—',
+        dateOfMeet: b.scheduledEventStartTime || null,
+        meetingVideoUrl: hasVideo ? b.meetingVideoUrl : null,
+        bdaAbsent
+      };
+    });
 
     return res.status(200).json({
       success: true,
-      data
+      data,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limitNum)
+      },
+      bdaAbsentCount
     });
   } catch (error) {
     console.error('Error fetching meeting info:', error);
