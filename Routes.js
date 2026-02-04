@@ -47,6 +47,7 @@ import {
   updateBookingNotes,
   createBookingManually,
   getLeadsPaginated,
+  getLeadsIds,
   getMeetingLinks,
   updateBookingAmount,
   bulkCreateLeads,
@@ -315,6 +316,7 @@ export default function Routes(app) {
   app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
   app.get('/api/leads/paginated', requireCrmUser, requireCrmPermission('leads'), getLeadsPaginated);
+  app.get('/api/leads/ids', requireCrmUser, requireCrmPermission('leads'), getLeadsIds);
   app.get('/api/meeting-links', requireCrmUser, requireCrmPermission('meeting_links'), getMeetingLinks);
 
   app.get('/api/campaign-bookings/:bookingId/custom-workflows', requireCrmUser, getCustomWorkflowsForBooking);
