@@ -2028,9 +2028,32 @@ export const handlePaidClientFromMicroservice = async (req, res) => {
 
     // Prepare payment plan update
     const catalogPlan = PLAN_CATALOG[normalizedPlanName];
-    const paymentAmount = amountPaid ? parseFloat(amountPaid) : catalogPlan.price;
+
+    // Safely parse amountPaid (may be null/undefined/empty from external systems)
+    const parsedAmountPaid = amountPaid !== undefined && amountPaid !== null && amountPaid !== ''
+      ? parseFloat(amountPaid)
+      : NaN;
+    const hasValidNumericAmount = !Number.isNaN(parsedAmountPaid) && parsedAmountPaid > 0;
+
+    const paymentAmount = hasValidNumericAmount ? parsedAmountPaid : catalogPlan.price;
     const paymentCurrency = currency || catalogPlan.currency;
-    const displayPrice = amountPaidFormatted || catalogPlan.displayPrice || `${paymentCurrency}${paymentAmount}`;
+
+    // Some external systems may send strings like "null", "$null", "undefined"
+    // Treat those as invalid and fall back to our catalog/default formatting.
+    const normalizedFormatted = typeof amountPaidFormatted === 'string'
+      ? amountPaidFormatted.trim()
+      : '';
+    const lowerFormatted = normalizedFormatted.toLowerCase();
+    const isInvalidFormatted =
+      !normalizedFormatted ||
+      lowerFormatted === 'null' ||
+      lowerFormatted === 'undefined' ||
+      lowerFormatted === '$null' ||
+      lowerFormatted === '$undefined';
+
+    const displayPrice = !isInvalidFormatted
+      ? normalizedFormatted
+      : (catalogPlan.displayPrice || `${paymentCurrency}${paymentAmount}`);
 
     const paymentPlanUpdate = {
       name: normalizedPlanName,

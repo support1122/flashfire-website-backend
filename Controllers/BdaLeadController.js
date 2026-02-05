@@ -1,5 +1,9 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
+import { BdaClaimApprovalModel } from '../Schema_Models/BdaClaimApproval.js';
+import { CrmUserModel } from '../Schema_Models/CrmUser.js';
+import { sendBdaClaimApprovalEmail } from '../Utils/SendGridHelper.js';
+import crypto from 'crypto';
 
 // Current plan prices (fallback when basePriceUsd not in DB). Admin can override via BdaIncentiveConfig.basePriceUsd.
 const PLAN_CATALOG = {
@@ -134,10 +138,10 @@ export const claimLead = async (req, res) => {
         });
       }
       const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
-      const name = String(paymentPlan.name).toUpperCase();
-      if (allowed.includes(name)) {
+      const planKey = String(paymentPlan.name).toUpperCase();
+      if (allowed.includes(planKey)) {
         booking.paymentPlan = {
-          name,
+          name: planKey,
           price: amountPaid,
           currency: paymentPlan.currency || 'USD',
           displayPrice: paymentPlan.displayPrice || `$${amountPaid}`,
@@ -148,10 +152,57 @@ export const claimLead = async (req, res) => {
 
     await booking.save();
 
+    const existingPending = await BdaClaimApprovalModel.findOne({
+      bookingId: booking.bookingId,
+      status: 'pending'
+    }).lean();
+
+    let approval = existingPending;
+    if (!approval) {
+      const created = await BdaClaimApprovalModel.create({
+        bookingId: booking.bookingId,
+        bdaEmail: email,
+        bdaName: name,
+        clientName: booking.clientName,
+        clientEmail: booking.clientEmail,
+        clientPhone: booking.clientPhone,
+        paymentPlan: booking.paymentPlan
+          ? {
+              name: booking.paymentPlan.name,
+              price: booking.paymentPlan.price,
+              currency: booking.paymentPlan.currency,
+              displayPrice: booking.paymentPlan.displayPrice
+            }
+          : null,
+        status: 'pending'
+      });
+      approval = created.toObject();
+    }
+
+    let approvalStatus = 'pending';
+
+    try {
+      const admins = await CrmUserModel.find({
+        isActive: true,
+        permissions: { $in: ['bda_admin'] }
+      })
+        .select('email')
+        .lean();
+      const recipients = admins
+        .map((u) => String(u.email || '').trim())
+        .filter((e) => e);
+      await sendBdaClaimApprovalEmail(recipients, approval, booking);
+    } catch (emailError) {
+      console.error('Error sending BDA claim approval email:', emailError);
+    }
+
+    const bookingObject = booking.toObject();
+    bookingObject.bdaApprovalStatus = approvalStatus;
+
     return res.status(200).json({
       success: true,
       message: 'Lead claimed successfully',
-      data: booking
+      data: bookingObject
     });
   } catch (error) {
     console.error('Error claiming lead:', error);
@@ -453,7 +504,7 @@ export const getMyClaimedLeads = async (req, res) => {
 
     const paidMatch = { ...match, bookingStatus: 'paid', 'paymentPlan.name': { $in: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'] }, 'paymentPlan.price': { $gt: 0 } };
 
-    const [bookings, total, incentiveRows, paidBookings] = await Promise.all([
+    const [bookings, total, incentiveRows, paidBookings, approvals] = await Promise.all([
       CampaignBookingModel.find(match)
         .sort({ 'claimedBy.claimedAt': -1 })
         .skip(skip)
@@ -461,8 +512,34 @@ export const getMyClaimedLeads = async (req, res) => {
         .lean(),
       CampaignBookingModel.countDocuments(match),
       BdaIncentiveConfigModel.find({}).lean(),
-      CampaignBookingModel.find(paidMatch).select('paymentPlan').lean()
+      CampaignBookingModel.find(paidMatch).select('paymentPlan').lean(),
+      BdaClaimApprovalModel.find({
+        bookingId: { $in: [] }
+      }).lean()
     ]);
+
+    const bookingIds = bookings.map((b) => b.bookingId);
+
+    const filteredApprovals = bookingIds.length
+      ? await BdaClaimApprovalModel.find({
+          bookingId: { $in: bookingIds },
+          bdaEmail: email.toLowerCase().trim()
+        })
+          .sort({ createdAt: -1 })
+          .lean()
+      : [];
+
+    const approvalByBookingId = new Map();
+    filteredApprovals.forEach((a) => {
+      if (!approvalByBookingId.has(a.bookingId)) {
+        approvalByBookingId.set(a.bookingId, a.status);
+      }
+    });
+
+    const enrichedBookings = bookings.map((b) => {
+      const status = approvalByBookingId.get(b.bookingId) || null;
+      return status ? { ...b, bdaApprovalStatus: status } : b;
+    });
 
     const configByPlan = new Map();
     incentiveRows.forEach((r) => {
@@ -485,7 +562,7 @@ export const getMyClaimedLeads = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      data: bookings,
+      data: enrichedBookings,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -569,18 +646,38 @@ export const getBdaLeadsByEmail = async (req, res) => {
     })
       .sort({ 'claimedBy.claimedAt': -1 })
       .lean();
+    const bookingIds = bookings.map((b) => b.bookingId);
+    let enriched = bookings;
+    if (bookingIds.length) {
+      const approvals = await BdaClaimApprovalModel.find({
+        bookingId: { $in: bookingIds },
+        bdaEmail: email.toLowerCase().trim()
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+      const approvalByBookingId = new Map();
+      approvals.forEach((a) => {
+        if (!approvalByBookingId.has(a.bookingId)) {
+          approvalByBookingId.set(a.bookingId, { status: a.status, approvalId: String(a._id) });
+        }
+      });
+      enriched = bookings.map((b) => {
+        const entry = approvalByBookingId.get(b.bookingId) || null;
+        return entry ? { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId } : b;
+      });
+    }
 
-    const bdaInfo = bookings.length > 0 ? {
-      email: bookings[0].claimedBy.email,
-      name: bookings[0].claimedBy.name,
-      claimedAt: bookings[0].claimedBy.claimedAt
+    const bdaInfo = enriched.length > 0 ? {
+      email: enriched[0].claimedBy.email,
+      name: enriched[0].claimedBy.name,
+      claimedAt: enriched[0].claimedBy.claimedAt
     } : null;
 
     return res.status(200).json({
       success: true,
       data: {
         bda: bdaInfo,
-        leads: bookings
+        leads: enriched
       }
     });
   } catch (error) {
@@ -588,6 +685,163 @@ export const getBdaLeadsByEmail = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch BDA leads',
+      error: error.message
+    });
+  }
+};
+
+export const getPendingBdaApprovalsForCrm = async (req, res) => {
+  try {
+    const approvals = await BdaClaimApprovalModel.find({ status: 'pending' })
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    const bookingIds = approvals.map((a) => a.bookingId);
+    const bookings = await CampaignBookingModel.find({ bookingId: { $in: bookingIds } })
+      .select('bookingId clientName clientEmail clientPhone paymentPlan')
+      .lean();
+    const bookingMap = new Map();
+    bookings.forEach((b) => {
+      bookingMap.set(b.bookingId, b);
+    });
+
+    const data = approvals.map((a) => {
+      const booking = bookingMap.get(a.bookingId) || {};
+      return {
+        approvalId: String(a._id),
+        bookingId: a.bookingId,
+        bdaEmail: a.bdaEmail,
+        bdaName: a.bdaName,
+        clientName: a.clientName || booking.clientName || '',
+        clientEmail: a.clientEmail || booking.clientEmail || '',
+        clientPhone: a.clientPhone || booking.clientPhone || '',
+        paymentPlan: a.paymentPlan || booking.paymentPlan || null,
+        createdAt: a.createdAt
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      data
+    });
+  } catch (error) {
+    console.error('Error fetching pending BDA approvals for CRM:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch pending approvals',
+      error: error.message
+    });
+  }
+};
+
+function computeApprovalToken(approvalId, bookingId) {
+  const secret =
+    process.env.CRM_JWT_SECRET ||
+    process.env.CRM_ADMIN_PASSWORD ||
+    'dev_only_insecure_crm_jwt_secret';
+  const payload = `${approvalId}:${bookingId}`;
+  return crypto.createHash('sha256').update(payload + secret).digest('hex');
+}
+
+async function applyBdaApprovalAction(approvalId, action) {
+  const approval = await BdaClaimApprovalModel.findById(approvalId);
+  if (!approval) {
+    return { ok: false, reason: 'not_found' };
+  }
+  if (approval.status !== 'pending') {
+    return { ok: false, reason: 'already_processed', status: approval.status };
+  }
+  const booking = await CampaignBookingModel.findOne({ bookingId: approval.bookingId });
+  if (!booking) {
+    approval.status = 'denied';
+    await approval.save();
+    return { ok: false, reason: 'booking_missing' };
+  }
+  if (action === 'approve') {
+    approval.status = 'approved';
+    await approval.save();
+    return { ok: true, approval, booking };
+  }
+  if (action === 'deny') {
+    booking.claimedBy = { email: null, name: null, claimedAt: null };
+    await booking.save();
+    approval.status = 'denied';
+    await approval.save();
+    return { ok: true, approval, booking };
+  }
+  return { ok: false, reason: 'invalid_action' };
+}
+
+export const handleBdaApprovalEmailAction = async (req, res) => {
+  try {
+    const approvalId = String(req.params.approvalId || '').trim();
+    const token = String(req.query.token || '').trim();
+    const action = String(req.query.action || '').trim();
+    if (!approvalId || !token || !action) {
+      return res.status(400).send('Invalid approval link');
+    }
+    const approval = await BdaClaimApprovalModel.findById(approvalId).lean();
+    if (!approval) {
+      return res.status(404).send('Approval not found');
+    }
+    const expected = computeApprovalToken(String(approval._id), approval.bookingId);
+    if (token !== expected) {
+      return res.status(403).send('Invalid or expired approval token');
+    }
+    const result = await applyBdaApprovalAction(approvalId, action);
+    if (!result.ok) {
+      if (result.reason === 'already_processed') {
+        return res.redirect(302, (process.env.CRM_FRONTEND_URL || 'https://flashfire-crm.vercel.app') + '/admin/analysis');
+      }
+      return res.status(400).send('Unable to process approval');
+    }
+    return res.redirect(302, (process.env.CRM_FRONTEND_URL || 'https://flashfire-crm.vercel.app') + '/admin/analysis');
+  } catch (error) {
+    console.error('Error handling BDA approval email action:', error);
+    return res.status(500).send('Server error');
+  }
+};
+
+export const adminResolveBdaApproval = async (req, res) => {
+  try {
+    const approvalId = String(req.params.approvalId || '').trim();
+    const actionRaw = String(req.body?.action || '').trim();
+    if (!approvalId || !actionRaw) {
+      return res.status(400).json({
+        success: false,
+        message: 'approvalId and action are required'
+      });
+    }
+    const allowed = ['approved', 'denied'];
+    if (!allowed.includes(actionRaw)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid action. Must be one of: ${allowed.join(', ')}`
+      });
+    }
+    const mappedAction = actionRaw === 'approved' ? 'approve' : 'deny';
+    const result = await applyBdaApprovalAction(approvalId, mappedAction);
+    if (!result.ok) {
+      return res.status(400).json({
+        success: false,
+        message: 'Unable to process approval',
+        reason: result.reason || null
+      });
+    }
+    return res.status(200).json({
+      success: true,
+      data: {
+        approvalId,
+        status: mappedAction === 'approve' ? 'approved' : 'denied',
+        bookingId: result.booking?.bookingId || null
+      }
+    });
+  } catch (error) {
+    console.error('Error resolving BDA approval (admin):', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to resolve approval',
       error: error.message
     });
   }

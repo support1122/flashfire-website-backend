@@ -1,5 +1,6 @@
 import sgMail from "@sendgrid/mail";
 import dotenv from "dotenv";
+import crypto from "crypto";
 dotenv.config();
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
@@ -100,4 +101,61 @@ export async function sendCrmOtpEmail(to, otp, name) {
   };
 
   await sgMail.send(msg);
+}
+
+export async function sendBdaClaimApprovalEmail(recipients, approval, booking) {
+  const fallback = process.env.CRM_ADMIN_NOTIFICATION_EMAIL || process.env.SENDGRID_FROM_EMAIL;
+  const list = Array.isArray(recipients) ? recipients.filter((e) => e) : [];
+  if (!list.length && !fallback) return;
+  const apiBase = process.env.CRM_API_BASE_URL || "https://api.flashfirejobs.com";
+  const dashboardBase = process.env.CRM_FRONTEND_URL || "https://flashfire-crm.vercel.app";
+  const secret = process.env.CRM_JWT_SECRET || process.env.CRM_ADMIN_PASSWORD || "dev_only_insecure_crm_jwt_secret";
+  const payload = `${approval._id}:${approval.bookingId}`;
+  const token = crypto.createHash("sha256").update(payload + secret).digest("hex");
+  const approveUrl = `${apiBase}/api/bda/approvals/${approval._id}/email-action?action=approve&token=${token}`;
+  const denyUrl = `${apiBase}/api/bda/approvals/${approval._id}/email-action?action=deny&token=${token}`;
+  const viewUrl = `${dashboardBase}/admin/analysis`;
+  const subject = `BDA claimed lead: ${booking.clientName || booking.clientEmail || booking.bookingId}`;
+  const text = `A BDA has claimed a lead.\n\nBDA: ${approval.bdaName} (${approval.bdaEmail})\nClient: ${booking.clientName || ""} (${booking.clientEmail || ""})\nAmount: ${booking.paymentPlan?.displayPrice || booking.paymentPlan?.price || ""}\n\nApprove: ${approveUrl}\nDeny: ${denyUrl}\nView: ${viewUrl}`;
+  const html = `
+    <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; max-width:640px; margin:0 auto; padding:20px; background:#0f172a;">
+      <div style="background:#0b1120; color:#e5e7eb; padding:18px 20px; border-radius:14px 14px 0 0; border-bottom:1px solid #1f2937;">
+        <div style="font-size:13px; letter-spacing:0.08em; text-transform:uppercase; opacity:0.9;">FlashFire CRM</div>
+        <div style="font-size:22px; font-weight:800; margin-top:6px;">New BDA claim awaiting approval</div>
+      </div>
+      <div style="background:#f9fafb; padding:20px; border-radius:0 0 14px 14px;">
+        <p style="margin:0 0 10px 0; font-size:15px; color:#111827;">A BDA has claimed a lead and is waiting for your approval.</p>
+        <div style="margin:14px 0; padding:14px; border-radius:10px; border:1px solid #e5e7eb; background:white;">
+          <div style="font-size:13px; font-weight:600; color:#4b5563; margin-bottom:6px;">BDA</div>
+          <div style="font-size:15px; color:#111827;">${approval.bdaName} <span style="color:#6b7280;">(${approval.bdaEmail})</span></div>
+          <div style="margin-top:10px; font-size:13px; font-weight:600; color:#4b5563; margin-bottom:4px;">Client</div>
+          <div style="font-size:15px; color:#111827;">${booking.clientName || ""}</div>
+          <div style="font-size:13px; color:#6b7280;">${booking.clientEmail || ""}${booking.clientPhone ? " · " + booking.clientPhone : ""}</div>
+          <div style="margin-top:10px; font-size:13px; font-weight:600; color:#4b5563; margin-bottom:4px;">Plan and amount</div>
+          <div style="font-size:15px; color:#111827;">${booking.paymentPlan?.name || ""} ${
+            booking.paymentPlan?.displayPrice || (booking.paymentPlan?.price != null ? "$" + booking.paymentPlan.price : "")
+          }</div>
+        </div>
+        <div style="margin-top:18px; display:flex; flex-wrap:wrap; gap:10px;">
+          <a href="${approveUrl}" style="flex:1 1 auto; text-align:center; padding:12px 16px; background:#22c55e; color:white; text-decoration:none; border-radius:999px; font-weight:600; font-size:14px;">Approve</a>
+          <a href="${denyUrl}" style="flex:1 1 auto; text-align:center; padding:12px 16px; background:#ef4444; color:white; text-decoration:none; border-radius:999px; font-weight:600; font-size:14px;">Deny</a>
+          <a href="${viewUrl}" style="flex:1 1 100%; text-align:center; padding:10px 14px; background:#0f172a; color:#e5e7eb; text-decoration:none; border-radius:10px; font-weight:500; font-size:13px; margin-top:4px;">Open in CRM</a>
+        </div>
+        <p style="margin-top:18px; font-size:11px; color:#6b7280;">If the buttons do not work, you can copy-paste the following links into your browser:</p>
+        <p style="margin:4px 0; font-size:11px; color:#9ca3af; word-break:break-all;">Approve: ${approveUrl}</p>
+        <p style="margin:4px 0; font-size:11px; color:#9ca3af; word-break:break-all;">Deny: ${denyUrl}</p>
+      </div>
+    </div>
+  `;
+  const toList = list.length ? list : [fallback];
+  for (const to of toList) {
+    const msg = {
+      to,
+      from: process.env.SENDGRID_FROM_EMAIL,
+      subject,
+      text,
+      html
+    };
+    await sgMail.send(msg);
+  }
 }
