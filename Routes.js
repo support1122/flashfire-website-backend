@@ -122,7 +122,10 @@ import {
   getMyClaimedLeads,
   getBdaLeadsByEmail,
   getMyBdaPerformance,
-  adminUnclaimLead
+  adminUnclaimLead,
+  getPendingBdaApprovalsForCrm,
+  handleBdaApprovalEmailAction,
+  adminResolveBdaApproval
 } from './Controllers/BdaLeadController.js';
 import { getIncentiveConfig, saveIncentiveConfig } from './Controllers/BdaIncentiveController.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
@@ -241,6 +244,10 @@ export default function Routes(app) {
   app.get('/api/crm/admin/bda-incentives/config', requireCrmAdmin, getIncentiveConfig);
   app.put('/api/crm/admin/bda-incentives/config', requireCrmAdmin, saveIncentiveConfig);
   app.get('/api/bda/incentives/config', requireCrmUser, getIncentiveConfig);
+  app.get('/api/crm/bda-approvals/pending', requireCrmUser, requireCrmPermission('bda_admin'), getPendingBdaApprovalsForCrm);
+  app.get('/api/bda/approvals/:approvalId/email-action', handleBdaApprovalEmailAction);
+  app.get('/api/crm/admin/bda-approvals/pending', requireCrmAdmin, getPendingBdaApprovalsForCrm);
+  app.post('/api/crm/admin/bda-approvals/:approvalId/decision', requireCrmAdmin, adminResolveBdaApproval);
   
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);

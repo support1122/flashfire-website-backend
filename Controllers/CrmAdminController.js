@@ -28,7 +28,7 @@ export async function crmAdminLogin(req, res) {
     const token = jwt.sign(
       { role: 'crm_admin' },
       getCrmJwtSecret(),
-      { expiresIn: '12h' }
+      { expiresIn: '30d' }
     );
 
     return res.status(200).json({ success: true, token });

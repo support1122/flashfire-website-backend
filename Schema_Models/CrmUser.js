@@ -10,6 +10,7 @@ const CRM_PERMISSION_KEYS = [
   'leads',
   'claim_leads',
   'meeting_links',
+  'bda_admin',
 ];
 
 const CrmUserSchema = new mongoose.Schema(

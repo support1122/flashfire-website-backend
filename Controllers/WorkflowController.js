@@ -940,15 +940,28 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
       } else if (templateName === 'plan_followup_utility_01dd' || step.templateId === 'plan_followup_utility_01dd') {
         // Handle plan_followup_utility_01dd template
         // Use plan details from booking.paymentPlan (from status update) or templateConfig
-        const planName = booking.paymentPlan?.name || step.templateConfig?.planName || 'PRIME';
-        const planPrice = booking.paymentPlan?.price || step.templateConfig?.planAmount || 0;
+        // Default safely to PROFESSIONAL plan amount ($349) when nothing valid is available
+        const DEFAULT_PLAN_PRICE = 349;
+
+        const planName = booking.paymentPlan?.name || step.templateConfig?.planName || 'PROFESSIONAL';
+        const rawPlanPrice = booking.paymentPlan?.price ?? step.templateConfig?.planAmount;
+        const planPrice = typeof rawPlanPrice === 'number' && rawPlanPrice > 0 ? rawPlanPrice : DEFAULT_PLAN_PRICE;
         
-        // Format plan amount - prefer displayPrice, otherwise format price
+        // Format plan amount - prefer displayPrice, otherwise format price with safe fallback
         let planAmount = booking.paymentPlan?.displayPrice;
-        if (!planAmount && planPrice > 0) {
+        const normalizedDisplay = typeof planAmount === 'string' ? planAmount.trim() : '';
+        const lowerDisplay = normalizedDisplay.toLowerCase();
+        const hasValidDisplay =
+          !!normalizedDisplay &&
+          lowerDisplay !== 'null' &&
+          lowerDisplay !== 'undefined' &&
+          lowerDisplay !== '$null' &&
+          lowerDisplay !== '$undefined';
+
+        if (!hasValidDisplay) {
           planAmount = `$${planPrice}`;
-        } else if (!planAmount) {
-          planAmount = '$0';
+        } else {
+          planAmount = normalizedDisplay;
         }
         
         parameters = [
