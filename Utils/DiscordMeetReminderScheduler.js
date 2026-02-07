@@ -278,13 +278,15 @@ export function stopDiscordMeetReminderScheduler() {
 
 /**
  * Cancel Discord meeting reminders for a given meeting (by start time).
+ * Uses same identifier logic as call reminder: meeting time (+ optional clientEmail/clientName).
  * Used when a meeting is rescheduled (old time) or canceled via Calendly webhook.
- * @param {{ meetingStartISO: string|Date, clientEmail?: string }} options
+ * @param {{ meetingStartISO: string|Date, clientEmail?: string, clientName?: string }} options
  * @returns {{ success: boolean, cancelledCount: number }}
  */
 export async function cancelDiscordMeetRemindersForMeeting({
   meetingStartISO,
   clientEmail = null,
+  clientName = null,
 }) {
   try {
     if (!meetingStartISO) {
@@ -300,10 +302,18 @@ export async function cancelDiscordMeetRemindersForMeeting({
       return { success: true, cancelledCount: 0 };
     }
 
-    const filter = {
+    // Use same identifier as call scheduler: match by meeting time (1-min window to avoid ms/timezone quirks)
+    const startOfMinute = new Date(meetingStart.getTime());
+    startOfMinute.setSeconds(0, 0);
+    const endOfMinute = new Date(startOfMinute.getTime() + 60 * 1000);
+
+    const baseFilter = {
       status: { $in: ['pending', 'processing'] },
-      meetingStartISO: meetingStart,
+      meetingStartISO: { $gte: startOfMinute, $lt: endOfMinute },
     };
+
+    // Optional: narrow by clientEmail (same as we store from Calendly)
+    const filter = { ...baseFilter };
     if (clientEmail) {
       const escaped = String(clientEmail).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       filter.$or = [
@@ -312,18 +322,45 @@ export async function cancelDiscordMeetRemindersForMeeting({
       ];
     }
 
-    const updateResult = await ScheduledDiscordMeetReminderModel.updateMany(filter, {
+    let updateResult = await ScheduledDiscordMeetReminderModel.updateMany(filter, {
       $set: {
         status: 'cancelled',
         errorMessage: 'Cancelled: meeting rescheduled or canceled',
       },
     });
 
-    const cancelledCount = updateResult.modifiedCount || 0;
+    let cancelledCount = updateResult.modifiedCount || 0;
+
+    // Fallback: if nothing cancelled and we have clientName, try matching by name (e.g. payload email missing/different)
+    if (cancelledCount === 0 && clientName && String(clientName).trim()) {
+      const nameFilter = {
+        ...baseFilter,
+        status: { $in: ['pending', 'processing'] },
+      };
+      const escapedName = String(clientName).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      nameFilter.clientName = new RegExp(`^${escapedName}$`, 'i');
+
+      const fallbackResult = await ScheduledDiscordMeetReminderModel.updateMany(nameFilter, {
+        $set: {
+          status: 'cancelled',
+          errorMessage: 'Cancelled: meeting rescheduled or canceled (matched by client name)',
+        },
+      });
+      cancelledCount = fallbackResult.modifiedCount || 0;
+      if (cancelledCount > 0) {
+        console.log('✅ [DiscordMeetReminder] Cancelled BDA reminder(s) via clientName fallback', {
+          clientName,
+          meetingStartISO: meetingStart.toISOString(),
+          cancelledCount,
+        });
+      }
+    }
+
     if (cancelledCount > 0) {
-      console.log('✅ [DiscordMeetReminder] Cancelled Discord meet reminder(s)', {
+      console.log('✅ [DiscordMeetReminder] Cancelled Discord BDA meet reminder(s)', {
         meetingStartISO: meetingStart.toISOString(),
         clientEmail: clientEmail || 'any',
+        clientName: clientName || 'any',
         cancelledCount,
       });
     }
