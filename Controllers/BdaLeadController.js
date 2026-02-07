@@ -13,6 +13,29 @@ const PLAN_CATALOG = {
   EXECUTIVE: { price: 599 }
 };
 
+/** Compute prorated incentive (INR) for one line. configByPlan: Map(planName -> { basePriceUsd, incentivePerLeadInr }). */
+function incentiveForLine(configByPlan, planName, amount, _currency) {
+  if (!planName || !amount || amount <= 0) return 0;
+  const config = configByPlan.get(planName);
+  if (!config) return 0;
+  const base = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
+  const ratio = Math.min(1, amount / base);
+  return config.incentivePerLeadInr * ratio;
+}
+
+/** Total incentive (INR) for a paid booking: from paymentBreakdown (sum per line) or single paymentPlan. */
+function incentiveForBooking(configByPlan, booking) {
+  if (Array.isArray(booking.paymentBreakdown) && booking.paymentBreakdown.length > 0) {
+    return booking.paymentBreakdown.reduce(
+      (sum, line) => sum + incentiveForLine(configByPlan, line.planName, line.amount, line.currency),
+      0
+    );
+  }
+  const planName = booking.paymentPlan?.name;
+  const amount = Number(booking.paymentPlan?.price);
+  return incentiveForLine(configByPlan, planName, amount);
+}
+
 export const getAvailableLeads = async (req, res) => {
   try {
     const bookings = await CampaignBookingModel.find({
@@ -129,7 +152,40 @@ export const claimLead = async (req, res) => {
     };
 
     const paymentPlan = req.body?.paymentPlan;
-    if (paymentPlan && paymentPlan.name) {
+    const paymentBreakdown = req.body?.paymentBreakdown;
+    const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
+
+    if (Array.isArray(paymentBreakdown) && paymentBreakdown.length > 0) {
+      const lines = [];
+      let totalAmount = 0;
+      for (const line of paymentBreakdown) {
+        const planKey = String(line.planName || '').toUpperCase();
+        const amount = Number(line.amount);
+        if (!allowed.includes(planKey) || amount <= 0 || Number.isNaN(amount)) continue;
+        lines.push({
+          planName: planKey,
+          amount,
+          currency: line.currency || 'USD'
+        });
+        totalAmount += amount;
+      }
+      if (lines.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'Payment breakdown must have at least one valid line (plan + amount > 0)'
+        });
+      }
+      booking.paymentBreakdown = lines;
+      const currency = lines[0].currency || 'USD';
+      const symbol = currency === 'CAD' ? 'CA$' : '$';
+      booking.paymentPlan = {
+        name: lines[0].planName,
+        price: totalAmount,
+        currency,
+        displayPrice: paymentPlan?.displayPrice || `${symbol}${totalAmount}`,
+        selectedAt: new Date()
+      };
+    } else if (paymentPlan && paymentPlan.name) {
       const amountPaid = Number(paymentPlan.price);
       if (amountPaid <= 0 || Number.isNaN(amountPaid)) {
         return res.status(400).json({
@@ -137,7 +193,6 @@ export const claimLead = async (req, res) => {
           message: 'Amount paid by client must be greater than 0'
         });
       }
-      const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
       const planKey = String(paymentPlan.name).toUpperCase();
       if (allowed.includes(planKey)) {
         booking.paymentPlan = {
@@ -147,6 +202,7 @@ export const claimLead = async (req, res) => {
           displayPrice: paymentPlan.displayPrice || `$${amountPaid}`,
           selectedAt: new Date()
         };
+        booking.paymentBreakdown = undefined;
       }
     }
 
@@ -231,6 +287,7 @@ export const updateLeadDetails = async (req, res) => {
       clientPhone,
       scheduledEventStartTime,
       paymentPlan,
+      paymentBreakdown,
       meetingNotes,
       anythingToKnow
     } = req.body;
@@ -254,9 +311,35 @@ export const updateLeadDetails = async (req, res) => {
     if (clientName) booking.clientName = clientName;
     if (clientPhone !== undefined) booking.clientPhone = clientPhone;
     if (scheduledEventStartTime) booking.scheduledEventStartTime = new Date(scheduledEventStartTime);
-    if (paymentPlan) {
+    const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
+    if (Array.isArray(paymentBreakdown) && paymentBreakdown.length > 0) {
+      const lines = [];
+      let totalAmount = 0;
+      for (const line of paymentBreakdown) {
+        const planKey = String(line.planName || '').toUpperCase();
+        const amount = Number(line.amount);
+        if (!allowed.includes(planKey) || amount <= 0 || Number.isNaN(amount)) continue;
+        lines.push({
+          planName: planKey,
+          amount,
+          currency: line.currency || 'USD'
+        });
+        totalAmount += amount;
+      }
+      if (lines.length > 0) {
+        booking.paymentBreakdown = lines;
+        const currency = lines[0].currency || 'USD';
+        const symbol = currency === 'CAD' ? 'CA$' : '$';
+        booking.paymentPlan = {
+          name: lines[0].planName,
+          price: totalAmount,
+          currency,
+          displayPrice: paymentPlan?.displayPrice || `${symbol}${totalAmount}`,
+          selectedAt: new Date()
+        };
+      }
+    } else if (paymentPlan) {
       const name = String(paymentPlan.name || '').toUpperCase();
-      const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
       const amountPaid = Number(paymentPlan.price);
       if (allowed.includes(name)) {
         if (amountPaid <= 0 || Number.isNaN(amountPaid)) {
@@ -272,6 +355,7 @@ export const updateLeadDetails = async (req, res) => {
           displayPrice: paymentPlan.displayPrice || `$${amountPaid}`,
           selectedAt: new Date()
         };
+        booking.paymentBreakdown = undefined;
       }
     }
     if (meetingNotes !== undefined) booking.meetingNotes = meetingNotes;
@@ -384,7 +468,7 @@ export const getBdaAnalysis = async (req, res) => {
       'paymentPlan.name': { $in: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'] },
       'paymentPlan.price': { $gt: 0 }
     })
-      .select('claimedBy.email paymentPlan.name paymentPlan.price')
+      .select('claimedBy.email paymentPlan paymentBreakdown')
       .lean();
 
     const incentiveRows = await BdaIncentiveConfigModel.find({}).lean();
@@ -400,15 +484,8 @@ export const getBdaAnalysis = async (req, res) => {
     for (const b of paidBookings) {
       const email = b.claimedBy?.email;
       if (!email) continue;
-      const planName = b.paymentPlan?.name;
-      const amountPaid = Number(b.paymentPlan?.price);
-      if (!planName || !amountPaid || amountPaid <= 0) continue;
-      const config = configByPlan.get(planName);
-      if (!config) continue;
-      const currentPlanPrice = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
-      const paymentRatio = Math.min(1, amountPaid / currentPlanPrice);
-      const prorated = config.incentivePerLeadInr * paymentRatio;
-      incentiveByBda.set(email, (incentiveByBda.get(email) ?? 0) + prorated);
+      const inc = incentiveForBooking(configByPlan, b);
+      if (inc > 0) incentiveByBda.set(email, (incentiveByBda.get(email) ?? 0) + inc);
     }
 
     bdaPerformance.forEach((bda) => {
@@ -512,7 +589,7 @@ export const getMyClaimedLeads = async (req, res) => {
         .lean(),
       CampaignBookingModel.countDocuments(match),
       BdaIncentiveConfigModel.find({}).lean(),
-      CampaignBookingModel.find(paidMatch).select('paymentPlan').lean(),
+      CampaignBookingModel.find(paidMatch).select('paymentPlan paymentBreakdown').lean(),
       BdaClaimApprovalModel.find({
         bookingId: { $in: [] }
       }).lean()
@@ -550,14 +627,7 @@ export const getMyClaimedLeads = async (req, res) => {
     });
     let totalIncentivesForFilter = 0;
     for (const b of paidBookings) {
-      const planName = b.paymentPlan?.name;
-      const amountPaid = Number(b.paymentPlan?.price);
-      if (!planName || !amountPaid || amountPaid <= 0) continue;
-      const config = configByPlan.get(planName);
-      if (!config) continue;
-      const currentPlanPrice = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
-      const paymentRatio = Math.min(1, amountPaid / currentPlanPrice);
-      totalIncentivesForFilter += config.incentivePerLeadInr * paymentRatio;
+      totalIncentivesForFilter += incentiveForBooking(configByPlan, b);
     }
 
     return res.status(200).json({
