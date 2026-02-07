@@ -151,6 +151,16 @@ export const CampaignBookingSchema = new mongoose.Schema({
       default: null
     }
   },
+  // Primary client + referral lines: each { planName, amount, currency }. Incentive = sum per line.
+  paymentBreakdown: [{
+    planName: {
+      type: String,
+      enum: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'],
+      required: true
+    },
+    amount: { type: Number, required: true, min: 0 },
+    currency: { type: String, default: 'USD' }
+  }],
   // Plan details for finalkk template workflow
   planDetails: {
     days: {
