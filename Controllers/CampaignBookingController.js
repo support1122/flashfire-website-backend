@@ -737,7 +737,8 @@ export const updateBookingStatus = async (req, res) => {
           try {
             const discordResult = await cancelDiscordMeetRemindersForMeeting({
               meetingStartISO: existingBooking.scheduledEventStartTime,
-              clientEmail: existingBooking.clientEmail
+              clientEmail: existingBooking.clientEmail,
+              clientName: existingBooking.clientName || null,
             });
             if (discordResult.success && discordResult.cancelledCount > 0) {
               cancellationResults.discordMeetReminders.cancelled = discordResult.cancelledCount;
