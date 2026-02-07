@@ -611,7 +611,7 @@ export const getBookingById = async (req, res) => {
 export const updateBookingStatus = async (req, res) => {
   try {
     const { bookingId } = req.params;
-    const { status, plan, planDetails } = req.body;
+    const { status, plan, planDetails, paymentBreakdown } = req.body;
 
     const validStatuses = ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid', 'ignored'];
 
@@ -642,30 +642,61 @@ export const updateBookingStatus = async (req, res) => {
       };
     }
 
+    let paymentBreakdownToSet = null;
+    const allowedPlans = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
     if (status === 'paid') {
-      const normalizedPlanName = plan?.name ? String(plan.name).toUpperCase() : null;
-      if (!normalizedPlanName || !PLAN_CATALOG[normalizedPlanName]) {
-        return res.status(400).json({
-          success: false,
-          message: 'A valid plan is required when marking a booking as paid'
-        });
+      if (Array.isArray(paymentBreakdown) && paymentBreakdown.length > 0) {
+        const lines = [];
+        let totalAmount = 0;
+        for (const line of paymentBreakdown) {
+          const planKey = String(line.planName || '').toUpperCase();
+          const amount = Number(line.amount);
+          if (!allowedPlans.includes(planKey) || amount <= 0 || Number.isNaN(amount)) continue;
+          lines.push({
+            planName: planKey,
+            amount,
+            currency: line.currency || 'USD'
+          });
+          totalAmount += amount;
+        }
+        if (lines.length > 0) {
+          const currency = lines[0].currency || 'USD';
+          const symbol = currency === 'CAD' ? 'CA$' : '$';
+          paymentPlanUpdate = {
+            name: lines[0].planName,
+            price: totalAmount,
+            currency,
+            displayPrice: plan?.displayPrice || `${symbol}${totalAmount}`,
+            selectedAt: new Date()
+          };
+          paymentBreakdownToSet = lines;
+        }
       }
-      const amountPaid = plan?.price != null ? Number(plan.price) : PLAN_CATALOG[normalizedPlanName].price;
-      if (amountPaid <= 0 || Number.isNaN(amountPaid)) {
-        return res.status(400).json({
-          success: false,
-          message: 'Amount paid by client must be greater than 0'
-        });
+      if (!paymentPlanUpdate) {
+        const normalizedPlanName = plan?.name ? String(plan.name).toUpperCase() : null;
+        if (!normalizedPlanName || !PLAN_CATALOG[normalizedPlanName]) {
+          return res.status(400).json({
+            success: false,
+            message: 'A valid plan is required when marking a booking as paid'
+          });
+        }
+        const amountPaid = plan?.price != null ? Number(plan.price) : PLAN_CATALOG[normalizedPlanName].price;
+        if (amountPaid <= 0 || Number.isNaN(amountPaid)) {
+          return res.status(400).json({
+            success: false,
+            message: 'Amount paid by client must be greater than 0'
+          });
+        }
+        const catalogPlan = PLAN_CATALOG[normalizedPlanName];
+        paymentPlanUpdate = {
+          name: normalizedPlanName,
+          price: amountPaid,
+          currency: plan?.currency || catalogPlan.currency,
+          displayPrice: plan?.displayPrice || `$${amountPaid}`,
+          selectedAt: new Date()
+        };
+        paymentBreakdownToSet = []; // single plan = no breakdown
       }
-
-      const catalogPlan = PLAN_CATALOG[normalizedPlanName];
-      paymentPlanUpdate = {
-        name: normalizedPlanName,
-        price: amountPaid,
-        currency: plan?.currency || catalogPlan.currency,
-        displayPrice: plan?.displayPrice || `$${amountPaid}`,
-        selectedAt: new Date()
-      };
     }
 
     const updatePayload = {
@@ -674,6 +705,9 @@ export const updateBookingStatus = async (req, res) => {
 
     if (paymentPlanUpdate) {
       updatePayload.paymentPlan = paymentPlanUpdate;
+    }
+    if (paymentBreakdownToSet !== null) {
+      updatePayload.paymentBreakdown = paymentBreakdownToSet;
     }
 
     // Store planDetails for finalkk template execution
