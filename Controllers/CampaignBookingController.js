@@ -26,6 +26,24 @@ function getQualificationFromStatus(bookingStatus) {
   return 'MQL';
 }
 
+function buildSearchOrConditions(search) {
+  const trimmed = typeof search === 'string' ? search.trim() : '';
+  if (!trimmed) return null;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const conditions = [
+    { clientName: { $regex: escaped, $options: 'i' } },
+    { clientEmail: { $regex: escaped, $options: 'i' } },
+    { clientPhone: { $regex: escaped, $options: 'i' } },
+    { utmSource: { $regex: escaped, $options: 'i' } }
+  ];
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (digitsOnly.length >= 6 && /^\d+$/.test(digitsOnly)) {
+    const phoneDigitPattern = digitsOnly.split('').join('\\D*');
+    conditions.push({ clientPhone: { $regex: phoneDigitPattern, $options: 'i' } });
+  }
+  return { $or: conditions };
+}
+
 // ==================== SAVE CALENDLY BOOKING WITH UTM ====================
 export const saveCalendlyBooking = async (bookingData) => {
   try {
@@ -1598,20 +1616,9 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
 
-    if (search) {
-      // Trim the search term
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        // Escape special regex characters to prevent regex errors
-        // This allows literal search while preventing regex injection
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        matchQuery.$or = [
-          { clientName: { $regex: escapedSearch, $options: 'i' } },
-          { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-          { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-          { utmSource: { $regex: escapedSearch, $options: 'i' } }
-        ];
-      }
+    const searchOr = buildSearchOrConditions(search);
+    if (searchOr) {
+      Object.assign(matchQuery, searchOr);
     }
 
     if (!matchQuery.scheduledEventStartTime) {
@@ -1654,23 +1661,6 @@ export const getLeadsPaginated = async (req, res) => {
         }
       }
     ];
-
-    if (search) {
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        pipeline.splice(1, 0, {
-          $match: {
-            $or: [
-              { clientName: { $regex: escapedSearch, $options: 'i' } },
-              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-              { utmSource: { $regex: escapedSearch, $options: 'i' } }
-            ]
-          }
-        });
-      }
-    }
 
     const countPipeline = [
       ...pipeline.slice(0, -1),
@@ -1729,21 +1719,9 @@ export const getLeadsPaginated = async (req, res) => {
       },
       { $group: { _id: '$qualification', count: { $sum: 1 } } }
     ];
-    if (search) {
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        qualStatsPipeline.splice(1, 0, {
-          $match: {
-            $or: [
-              { clientName: { $regex: escapedSearch, $options: 'i' } },
-              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-              { utmSource: { $regex: escapedSearch, $options: 'i' } }
-            ]
-          }
-        });
-      }
+    const qualSearchOr = buildSearchOrConditions(search);
+    if (qualSearchOr) {
+      qualStatsPipeline.splice(1, 0, { $match: qualSearchOr });
     }
     const qualStatsResult = await CampaignBookingModel.aggregate(qualStatsPipeline);
     const mqlCount = qualStatsResult.find((r) => r._id === 'MQL')?.count ?? 0;
@@ -1855,14 +1833,9 @@ export const getLeadsIds = async (req, res) => {
         matchQuery.scheduledEventStartTime.$lte = to;
       }
     }
-    if (search && String(search).trim()) {
-      const escapedSearch = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      matchQuery.$or = [
-        { clientName: { $regex: escapedSearch, $options: 'i' } },
-        { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-        { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-        { utmSource: { $regex: escapedSearch, $options: 'i' } }
-      ];
+    const idsSearchOr = buildSearchOrConditions(search);
+    if (idsSearchOr) {
+      Object.assign(matchQuery, idsSearchOr);
     }
     if (!matchQuery.scheduledEventStartTime) {
       matchQuery.scheduledEventStartTime = { $exists: true, $ne: null };
