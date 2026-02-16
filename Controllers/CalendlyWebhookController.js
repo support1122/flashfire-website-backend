@@ -341,6 +341,30 @@ async function handleCreatedEvent(req, res, payload) {
     rescheduleLink: newBooking.calendlyRescheduleLink
   });
 
+  // Send Facebook Conversion API event (non-blocking)
+  try {
+    const { sendScheduleEvent } = await import('../Services/FacebookConversionAPI.js');
+    sendScheduleEvent({
+      email: inviteeEmail,
+      phone: inviteePhone,
+      fullName: inviteeName,
+      clientIp: req.ip || req.connection.remoteAddress || null,
+      userAgent: req.headers['user-agent'] || null,
+      utmSource: utmSource || null,
+      utmMedium: utmMedium || null,
+      utmCampaign: utmCampaign || null,
+      utmContent: utmContent || null,
+      utmTerm: utmTerm || null,
+      eventId: newBooking.bookingId, // Use bookingId for deduplication
+      eventSourceUrl: 'https://www.flashfirejobs.com/meeting-booked',
+    }).catch((error) => {
+      // Log but don't fail the webhook if Conversion API fails
+      Logger.warn('⚠️ Facebook Conversion API call failed (non-critical):', error.message);
+    });
+  } catch (importError) {
+    Logger.warn('⚠️ Failed to import Facebook Conversion API service:', importError.message);
+  }
+
   // Prepare booking details for Discord
   const bookingDetails = {
     "Booking ID": newBooking.bookingId,
