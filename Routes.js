@@ -63,6 +63,8 @@ import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhoo
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
 import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController.js";
 import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
+// Facebook Conversion API Controllers
+import { sendScheduleEventManual, sendCustomEvent } from "./Controllers/FacebookConversionController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
 // Payment Controllers
@@ -322,6 +324,11 @@ export default function Routes(app) {
   app.put('/api/campaign-bookings/:bookingId/amount', updateBookingAmount); // Update booking amount (leads only)
   app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
   app.post('/api/campaign-bookings/frontend-capture', captureFrontendBooking); // Capture from frontend (backup)
+  
+  // ==================== FACEBOOK CONVERSION API ROUTES ====================
+  app.post('/api/facebook-conversion/schedule', sendScheduleEventManual); // Manually send Schedule event (testing)
+  app.post('/api/facebook-conversion/custom', sendCustomEvent); // Send custom conversion event (testing)
+  
   app.get('/api/leads/paginated', requireCrmUser, requireCrmPermission('leads'), getLeadsPaginated);
   app.get('/api/leads/ids', requireCrmUser, requireCrmPermission('leads'), getLeadsIds);
   app.get('/api/meeting-links', requireCrmUser, requireCrmPermission('meeting_links'), getMeetingLinks);
