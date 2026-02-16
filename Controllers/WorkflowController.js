@@ -1300,57 +1300,43 @@ export const getBookingsByStatusForBulk = async (req, res) => {
       }
     }
 
-    const allBookings = await CampaignBookingModel.find({
-      scheduledEventStartTime: { $exists: true, $ne: null }
-    })
-      .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
-      .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
-      .lean();
-
-    const groupedMap = new Map();
-    
-    for (const booking of allBookings) {
-      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
-      const groupKey = normalizedPhone || booking.clientEmail;
-      
-      if (!groupedMap.has(groupKey)) {
-        groupedMap.set(groupKey, {
-          booking: booking,
-          totalBookings: 1,
-          hasPaid: booking.bookingStatus === 'paid'
-        });
-      } else {
-        const existing = groupedMap.get(groupKey);
-        existing.totalBookings += 1;
-        
-        const existingIsPaid = existing.booking.bookingStatus === 'paid';
-        const currentIsPaid = booking.bookingStatus === 'paid';
-        
-        if (currentIsPaid && !existingIsPaid) {
-          existing.booking = booking;
-          existing.hasPaid = true;
-        } else if (!currentIsPaid && existingIsPaid) {
-        } else {
-          const existingEventTime = existing.booking.scheduledEventStartTime ? new Date(existing.booking.scheduledEventStartTime).getTime() : 0;
-          const currentEventTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
-          
-          if (currentEventTime > existingEventTime) {
-            existing.booking = booking;
-          } else if (currentEventTime === existingEventTime) {
-            const existingTime = existing.booking.bookingCreatedAt ? new Date(existing.booking.bookingCreatedAt).getTime() : 0;
-            const currentTime = booking.bookingCreatedAt ? new Date(booking.bookingCreatedAt).getTime() : 0;
-            
-            if (currentTime > existingTime) {
-              existing.booking = booking;
-            }
-          }
+    // Deduplicate in DB (one per client: prefer paid, then latest by event time) to avoid large in-memory aggregation
+    const dedupPipeline = [
+      {
+        $match: {
+          scheduledEventStartTime: { $exists: true, $ne: null },
+          $or: [
+            { clientPhone: { $exists: true, $nin: [null, ''] } },
+            { clientEmail: { $exists: true, $nin: [null, ''] } }
+          ]
+        }
+      },
+      {
+        $addFields: {
+          _sortPaid: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] },
+          _groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] }
+        }
+      },
+      { $sort: { _sortPaid: -1, scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: { _id: '$_groupKey', doc: { $first: '$$ROOT' } } },
+      { $replaceRoot: { newRoot: '$doc' } },
+      { $project: { _sortPaid: 0, _groupKey: 0 } },
+      { $match: { bookingStatus: dbStatus } },
+      {
+        $project: {
+          bookingId: 1,
+          clientEmail: 1,
+          clientName: 1,
+          clientPhone: 1,
+          bookingStatus: 1,
+          scheduledEventStartTime: 1,
+          scheduledWorkflows: 1,
+          bookingCreatedAt: 1
         }
       }
-    }
+    ];
 
-    let uniqueBookings = Array.from(groupedMap.values()).map(item => item.booking);
-    
-    uniqueBookings = uniqueBookings.filter(booking => booking.bookingStatus === dbStatus);
+    let uniqueBookings = await CampaignBookingModel.aggregate(dedupPipeline);
 
     let filteredBookings = uniqueBookings;
     if (includeCountryCodes.length > 0) {

@@ -252,6 +252,8 @@ import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderSchedule
 import { scheduleDiscordMeetReminder, startDiscordMeetReminderScheduler } from './Utils/DiscordMeetReminderScheduler.js';
 import { getRescheduleLinkForBooking } from './Utils/CalendlyAPIHelper.js';
 import watiService from './Utils/WatiService.js';
+import compression from 'compression';
+import { rateLimitMiddleware } from './Middlewares/RateLimiter.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -281,6 +283,14 @@ app.options(/.*/, cors({ origin: true, credentials: true }));
 // app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+app.use(compression({
+  filter: (req, res) => {
+    if (req.headers['x-no-compression']) return false;
+    return compression.filter(req, res);
+  },
+  level: 6
+}));
 
 
 
@@ -793,7 +803,7 @@ app.post("/call-status", async (req, res) => {
 });
 
 // -------------------- Calendly Webhook --------------------
-app.post('/calendly-webhook', handleCalendlyWebhook);
+app.post('/calendly-webhook', rateLimitMiddleware({ points: 100, duration: 60 }), handleCalendlyWebhook);
 app.post("/twilio-ivr", TwilioReminder);
 // -------------------- Worker Setup --------------------
 // Worker is now handled in Utils/worker.js to avoid duplicate connections

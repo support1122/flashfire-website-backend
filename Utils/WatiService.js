@@ -1,7 +1,12 @@
 import axios from 'axios';
+import http from 'http';
+import https from 'https';
 import dotenv from 'dotenv';
 
 dotenv.config();
+
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
 /**
  * Service class to handle WATI WhatsApp operations
@@ -36,6 +41,13 @@ class WatiService {
       'Content-Type': 'application/json'
     };
 
+    this.axios = axios.create({
+      httpAgent,
+      httpsAgent,
+      timeout: 10000,
+      headers: this.headers
+    });
+
     this.templateIdToName = new Map();
     this.templateNameToId = new Map();
     this.templatesCacheLoaded = false;
@@ -60,10 +72,7 @@ class WatiService {
         ? `${this.apiBaseUrl}/${this.tenantId}/api/v1/getMessageTemplates`
         : `${this.apiBaseUrl}/api/v1/getMessageTemplates`;
       const url = basePath;
-      const response = await axios.get(url, { 
-        headers: this.headers,
-        timeout: 10000
-      });
+      const response = await this.axios.get(url);
 
       if (response.status === 200) {
         const data = response.data;
@@ -208,10 +217,7 @@ class WatiService {
   async getContacts() {
     try {
       const url = `${this.apiBaseUrl}/api/v1/getContacts`;
-      const response = await axios.get(url, { 
-        headers: this.headers,
-        timeout: 10000
-      });
+      const response = await this.axios.get(url);
 
       if (response.status === 200) {
         const data = response.data;
@@ -313,8 +319,7 @@ class WatiService {
         payload: messageData
       });
 
-      const response = await axios.post(url, messageData, {
-        headers: this.headers,
+      const response = await this.axios.post(url, messageData, {
         timeout: 15000
       });
 

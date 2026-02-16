@@ -503,12 +503,21 @@ export function startScheduler() {
   console.log('🚀 [CallScheduler] Starting MongoDB-based call scheduler...');
   console.log(`⏱️ [CallScheduler] Polling interval: ${POLL_INTERVAL_MS / 1000} seconds`);
 
-  // Initial check
-  processDueCalls();
+  // Non-blocking poll loop: schedule next run after each completion (avoids blocking event loop)
+  async function pollLoop() {
+    if (!isRunning) return;
+    try {
+      await processDueCalls();
+    } catch (err) {
+      console.error('❌ [CallScheduler] Poll error:', err.message);
+      Logger.error('[CallScheduler] Poll error', { error: err.message });
+    }
+    if (isRunning) {
+      pollInterval = setTimeout(pollLoop, POLL_INTERVAL_MS);
+    }
+  }
 
-  // Start polling
-  pollInterval = setInterval(processDueCalls, POLL_INTERVAL_MS);
-
+  pollLoop();
   console.log('✅ [CallScheduler] Scheduler started successfully!');
 }
 
@@ -521,7 +530,7 @@ export function stopScheduler() {
   }
 
   if (pollInterval) {
-    clearInterval(pollInterval);
+    clearTimeout(pollInterval);
     pollInterval = null;
   }
 

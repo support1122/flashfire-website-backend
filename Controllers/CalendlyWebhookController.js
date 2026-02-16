@@ -164,9 +164,9 @@ async function handleCreatedEvent(req, res, payload) {
     });
     // Use optional chaining for environment variable in case it's not set
     if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
         `⚠️ Meeting too soon for reminder call: ${inviteeName || 'Unknown'} (${inviteeEmail || 'Unknown'}). Meeting in ${minutesUntilMeeting} minutes.`
-      );
+      ).catch((err) => Logger.error('Discord notification failed', { error: err.message }));
     }
   }
 
@@ -385,7 +385,9 @@ async function handleCreatedEvent(req, res, payload) {
   Logger.info('New Calendly booking', bookingDetails);
 
   if (!isDuplicateDiscord(bookingDetails)) {
-    await DiscordConnectForMeet(JSON.stringify(bookingDetails, null, 2));
+    DiscordConnectForMeet(JSON.stringify(bookingDetails, null, 2)).catch((err) =>
+      Logger.error('Discord notification failed', { error: err.message })
+    );
   } else {
     Logger.warn('Duplicate Discord message suppressed (fingerprint match)', {
       inviteeEmail,
@@ -428,7 +430,9 @@ async function handleCreatedEvent(req, res, payload) {
   if (inviteePhone && inviteePhone.startsWith("+91")) {
     Logger.info('Skipping India number', { phone: inviteePhone });
     if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Skipping India number: ${inviteePhone}`);
+      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Skipping India number: ${inviteePhone}`).catch((err) =>
+        Logger.error('Discord notification failed', { error: err.message })
+      );
     }
     return res.status(200).json({ message: 'Skipped India number' });
   }
@@ -495,7 +499,9 @@ async function handleCreatedEvent(req, res, payload) {
     // Log success message to Discord
     const scheduledMessage = `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reschedule Link: ${rescheduleLinkForReminder}\n• Reminder: 10 minutes before meeting`;
     if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
+      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage).catch((err) =>
+        Logger.error('Discord notification failed', { error: err.message })
+      );
     }
 
     // Schedule WhatsApp reminders
@@ -508,7 +514,9 @@ async function handleCreatedEvent(req, res, payload) {
 
     const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
     if (discordWebhookUrl) {
-      await DiscordConnect(discordWebhookUrl, `✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
+      DiscordConnect(discordWebhookUrl, `✅ Scheduled calls: ${scheduledJobs.join(', ')}`).catch((err) =>
+        Logger.error('Discord notification failed', { error: err.message })
+      );
     } else {
       Logger.warn('Discord webhook URL not configured');
     }
@@ -529,9 +537,9 @@ async function handleCreatedEvent(req, res, payload) {
   } else {
     Logger.warn('No valid phone number provided by invitee', { phone: inviteePhone });
     if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
         `⚠ No valid phone for client: ${inviteeName} (${inviteeEmail}) — Got: ${inviteePhone}`
-      );
+      ).catch((err) => Logger.error('Discord notification failed', { error: err.message }));
     }
     return res.status(200).json({ message: 'No valid phone, booking saved.' });
   }
@@ -1315,7 +1323,9 @@ async function handleCanceledEvent(req, res, payload) {
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
     if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, discordMsg);
+      DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, discordMsg).catch((err) =>
+        Logger.error('Discord notification failed', { error: err.message })
+      );
     }
 
     res.status(200).json({

@@ -339,6 +339,12 @@ CampaignBookingSchema.index({ campaignId: 1, bookingCreatedAt: -1 });
 CampaignBookingSchema.index({ bookingStatus: 1, clientEmail: 1, scheduledEventStartTime: -1, bookingCreatedAt: -1 });
 CampaignBookingSchema.index({ bookingStatus: 1, 'paymentPlan.name': 1, 'paymentPlan.price': 1 });
 CampaignBookingSchema.index({ 'claimedBy.email': 1, bookingStatus: 1 });
+// Duplicate detection and lookups (plan 5.2)
+CampaignBookingSchema.index({ calendlyEventUri: 1 });
+CampaignBookingSchema.index({ calendlyInviteeUri: 1 });
+CampaignBookingSchema.index({ clientPhone: 1 });
+CampaignBookingSchema.index({ clientEmail: 1, scheduledEventStartTime: 1 });
+CampaignBookingSchema.index({ scheduledEventStartTime: 1, bookingStatus: 1 });
 
 export const CampaignBookingModel = mongoose.model('CampaignBooking', CampaignBookingSchema);
 
