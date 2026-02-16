@@ -8,6 +8,7 @@ import { cancelWhatsAppRemindersForClient } from '../Utils/WhatsAppReminderSched
 import { cancelDiscordMeetRemindersForMeeting } from '../Utils/DiscordMeetReminderScheduler.js';
 import { cancelCall } from '../Utils/CallScheduler.js';
 import { Logger } from '../Utils/Logger.js';
+import { sendScheduleEvent } from '../Services/FacebookConversionAPI.js';
 
 const PLAN_CATALOG = {
   PRIME: { price: 99, currency: 'USD', displayPrice: '$99' },
@@ -232,6 +233,26 @@ export const saveCalendlyBooking = async (bookingData) => {
       scheduledEventStartTime: booking.scheduledEventStartTime,
       bookingCreatedAt: booking.bookingCreatedAt
     }, null, 2));
+
+    // Send Facebook Conversion API event (non-blocking)
+    // This runs asynchronously and won't block the booking save
+    sendScheduleEvent({
+      email: booking.clientEmail,
+      phone: booking.clientPhone,
+      fullName: booking.clientName,
+      clientIp: ipAddress || null,
+      userAgent: userAgent || null,
+      utmSource: booking.utmSource || null,
+      utmMedium: utmMedium || null,
+      utmCampaign: utmCampaign || null,
+      utmContent: utmContent || null,
+      utmTerm: utmTerm || null,
+      eventId: booking.bookingId, // Use bookingId for deduplication
+      eventSourceUrl: 'https://www.flashfirejobs.com/meeting-booked',
+    }).catch((error) => {
+      // Log but don't fail the booking save if Conversion API fails
+      console.warn('⚠️ Facebook Conversion API call failed (non-critical):', error.message);
+    });
 
     return {
       success: true,
