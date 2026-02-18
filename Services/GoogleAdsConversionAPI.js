@@ -21,7 +21,7 @@
 import crypto from 'crypto';
 
 const GOOGLE_ADS_CONVERSION_ID = process.env.GOOGLE_ADS_CONVERSION_ID || process.env.NEXT_PUBLIC_GOOGLE_ADS_CONVERSION_ID;
-const GOOGLE_ADS_CONVERSION_LABEL = process.env.GOOGLE_ADS_CONVERSION_LABEL || 'schedule_meeting';
+const GOOGLE_ADS_CONVERSION_LABEL = process.env.GOOGLE_ADS_CONVERSION_LABEL || '06-oCNjI9_obEOLL8J1C'; // Book appointment conversion label
 
 /**
  * Hash user data for privacy compliance (SHA256)
