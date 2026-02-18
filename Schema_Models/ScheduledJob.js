@@ -107,7 +107,9 @@ export const ScheduledJobSchema = new mongoose.Schema({
 
 // Compound indexes for efficient querying
 ScheduledJobSchema.index({ status: 1, scheduledFor: 1, jobType: 1 });
+ScheduledJobSchema.index({ scheduledFor: 1, status: 1, jobType: 1 });
 ScheduledJobSchema.index({ batchId: 1, batchIndex: 1 });
+ScheduledJobSchema.index({ batchId: 1, status: 1 });
 ScheduledJobSchema.index({ status: 1, jobType: 1, scheduledFor: 1, priority: 1 });
 ScheduledJobSchema.index({ campaignId: 1, status: 1 });
 

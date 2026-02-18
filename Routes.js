@@ -1,5 +1,5 @@
-
 import VerifyInterestedClient from "./Middlewares/VerifyInterestedClient.js";
+import { rateLimitMiddleware } from "./Middlewares/RateLimiter.js";
 import { getDashboardData, sendNow, renderDashboard } from "./Controllers/DashboardController.js";
 import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
@@ -287,7 +287,7 @@ export default function Routes(app) {
   app.post('/api/campaign-bookings/manual', createBookingManually); // Create booking manually
   app.post('/api/leads/bulk-create', bulkCreateLeads); // Bulk create leads from CSV
   app.get('/api/campaign-bookings', getAllBookings); // Get all bookings (legacy)
-  app.get('/api/campaign-bookings/paginated', getAllBookingsPaginated); // Get paginated bookings with filters
+  app.get('/api/campaign-bookings/paginated', rateLimitMiddleware({ points: 100, duration: 60 }), getAllBookingsPaginated); // Get paginated bookings with filters
   app.get('/api/campaign-bookings/today', getMeetingsBookedToday); // Get meetings booked today
   app.get('/api/campaign-bookings/by-date', getMeetingsByDate); // Get meetings by date
   app.get('/api/campaign-bookings/debug/all', async (req, res) => {
@@ -345,7 +345,7 @@ export default function Routes(app) {
 
   // ==================== WEBHOOK ROUTES ====================
   // Calendly Webhooks
-  app.post('/api/webhooks/calendly', handleCalendlyWebhook); // Handle Calendly webhook events
+  app.post('/api/webhooks/calendly', rateLimitMiddleware({ points: 100, duration: 60 }), handleCalendlyWebhook); // Handle Calendly webhook events
   app.get('/api/webhooks/test', testWebhook); // Test webhook functionality
   // PayPal Webhooks
   app.post('/api/webhooks/paypal', handlePayPalWebhook); // Handle PayPal webhook events (PAYMENT.CAPTURE.COMPLETED, etc.)

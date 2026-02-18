@@ -27,6 +27,24 @@ function getQualificationFromStatus(bookingStatus) {
   return 'MQL';
 }
 
+function buildSearchOrConditions(search) {
+  const trimmed = typeof search === 'string' ? search.trim() : '';
+  if (!trimmed) return null;
+  const escaped = trimmed.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const conditions = [
+    { clientName: { $regex: escaped, $options: 'i' } },
+    { clientEmail: { $regex: escaped, $options: 'i' } },
+    { clientPhone: { $regex: escaped, $options: 'i' } },
+    { utmSource: { $regex: escaped, $options: 'i' } }
+  ];
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (digitsOnly.length >= 6 && /^\d+$/.test(digitsOnly)) {
+    const phoneDigitPattern = digitsOnly.split('').join('\\D*');
+    conditions.push({ clientPhone: { $regex: phoneDigitPattern, $options: 'i' } });
+  }
+  return { $or: conditions };
+}
+
 // ==================== SAVE CALENDLY BOOKING WITH UTM ====================
 export const saveCalendlyBooking = async (bookingData) => {
   try {
@@ -499,15 +517,20 @@ export const getMeetingsByDate = async (req, res) => {
       .sort({ scheduledEventStartTime: 1 })
       .lean();
 
-    // Calculate breakdown by status
-    const breakdown = {
-      booked: bookings.filter(b => b.bookingStatus === 'scheduled' || !b.bookingStatus).length,
-      cancelled: bookings.filter(b => b.bookingStatus === 'canceled').length,
-      noShow: bookings.filter(b => b.bookingStatus === 'no-show').length,
-      completed: bookings.filter(b => b.bookingStatus === 'completed').length,
-      rescheduled: bookings.filter(b => b.bookingStatus === 'rescheduled').length,
-      total: bookings.length
-    };
+    // Calculate breakdown by status (single-pass O(n) instead of 5 passes O(5n))
+    const breakdown = bookings.reduce(
+      (acc, b) => {
+        const s = b.bookingStatus;
+        if (s === 'scheduled' || !s) acc.booked++;
+        else if (s === 'canceled') acc.cancelled++;
+        else if (s === 'no-show') acc.noShow++;
+        else if (s === 'completed') acc.completed++;
+        else if (s === 'rescheduled') acc.rescheduled++;
+        return acc;
+      },
+      { booked: 0, cancelled: 0, noShow: 0, completed: 0, rescheduled: 0 }
+    );
+    breakdown.total = bookings.length;
 
     return res.status(200).json({
       success: true,
@@ -769,85 +792,85 @@ export const updateBookingStatus = async (req, res) => {
           scheduledWorkflows: { cancelled: 0 }
         };
 
-        // Cancel WhatsApp reminders
-        if (existingBooking.clientEmail || existingBooking.clientPhone) {
-          const whatsappResult = await cancelWhatsAppRemindersForClient({
-            clientEmail: existingBooking.clientEmail,
-            phoneNumber: existingBooking.clientPhone,
-            meetingStartISO: existingBooking.scheduledEventStartTime
-          });
-
-          if (whatsappResult.success && whatsappResult.cancelledCount > 0) {
-            cancellationResults.whatsappReminders.cancelled = whatsappResult.cancelledCount;
-            Logger.info('WhatsApp reminders cancelled for paid booking', {
-              bookingId,
-              clientEmail: existingBooking.clientEmail,
-              cancelledCount: whatsappResult.cancelledCount
-            });
-          }
-        }
-
-        // Cancel Discord BDA meeting alert (3-min "I'm in" reminder)
-        if (existingBooking.scheduledEventStartTime) {
-          try {
-            const discordResult = await cancelDiscordMeetRemindersForMeeting({
-              meetingStartISO: existingBooking.scheduledEventStartTime,
-              clientEmail: existingBooking.clientEmail,
-              clientName: existingBooking.clientName || null,
-            });
-            if (discordResult.success && discordResult.cancelledCount > 0) {
-              cancellationResults.discordMeetReminders.cancelled = discordResult.cancelledCount;
-              Logger.info('Discord meet reminders cancelled for paid booking', {
-                bookingId,
+        // Run WhatsApp, Discord, and Call cancellations in parallel (same behavior, lower latency)
+        const [whatsappSettled, discordSettled, callSettled] = await Promise.allSettled([
+          (existingBooking.clientEmail || existingBooking.clientPhone)
+            ? cancelWhatsAppRemindersForClient({
                 clientEmail: existingBooking.clientEmail,
-                cancelledCount: discordResult.cancelledCount
-              });
+                phoneNumber: existingBooking.clientPhone,
+                meetingStartISO: existingBooking.scheduledEventStartTime
+              })
+            : Promise.resolve({ success: false, cancelledCount: 0 }),
+          existingBooking.scheduledEventStartTime
+            ? cancelDiscordMeetRemindersForMeeting({
+                meetingStartISO: existingBooking.scheduledEventStartTime,
+                clientEmail: existingBooking.clientEmail,
+                clientName: existingBooking.clientName || null,
+              }).catch((discordError) => {
+                Logger.warn('Error cancelling Discord meet reminders for paid booking', {
+                  bookingId,
+                  error: discordError.message
+                });
+                return { success: false, cancelledCount: 0 };
+              })
+            : Promise.resolve({ success: false, cancelledCount: 0 }),
+          (async () => {
+            let callCancelled = 0;
+            if (existingBooking.reminderCallJobId && callQueue) {
+              try {
+                const callJob = await callQueue.getJob(existingBooking.reminderCallJobId);
+                if (callJob) {
+                  await callJob.remove();
+                  callCancelled = 1;
+                  Logger.info('Call reminder job cancelled for paid booking', {
+                    bookingId,
+                    jobId: existingBooking.reminderCallJobId
+                  });
+                }
+              } catch (callError) {
+                Logger.warn('Could not cancel call reminder job (may not exist)', {
+                  bookingId,
+                  jobId: existingBooking.reminderCallJobId,
+                  error: callError.message
+                });
+              }
             }
-          } catch (discordError) {
-            Logger.warn('Error cancelling Discord meet reminders for paid booking', {
-              bookingId,
-              error: discordError.message
-            });
-          }
-        }
+            if (existingBooking.clientPhone && existingBooking.scheduledEventStartTime) {
+              try {
+                const callCancelResult = await cancelCall({
+                  phoneNumber: existingBooking.clientPhone,
+                  meetingStartISO: existingBooking.scheduledEventStartTime
+                });
+                if (callCancelResult.success) callCancelled += 1;
+              } catch (callError) {
+                Logger.warn('Error cancelling call via CallScheduler', {
+                  bookingId,
+                  error: callError.message
+                });
+              }
+            }
+            return callCancelled;
+          })()
+        ]);
 
-        // Cancel call reminders (if reminderCallJobId exists)
-        if (existingBooking.reminderCallJobId && callQueue) {
-          try {
-            const callJob = await callQueue.getJob(existingBooking.reminderCallJobId);
-            if (callJob) {
-              await callJob.remove();
-              cancellationResults.callReminders.cancelled = 1;
-              Logger.info('Call reminder job cancelled for paid booking', {
-                bookingId,
-                jobId: existingBooking.reminderCallJobId
-              });
-            }
-          } catch (callError) {
-            Logger.warn('Could not cancel call reminder job (may not exist)', {
-              bookingId,
-              jobId: existingBooking.reminderCallJobId,
-              error: callError.message
-            });
-          }
+        if (whatsappSettled.status === 'fulfilled' && whatsappSettled.value?.success && whatsappSettled.value?.cancelledCount > 0) {
+          cancellationResults.whatsappReminders.cancelled = whatsappSettled.value.cancelledCount;
+          Logger.info('WhatsApp reminders cancelled for paid booking', {
+            bookingId,
+            clientEmail: existingBooking.clientEmail,
+            cancelledCount: whatsappSettled.value.cancelledCount
+          });
         }
-
-        // Also try to cancel via CallScheduler if phone and meeting time are available
-        if (existingBooking.clientPhone && existingBooking.scheduledEventStartTime) {
-          try {
-            const callCancelResult = await cancelCall({
-              phoneNumber: existingBooking.clientPhone,
-              meetingStartISO: existingBooking.scheduledEventStartTime
-            });
-            if (callCancelResult.success) {
-              cancellationResults.callReminders.cancelled += 1;
-            }
-          } catch (callError) {
-            Logger.warn('Error cancelling call via CallScheduler', {
-              bookingId,
-              error: callError.message
-            });
-          }
+        if (discordSettled.status === 'fulfilled' && discordSettled.value?.success && discordSettled.value?.cancelledCount > 0) {
+          cancellationResults.discordMeetReminders.cancelled = discordSettled.value.cancelledCount;
+          Logger.info('Discord meet reminders cancelled for paid booking', {
+            bookingId,
+            clientEmail: existingBooking.clientEmail,
+            cancelledCount: discordSettled.value.cancelledCount
+          });
+        }
+        if (callSettled.status === 'fulfilled' && typeof callSettled.value === 'number') {
+          cancellationResults.callReminders.cancelled = callSettled.value;
         }
 
         // Cancel payment reminders (email reminders)
@@ -1653,20 +1676,9 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
 
-    if (search) {
-      // Trim the search term
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        // Escape special regex characters to prevent regex errors
-        // This allows literal search while preventing regex injection
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        matchQuery.$or = [
-          { clientName: { $regex: escapedSearch, $options: 'i' } },
-          { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-          { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-          { utmSource: { $regex: escapedSearch, $options: 'i' } }
-        ];
-      }
+    const searchOr = buildSearchOrConditions(search);
+    if (searchOr) {
+      Object.assign(matchQuery, searchOr);
     }
 
     if (!matchQuery.scheduledEventStartTime) {
@@ -1709,23 +1721,6 @@ export const getLeadsPaginated = async (req, res) => {
         }
       }
     ];
-
-    if (search) {
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        pipeline.splice(1, 0, {
-          $match: {
-            $or: [
-              { clientName: { $regex: escapedSearch, $options: 'i' } },
-              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-              { utmSource: { $regex: escapedSearch, $options: 'i' } }
-            ]
-          }
-        });
-      }
-    }
 
     const countPipeline = [
       ...pipeline.slice(0, -1),
@@ -1784,21 +1779,9 @@ export const getLeadsPaginated = async (req, res) => {
       },
       { $group: { _id: '$qualification', count: { $sum: 1 } } }
     ];
-    if (search) {
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        qualStatsPipeline.splice(1, 0, {
-          $match: {
-            $or: [
-              { clientName: { $regex: escapedSearch, $options: 'i' } },
-              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-              { utmSource: { $regex: escapedSearch, $options: 'i' } }
-            ]
-          }
-        });
-      }
+    const qualSearchOr = buildSearchOrConditions(search);
+    if (qualSearchOr) {
+      qualStatsPipeline.splice(1, 0, { $match: qualSearchOr });
     }
     const qualStatsResult = await CampaignBookingModel.aggregate(qualStatsPipeline);
     const mqlCount = qualStatsResult.find((r) => r._id === 'MQL')?.count ?? 0;
@@ -1910,14 +1893,9 @@ export const getLeadsIds = async (req, res) => {
         matchQuery.scheduledEventStartTime.$lte = to;
       }
     }
-    if (search && String(search).trim()) {
-      const escapedSearch = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      matchQuery.$or = [
-        { clientName: { $regex: escapedSearch, $options: 'i' } },
-        { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-        { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-        { utmSource: { $regex: escapedSearch, $options: 'i' } }
-      ];
+    const idsSearchOr = buildSearchOrConditions(search);
+    if (idsSearchOr) {
+      Object.assign(matchQuery, idsSearchOr);
     }
     if (!matchQuery.scheduledEventStartTime) {
       matchQuery.scheduledEventStartTime = { $exists: true, $ne: null };

@@ -99,24 +99,26 @@ export const getAllCampaigns = async (req, res) => {
       query.isActive = active === 'true';
     }
 
-    const campaigns = await CampaignModel.find(query)
-      .sort({ createdAt: -1 })
-      .select('-__v'); // Include pageVisits for filtering
-
-    // Enhance with booking counts
-    const campaignsWithStats = await Promise.all(
-      campaigns.map(async (campaign) => {
-        const bookingCount = await CampaignBookingModel.countDocuments({
-          utmSource: campaign.utmSource
-        });
-
-        return {
-          ...campaign.toObject(),
-          totalBookings: bookingCount,
-          uniqueVisitorsCount: campaign.uniqueVisitors.length
-        };
-      })
-    );
+    // Single aggregation: campaigns with booking counts (avoids N+1)
+    const campaignsWithStats = await CampaignModel.aggregate([
+      { $match: query },
+      { $sort: { createdAt: -1 } },
+      {
+        $lookup: {
+          from: 'campaignbookings',
+          localField: 'utmSource',
+          foreignField: 'utmSource',
+          as: '_bookingDocs'
+        }
+      },
+      {
+        $addFields: {
+          totalBookings: { $size: '$_bookingDocs' },
+          uniqueVisitorsCount: { $size: '$uniqueVisitors' }
+        }
+      },
+      { $project: { _bookingDocs: 0, __v: 0 } }
+    ]);
 
     return res.status(200).json({
       success: true,
@@ -148,23 +150,29 @@ export const getCampaignById = async (req, res) => {
       });
     }
 
-    // Get bookings for this campaign
+    // Get bookings for this campaign (read-only: use .lean() for lower memory)
+    const campaignObj = campaign.toObject();
     const bookings = await CampaignBookingModel.find({
       utmSource: campaign.utmSource
-    }).sort({ bookingCreatedAt: -1 });
+    })
+      .sort({ bookingCreatedAt: -1 })
+      .lean();
+
+    const totalBookings = bookings.length;
+    const uniqueCount = campaignObj.uniqueVisitors?.length ?? 0;
 
     return res.status(200).json({
       success: true,
       data: {
-        campaign: campaign.toObject(),
+        campaign: campaignObj,
         bookings,
         stats: {
-          totalClicks: campaign.totalClicks,
-          totalButtonClicks: campaign.totalButtonClicks || 0,
-          uniqueVisitors: campaign.uniqueVisitors.length,
-          totalBookings: bookings.length,
-          conversionRate: campaign.uniqueVisitors.length > 0 
-            ? ((bookings.length / campaign.uniqueVisitors.length) * 100).toFixed(2) 
+          totalClicks: campaignObj.totalClicks,
+          totalButtonClicks: campaignObj.totalButtonClicks || 0,
+          uniqueVisitors: uniqueCount,
+          totalBookings,
+          conversionRate: uniqueCount > 0
+            ? ((totalBookings / uniqueCount) * 100).toFixed(2)
             : 0
         }
       }

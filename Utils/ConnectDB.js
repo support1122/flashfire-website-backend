@@ -11,7 +11,12 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const Connection = () => mongoose.connect(process.env.MONGODB_URI)
+const Connection = () => mongoose.connect(process.env.MONGODB_URI, {
+    maxPoolSize: 20,
+    minPoolSize: 5,
+    serverSelectionTimeoutMS: 5000,
+    socketTimeoutMS: 45000,
+  })
     .then(() => console.log("Database connected successfully..!"))
     .catch((e) => console.log('Problem while connecting to db', e));
 

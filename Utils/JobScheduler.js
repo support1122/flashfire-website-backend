@@ -568,6 +568,18 @@ async function processDueJobs() {
   const now = new Date();
   
   try {
+    // Backpressure: skip batch if heap usage is too high (plan 7.2)
+    const memUsage = process.memoryUsage();
+    const heapRatio = memUsage.heapUsed / (memUsage.heapTotal || 1);
+    if (heapRatio > 0.85) {
+      Logger.warn('[JobScheduler] High memory usage, skipping job batch', {
+        heapUsedMB: (memUsage.heapUsed / 1024 / 1024).toFixed(2),
+        heapTotalMB: (memUsage.heapTotal / 1024 / 1024).toFixed(2),
+        ratio: (heapRatio * 100).toFixed(1) + '%'
+      });
+      return;
+    }
+
     // ==================== PROCESS EMAILS ====================
     // Only process if we have capacity (less than 3 active)
     const availableSlots = CONFIG.EMAIL_CONCURRENCY - activeEmailJobs;
@@ -654,12 +666,21 @@ export function startJobScheduler() {
   console.log(`📱 [JobScheduler] WhatsApp rate: ${CONFIG.WHATSAPP_RATE_LIMIT}/batch`);
   console.log(`⏰ [JobScheduler] Time spread window: ${CONFIG.TIME_SPREAD_WINDOW_MS / 60000} minutes`);
   
-  // Initial check
-  processDueJobs();
+  // Non-blocking poll loop: schedule next run after each completion (avoids blocking event loop)
+  async function pollLoop() {
+    if (!isRunning) return;
+    try {
+      await processDueJobs();
+    } catch (err) {
+      console.error('❌ [JobScheduler] Poll error:', err.message);
+      Logger.error('[JobScheduler] Poll error', { error: err.message });
+    }
+    if (isRunning) {
+      pollInterval = setTimeout(pollLoop, CONFIG.POLL_INTERVAL_MS);
+    }
+  }
   
-  // Start polling
-  pollInterval = setInterval(processDueJobs, CONFIG.POLL_INTERVAL_MS);
-  
+  pollLoop();
   console.log('✅ [JobScheduler] Scheduler started successfully!');
 }
 
@@ -672,7 +693,7 @@ export function stopJobScheduler() {
   }
   
   if (pollInterval) {
-    clearInterval(pollInterval);
+    clearTimeout(pollInterval);
     pollInterval = null;
   }
   

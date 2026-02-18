@@ -113,8 +113,9 @@ const ScheduledCallSchema = new mongoose.Schema({
   timestamps: true // createdAt, updatedAt
 });
 
-// Compound index for efficient polling
+// Compound index for efficient polling (twilioCallSid already has index: true in schema)
 ScheduledCallSchema.index({ status: 1, scheduledFor: 1 });
+ScheduledCallSchema.index({ scheduledFor: 1, status: 1 });
 ScheduledCallSchema.index({ phoneNumber: 1, meetingStartISO: 1 }, { unique: true });
 
 export const ScheduledCallModel = mongoose.model('ScheduledCall', ScheduledCallSchema);
