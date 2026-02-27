@@ -10,6 +10,12 @@ dotenv.config();
 
 const POLL_INTERVAL_MS = 30000; // Check every 30 seconds
 const DISCORD_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+// BDA meeting reminder channel (same fallback chain as DiscordMeetReminderScheduler)
+const DISCORD_BDA_WEBHOOK =
+  process.env.DISCORD_MEET_2MIN_WEBHOOK_URL ||
+  process.env.DISCORD_MEET_WEB_HOOK_URL ||
+  process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL ||
+  null;
 const DEFAULT_RESCHEDULE_LINK = 'https://www.google.com/url?q=https%3A%2F%2Fcalendly.com%2Freschedulings%2F8e172654-1dfa-49ae-944e-e260067a0f1f&sa=D&source=calendar&usd=2&usg=AOvVaw0_ea9AmvIBNwPqLl0HSU0g'; // Default reschedule link
 
 let isRunning = false;
@@ -601,17 +607,31 @@ export async function processDueWhatsAppReminders() {
             }
           );
 
-          // Send success notification to Discord
-          if (DISCORD_WEBHOOK) {
-            const reminderType = reminder.metadata?.reminderType || '5min';
-            await DiscordConnect(DISCORD_WEBHOOK,
-              `✅ WA reminder sent: ${reminderType}\n` +
-              `📞 ${reminder.phoneNumber} • ${reminder.clientName || 'Unknown'}\n` +
-              `📧 ${reminder.clientEmail || 'Unknown'}\n` +
-              `🗓️ ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
-              `🔗 join: ${reminder.meetingLink || 'n/a'} | resched: ${reminder.rescheduleLink || 'n/a'}\n` +
-              `⏰ ${new Date().toISOString()}`
-            );
+          // Send success notification to Discord (merge BDA reminder into 5min so BDA always gets it)
+          const reminderType = reminder.metadata?.reminderType || '5min';
+          let discordMsg =
+            `✅ WA reminder sent: ${reminderType}\n` +
+            `📞 ${reminder.phoneNumber} • ${reminder.clientName || 'Unknown'}\n` +
+            `📧 ${reminder.clientEmail || 'Unknown'}\n` +
+            `🗓️ ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
+            `🔗 join: ${reminder.meetingLink || 'n/a'} | resched: ${reminder.rescheduleLink || 'n/a'}\n` +
+            `⏰ ${new Date().toISOString()}`;
+          // BDA fallback: include "meeting in 5 min" call-to-action so BDA always gets it even if 3-min Discord job misses
+          if (reminderType === '5min') {
+            discordMsg +=
+              `\n\n🔥 **Hot Lead — Meeting in 5 Minutes**\n` +
+              `Client: ${reminder.clientName || 'Unknown'}\n` +
+              `Time: ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
+              `Link: ${reminder.meetingLink || 'Not provided'}\n\n` +
+              `BDA team, confirm attendance by typing **"I'm in."** Let's close this.`;
+          }
+          // Send to BDA channel (DISCORD_MEET_2MIN_WEBHOOK_URL) so BDA always gets the message
+          if (DISCORD_BDA_WEBHOOK) {
+            await DiscordConnect(DISCORD_BDA_WEBHOOK, discordMsg, false);
+          }
+          // Also send to reminder/call channel if different from BDA webhook
+          if (DISCORD_WEBHOOK && DISCORD_WEBHOOK !== DISCORD_BDA_WEBHOOK) {
+            await DiscordConnect(DISCORD_WEBHOOK, discordMsg, false);
           }
         } else {
           // Check if we should retry
