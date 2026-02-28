@@ -570,9 +570,10 @@ export const getMyClaimedLeads = async (req, res) => {
     const limitNum = Math.min(100, Math.max(1, parseInt(limit) || 50));
     const skip = (pageNum - 1) * limitNum;
 
+    // Only get paid leads (Total Claimed = Paid + Approved)
     const match = {
       'claimedBy.email': email,
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+      bookingStatus: 'paid'
     };
 
     // Filter by claimed date (only if dates are provided and not empty)
@@ -588,52 +589,67 @@ export const getMyClaimedLeads = async (req, res) => {
       match['claimedBy.claimedAt'] = match['claimedBy.claimedAt'] || {};
       match['claimedBy.claimedAt'].$lte = end;
     }
-    if (status && ['paid', 'scheduled', 'completed'].includes(status)) {
-      match.bookingStatus = status;
-    }
     if (planName && ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'].includes(String(planName).toUpperCase())) {
       match['paymentPlan.name'] = String(planName).toUpperCase();
     }
 
-    const paidMatch = { ...match, bookingStatus: 'paid', 'paymentPlan.name': { $in: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'] }, 'paymentPlan.price': { $gt: 0 } };
-
-    const [bookings, total, incentiveRows, paidBookings, approvals] = await Promise.all([
-      CampaignBookingModel.find(match)
-        .sort({ 'claimedBy.claimedAt': -1 })
-        .skip(skip)
-        .limit(limitNum)
-        .lean(),
-      CampaignBookingModel.countDocuments(match),
-      BdaIncentiveConfigModel.find({}).lean(),
-      CampaignBookingModel.find(paidMatch).select('paymentPlan paymentBreakdown').lean(),
-      BdaClaimApprovalModel.find({
-        bookingId: { $in: [] }
-      }).lean()
-    ]);
+    const bookings = await CampaignBookingModel.find(match)
+      .sort({ 'claimedBy.claimedAt': -1 })
+      .skip(skip)
+      .limit(limitNum)
+      .lean();
 
     const bookingIds = bookings.map((b) => b.bookingId);
 
+    // Get only approved approvals
     const filteredApprovals = bookingIds.length
       ? await BdaClaimApprovalModel.find({
           bookingId: { $in: bookingIds },
-          bdaEmail: email.toLowerCase().trim()
+          bdaEmail: email.toLowerCase().trim(),
+          status: 'approved' // Only get approved ones
         })
           .sort({ createdAt: -1 })
           .lean()
       : [];
 
+    const approvedBookingIds = new Set(filteredApprovals.map((a) => String(a.bookingId)));
     const approvalByBookingId = new Map();
     filteredApprovals.forEach((a) => {
       if (!approvalByBookingId.has(a.bookingId)) {
-        approvalByBookingId.set(a.bookingId, a.status);
+        approvalByBookingId.set(a.bookingId, { status: a.status, approvalId: String(a._id) });
       }
     });
 
-    const enrichedBookings = bookings.map((b) => {
-      const status = approvalByBookingId.get(b.bookingId) || null;
-      return status ? { ...b, bdaApprovalStatus: status } : b;
-    });
+    // Only include paid + approved leads (exclude rejected)
+    const enrichedBookings = bookings
+      .filter((b) => approvedBookingIds.has(String(b.bookingId)))
+      .map((b) => {
+        const entry = approvalByBookingId.get(b.bookingId);
+        return { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId };
+      });
 
+    // Calculate total count for pagination (only approved leads)
+    const totalApprovedMatch = { ...match };
+    const allBookingIds = await CampaignBookingModel.find(match).select('bookingId').lean();
+    const allIds = allBookingIds.map((b) => b.bookingId);
+    const allApprovals = allIds.length
+      ? await BdaClaimApprovalModel.find({
+          bookingId: { $in: allIds },
+          bdaEmail: email.toLowerCase().trim(),
+          status: 'approved'
+        })
+        .lean()
+      : [];
+    const allApprovedIds = new Set(allApprovals.map((a) => String(a.bookingId)));
+    const total = allBookingIds.filter((b) => allApprovedIds.has(String(b.bookingId))).length;
+
+    // Calculate incentives only for approved + paid bookings
+    const approvedPaidBookings = enrichedBookings.filter((b) => 
+      b.paymentPlan?.name && ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'].includes(b.paymentPlan.name) &&
+      (b.paymentPlan?.price || 0) > 0
+    );
+
+    const incentiveRows = await BdaIncentiveConfigModel.find({}).lean();
     const configByPlan = new Map();
     incentiveRows.forEach((r) => {
       configByPlan.set(r.planName, {
@@ -642,7 +658,7 @@ export const getMyClaimedLeads = async (req, res) => {
       });
     });
     let totalIncentivesForFilter = 0;
-    for (const b of paidBookings) {
+    for (const b of approvedPaidBookings) {
       totalIncentivesForFilter += incentiveForBooking(configByPlan, b);
     }
 
