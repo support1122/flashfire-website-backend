@@ -396,15 +396,15 @@ export const getBdaAnalysis = async (req, res) => {
       matchBase['paymentPlan.name'] = normalizedPlanName;
     }
 
-    // Filter by claimed date
-    if (fromDate || toDate) {
+    // Filter by claimed date (only if dates are provided and not empty)
+    if ((fromDate && fromDate.trim()) || (toDate && toDate.trim())) {
       matchBase['claimedBy.claimedAt'] = {};
-      if (fromDate) {
+      if (fromDate && fromDate.trim()) {
         const from = new Date(fromDate);
         from.setUTCHours(0, 0, 0, 0);
         matchBase['claimedBy.claimedAt'].$gte = from;
       }
-      if (toDate) {
+      if (toDate && toDate.trim()) {
         const to = new Date(toDate);
         to.setUTCHours(23, 59, 59, 999);
         matchBase['claimedBy.claimedAt'].$lte = to;
@@ -575,13 +575,14 @@ export const getMyClaimedLeads = async (req, res) => {
       bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
     };
 
-    if (fromDate) {
+    // Filter by claimed date (only if dates are provided and not empty)
+    if (fromDate && fromDate.trim()) {
       const start = new Date(fromDate);
       start.setUTCHours(0, 0, 0, 0);
       match['claimedBy.claimedAt'] = match['claimedBy.claimedAt'] || {};
       match['claimedBy.claimedAt'].$gte = start;
     }
-    if (toDate) {
+    if (toDate && toDate.trim()) {
       const end = new Date(toDate);
       end.setUTCHours(23, 59, 59, 999);
       match['claimedBy.claimedAt'] = match['claimedBy.claimedAt'] || {};
@@ -732,15 +733,15 @@ export const getBdaLeadsByEmail = async (req, res) => {
       bookingStatus: 'paid'
     };
 
-    // Filter by claimed date
-    if (fromDate || toDate) {
+    // Filter by claimed date (only if dates are provided and not empty)
+    if ((fromDate && fromDate.trim()) || (toDate && toDate.trim())) {
       matchQuery['claimedBy.claimedAt'] = {};
-      if (fromDate) {
+      if (fromDate && fromDate.trim()) {
         const from = new Date(fromDate);
         from.setUTCHours(0, 0, 0, 0);
         matchQuery['claimedBy.claimedAt'].$gte = from;
       }
-      if (toDate) {
+      if (toDate && toDate.trim()) {
         const to = new Date(toDate);
         to.setUTCHours(23, 59, 59, 999);
         matchQuery['claimedBy.claimedAt'].$lte = to;
