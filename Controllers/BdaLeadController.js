@@ -716,18 +716,18 @@ export const getBdaLeadsByEmail = async (req, res) => {
       bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
     };
 
-    // Filter by claimed date if provided
+    // Filter by scheduled meeting date (same as main analysis table)
     if (fromDate || toDate) {
-      matchQuery['claimedBy.claimedAt'] = {};
+      matchQuery.scheduledEventStartTime = {};
       if (fromDate) {
-        const start = new Date(fromDate);
-        start.setUTCHours(0, 0, 0, 0);
-        matchQuery['claimedBy.claimedAt'].$gte = start;
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        matchQuery.scheduledEventStartTime.$gte = from;
       }
       if (toDate) {
-        const end = new Date(toDate);
-        end.setUTCHours(23, 59, 59, 999);
-        matchQuery['claimedBy.claimedAt'].$lte = end;
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        matchQuery.scheduledEventStartTime.$lte = to;
       }
     }
 
