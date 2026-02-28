@@ -702,6 +702,7 @@ export const adminUnclaimLead = async (req, res) => {
 export const getBdaLeadsByEmail = async (req, res) => {
   try {
     const { email } = req.params;
+    const { fromDate, toDate } = req.query;
 
     if (!email) {
       return res.status(400).json({
@@ -710,10 +711,27 @@ export const getBdaLeadsByEmail = async (req, res) => {
       });
     }
 
-    const bookings = await CampaignBookingModel.find({
+    const matchQuery = {
       'claimedBy.email': email.toLowerCase().trim(),
       bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
-    })
+    };
+
+    // Filter by claimed date if provided
+    if (fromDate || toDate) {
+      matchQuery['claimedBy.claimedAt'] = {};
+      if (fromDate) {
+        const start = new Date(fromDate);
+        start.setUTCHours(0, 0, 0, 0);
+        matchQuery['claimedBy.claimedAt'].$gte = start;
+      }
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setUTCHours(23, 59, 59, 999);
+        matchQuery['claimedBy.claimedAt'].$lte = end;
+      }
+    }
+
+    const bookings = await CampaignBookingModel.find(matchQuery)
       .sort({ 'claimedBy.claimedAt': -1 })
       .lean();
     const bookingIds = bookings.map((b) => b.bookingId);
@@ -912,6 +930,113 @@ export const adminResolveBdaApproval = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to resolve approval',
+      error: error.message
+    });
+  }
+};
+
+/**
+ * Admin endpoint: Get all clients with their claim dates and statuses
+ * Returns all claimed bookings with client info, claim date, booking status, and approval status
+ */
+export const getAllClientsWithClaimInfo = async (req, res) => {
+  try {
+    const { page = 1, limit = 100, bdaEmail, status, fromDate, toDate } = req.query;
+
+    const pageNum = Math.max(1, parseInt(page) || 1);
+    const limitNum = Math.min(500, Math.max(1, parseInt(limit) || 100));
+    const skip = (pageNum - 1) * limitNum;
+
+    const match = {
+      'claimedBy.email': { $exists: true, $ne: null },
+      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+    };
+
+    if (bdaEmail) {
+      match['claimedBy.email'] = bdaEmail.toLowerCase().trim();
+    }
+
+    if (status && ['paid', 'scheduled', 'completed'].includes(status)) {
+      match.bookingStatus = status;
+    }
+
+    if (fromDate || toDate) {
+      match['claimedBy.claimedAt'] = {};
+      if (fromDate) {
+        const start = new Date(fromDate);
+        start.setUTCHours(0, 0, 0, 0);
+        match['claimedBy.claimedAt'].$gte = start;
+      }
+      if (toDate) {
+        const end = new Date(toDate);
+        end.setUTCHours(23, 59, 59, 999);
+        match['claimedBy.claimedAt'].$lte = end;
+      }
+    }
+
+    const [bookings, total] = await Promise.all([
+      CampaignBookingModel.find(match)
+        .select('bookingId clientName clientEmail clientPhone claimedBy bookingStatus paymentPlan bdaApprovalStatus')
+        .sort({ 'claimedBy.claimedAt': -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      CampaignBookingModel.countDocuments(match)
+    ]);
+
+    // Get approval statuses for all bookings
+    const bookingIds = bookings.map((b) => b.bookingId);
+    const approvals = bookingIds.length
+      ? await BdaClaimApprovalModel.find({
+          bookingId: { $in: bookingIds }
+        })
+          .sort({ createdAt: -1 })
+          .lean()
+      : [];
+
+    const approvalByBookingId = new Map();
+    approvals.forEach((a) => {
+      if (!approvalByBookingId.has(a.bookingId)) {
+        approvalByBookingId.set(a.bookingId, a.status);
+      }
+    });
+
+    // Format response with clear claim date and status information
+    const clients = bookings.map((booking) => {
+      const approvalStatus = approvalByBookingId.get(booking.bookingId) || null;
+      
+      return {
+        bookingId: booking.bookingId,
+        clientName: booking.clientName || '',
+        clientEmail: booking.clientEmail || '',
+        clientPhone: booking.clientPhone || '',
+        claimedBy: {
+          email: booking.claimedBy?.email || '',
+          name: booking.claimedBy?.name || '',
+          claimedAt: booking.claimedBy?.claimedAt || null
+        },
+        claimDate: booking.claimedBy?.claimedAt || null, // Easy access to claim date
+        bookingStatus: booking.bookingStatus || '', // paid, scheduled, completed
+        approvalStatus: approvalStatus || null, // pending, approved, denied
+        paymentPlan: booking.paymentPlan || null
+      };
+    });
+
+    return res.status(200).json({
+      success: true,
+      data: clients,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        pages: Math.ceil(Math.max(0, total) / limitNum)
+      }
+    });
+  } catch (error) {
+    console.error('Error fetching all clients with claim info:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch clients with claim information',
       error: error.message
     });
   }
