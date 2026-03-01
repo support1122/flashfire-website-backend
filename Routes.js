@@ -123,7 +123,9 @@ import {
   getBdaAnalysis,
   getMyClaimedLeads,
   getBdaLeadsByEmail,
+  getAllClientsWithClaimInfo,
   getMyBdaPerformance,
+  bdaUnclaimLead,
   adminUnclaimLead,
   getPendingBdaApprovalsForCrm,
   handleBdaApprovalEmailAction,
@@ -237,11 +239,13 @@ export default function Routes(app) {
   app.get('/api/bda/available-leads', requireCrmUser, getAvailableLeads);
   app.get('/api/bda/lead-by-email/:email', requireCrmUser, getLeadByEmail);
   app.post('/api/bda/claim-lead/:bookingId', requireCrmUser, claimLead);
+  app.post('/api/bda/unclaim-lead/:bookingId', requireCrmUser, bdaUnclaimLead);
   app.put('/api/bda/update-lead/:bookingId', requireCrmUser, updateLeadDetails);
   app.get('/api/bda/my-leads', requireCrmUser, getMyClaimedLeads);
   app.get('/api/bda/performance', requireCrmUser, getMyBdaPerformance);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
+  app.get('/api/crm/admin/clients/claims', requireCrmAdmin, getAllClientsWithClaimInfo);
   app.post('/api/crm/admin/booking/:bookingId/unclaim', requireCrmAdmin, adminUnclaimLead);
   app.get('/api/crm/admin/bda-incentives/config', requireCrmAdmin, getIncentiveConfig);
   app.put('/api/crm/admin/bda-incentives/config', requireCrmAdmin, saveIncentiveConfig);
