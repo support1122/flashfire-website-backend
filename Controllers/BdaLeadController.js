@@ -804,7 +804,7 @@ export const adminUnclaimLead = async (req, res) => {
 export const getBdaLeadsByEmail = async (req, res) => {
   try {
     const { email } = req.params;
-    const { fromDate, toDate, includePending } = req.query;
+    const { fromDate, toDate } = req.query;
 
     if (!email) {
       return res.status(400).json({
@@ -842,16 +842,11 @@ export const getBdaLeadsByEmail = async (req, res) => {
     let enriched = [];
     
     if (bookingIds.length) {
-      // If includePending is true (from pending approvals modal), show all statuses
-      // Otherwise, only show approved leads (for BDA Performance Rankings)
-      const approvalStatusFilter = includePending === 'true' 
-        ? { $in: ['approved', 'pending', 'rejected'] } 
-        : 'approved';
-      
+      // ALWAYS show ALL leads (approved + pending + rejected + no approval record)
+      // Get ALL approval records for these bookings (any status)
       const approvals = await BdaClaimApprovalModel.find({
         bookingId: { $in: bookingIds },
-        bdaEmail: email.toLowerCase().trim(),
-        status: approvalStatusFilter
+        bdaEmail: email.toLowerCase().trim()
       })
         .sort({ createdAt: -1 })
         .lean();
@@ -863,24 +858,15 @@ export const getBdaLeadsByEmail = async (req, res) => {
         }
       });
       
-      if (includePending === 'true') {
-        // Include all leads (approved + pending + rejected) when viewing from pending approvals
-        enriched = bookings.map((b) => {
-          const entry = approvalByBookingId.get(b.bookingId) || null;
-          return entry ? { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId } : { ...b, bdaApprovalStatus: null };
-        });
-      } else {
-        // Only include approved leads (rejected leads are NOT shown in admin analysis)
-        const approvedBookingIds = new Set(
-          approvals.filter((a) => a.status === 'approved').map((a) => String(a.bookingId))
-        );
-        enriched = bookings
-          .filter((b) => approvedBookingIds.has(String(b.bookingId)))
-          .map((b) => {
-            const entry = approvalByBookingId.get(b.bookingId);
-            return { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId };
-          });
-      }
+      // Include ALL bookings, with their approval status (or 'pending' if no approval record exists)
+      enriched = bookings.map((b) => {
+        const entry = approvalByBookingId.get(b.bookingId) || null;
+        // If no approval record exists, treat it as 'pending'
+        const status = entry ? entry.status : 'pending';
+        return entry 
+          ? { ...b, bdaApprovalStatus: status, bdaApprovalId: entry.approvalId }
+          : { ...b, bdaApprovalStatus: status };
+      });
     }
 
     const bdaInfo = enriched.length > 0 ? {
