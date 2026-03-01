@@ -804,7 +804,7 @@ export const adminUnclaimLead = async (req, res) => {
 export const getBdaLeadsByEmail = async (req, res) => {
   try {
     const { email } = req.params;
-    const { fromDate, toDate } = req.query;
+    const { fromDate, toDate, includePending } = req.query;
 
     if (!email) {
       return res.status(400).json({
@@ -842,16 +842,20 @@ export const getBdaLeadsByEmail = async (req, res) => {
     let enriched = [];
     
     if (bookingIds.length) {
-      // Get ONLY approved approvals (admin analysis should only show approved leads)
+      // If includePending is true (from pending approvals modal), show all statuses
+      // Otherwise, only show approved leads (for BDA Performance Rankings)
+      const approvalStatusFilter = includePending === 'true' 
+        ? { $in: ['approved', 'pending', 'rejected'] } 
+        : 'approved';
+      
       const approvals = await BdaClaimApprovalModel.find({
         bookingId: { $in: bookingIds },
         bdaEmail: email.toLowerCase().trim(),
-        status: 'approved' // Only get approved ones for admin analysis
+        status: approvalStatusFilter
       })
         .sort({ createdAt: -1 })
         .lean();
       
-      const approvedBookingIds = new Set(approvals.map((a) => String(a.bookingId)));
       const approvalByBookingId = new Map();
       approvals.forEach((a) => {
         if (!approvalByBookingId.has(a.bookingId)) {
@@ -859,13 +863,24 @@ export const getBdaLeadsByEmail = async (req, res) => {
         }
       });
       
-      // Only include approved leads (rejected leads are NOT shown in admin analysis)
-      enriched = bookings
-        .filter((b) => approvedBookingIds.has(String(b.bookingId)))
-        .map((b) => {
-          const entry = approvalByBookingId.get(b.bookingId);
-          return { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId };
+      if (includePending === 'true') {
+        // Include all leads (approved + pending + rejected) when viewing from pending approvals
+        enriched = bookings.map((b) => {
+          const entry = approvalByBookingId.get(b.bookingId) || null;
+          return entry ? { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId } : { ...b, bdaApprovalStatus: null };
         });
+      } else {
+        // Only include approved leads (rejected leads are NOT shown in admin analysis)
+        const approvedBookingIds = new Set(
+          approvals.filter((a) => a.status === 'approved').map((a) => String(a.bookingId))
+        );
+        enriched = bookings
+          .filter((b) => approvedBookingIds.has(String(b.bookingId)))
+          .map((b) => {
+            const entry = approvalByBookingId.get(b.bookingId);
+            return { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId };
+          });
+      }
     }
 
     const bdaInfo = enriched.length > 0 ? {
