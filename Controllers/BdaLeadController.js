@@ -673,6 +673,70 @@ export const getMyClaimedLeads = async (req, res) => {
 };
 
 /**
+ * BDA can unclaim their own lead. Lead becomes unclaimed and can be claimed again.
+ */
+export const bdaUnclaimLead = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const email = req.crmUser?.email;
+
+    if (!email) {
+      return res.status(401).json({
+        success: false,
+        message: 'User authentication required'
+      });
+    }
+
+    if (!bookingId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Booking ID is required'
+      });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId });
+
+    if (!booking) {
+      return res.status(404).json({
+        success: false,
+        message: 'Lead not found'
+      });
+    }
+
+    if (!booking.claimedBy || !booking.claimedBy.email) {
+      return res.status(400).json({
+        success: false,
+        message: 'This lead is not claimed by any BDA'
+      });
+    }
+
+    // Check if the lead is claimed by the current BDA
+    if (booking.claimedBy.email.toLowerCase().trim() !== email.toLowerCase().trim()) {
+      return res.status(403).json({
+        success: false,
+        message: 'You can only unclaim leads that you have claimed'
+      });
+    }
+
+    booking.claimedBy = { email: null, name: null, claimedAt: null };
+    await booking.save();
+
+    return res.status(200).json({
+      success: true,
+      message: 'Lead unclaimed successfully. It can be claimed again by any BDA.',
+      data: { bookingId, clientName: booking.clientName, clientEmail: booking.clientEmail }
+    });
+  } catch (error) {
+    console.error('Error unclaiming lead (BDA):', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to unclaim lead',
+      error: error.message
+    });
+  }
+};
+
+/**
  * Admin only: remove claim from a lead (revert claim). Lead becomes unclaimed and can be claimed again.
  */
 export const adminUnclaimLead = async (req, res) => {
@@ -761,14 +825,16 @@ export const getBdaLeadsByEmail = async (req, res) => {
     let enriched = [];
     
     if (bookingIds.length) {
-      // Get ALL approval statuses (approved, rejected, pending)
+      // Get ONLY approved approvals (admin analysis should only show approved leads)
       const approvals = await BdaClaimApprovalModel.find({
         bookingId: { $in: bookingIds },
-        bdaEmail: email.toLowerCase().trim()
+        bdaEmail: email.toLowerCase().trim(),
+        status: 'approved' // Only get approved ones for admin analysis
       })
         .sort({ createdAt: -1 })
         .lean();
       
+      const approvedBookingIds = new Set(approvals.map((a) => String(a.bookingId)));
       const approvalByBookingId = new Map();
       approvals.forEach((a) => {
         if (!approvalByBookingId.has(a.bookingId)) {
@@ -776,11 +842,13 @@ export const getBdaLeadsByEmail = async (req, res) => {
         }
       });
       
-      // Include ALL leads (approved + rejected) with proper status
-      enriched = bookings.map((b) => {
-        const entry = approvalByBookingId.get(b.bookingId) || null;
-        return entry ? { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId } : { ...b, bdaApprovalStatus: null };
-      });
+      // Only include approved leads (rejected leads are NOT shown in admin analysis)
+      enriched = bookings
+        .filter((b) => approvedBookingIds.has(String(b.bookingId)))
+        .map((b) => {
+          const entry = approvalByBookingId.get(b.bookingId);
+          return { ...b, bdaApprovalStatus: entry.status, bdaApprovalId: entry.approvalId };
+        });
     }
 
     const bdaInfo = enriched.length > 0 ? {
