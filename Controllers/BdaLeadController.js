@@ -13,12 +13,28 @@ const PLAN_CATALOG = {
   EXECUTIVE: { price: 599 }
 };
 
+// Default CAD base prices (matching frontend defaults)
+const CAD_BASE_PRICES = {
+  PRIME: 139,
+  IGNITE: 239,
+  PROFESSIONAL: 409,
+  EXECUTIVE: 799
+};
+
 /** Compute prorated incentive (INR) for one line. configByPlan: Map(planName -> { basePriceUsd, incentivePerLeadInr }). */
-function incentiveForLine(configByPlan, planName, amount, _currency) {
+function incentiveForLine(configByPlan, planName, amount, currency) {
   if (!planName || !amount || amount <= 0) return 0;
   const config = configByPlan.get(planName);
   if (!config) return 0;
-  const base = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
+  
+  // Use currency-specific base price if CAD, otherwise use USD base price
+  let base;
+  if (currency && currency.toUpperCase() === 'CAD') {
+    base = CAD_BASE_PRICES[planName] || PLAN_CATALOG[planName]?.price || 1;
+  } else {
+    base = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
+  }
+  
   const ratio = Math.min(1, amount / base);
   return config.incentivePerLeadInr * ratio;
 }
@@ -33,7 +49,8 @@ function incentiveForBooking(configByPlan, booking) {
   }
   const planName = booking.paymentPlan?.name;
   const amount = Number(booking.paymentPlan?.price);
-  return incentiveForLine(configByPlan, planName, amount);
+  const currency = booking.paymentPlan?.currency || 'USD';
+  return incentiveForLine(configByPlan, planName, amount, currency);
 }
 
 export const getAvailableLeads = async (req, res) => {
@@ -432,7 +449,7 @@ export const getBdaAnalysis = async (req, res) => {
       ...performanceMatch,
       bookingStatus: 'paid'
     })
-      .select('bookingId claimedBy.email claimedBy.name paymentPlan')
+      .select('bookingId claimedBy.email claimedBy.name paymentPlan paymentBreakdown')
       .lean();
 
     // Get approval statuses for all paid bookings
