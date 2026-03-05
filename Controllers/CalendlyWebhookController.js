@@ -365,6 +365,31 @@ async function handleCreatedEvent(req, res, payload) {
     Logger.warn('⚠️ Failed to import Facebook Conversion API service:', importError.message);
   }
 
+  // Send LinkedIn Conversion API event (non-blocking)
+  // Server-side tracking bypasses ad blockers and works regardless of browser settings
+  try {
+    const { sendScheduleEvent: sendLinkedInScheduleEvent } = await import('../Services/LinkedInConversionAPI.js');
+    sendLinkedInScheduleEvent({
+      email: inviteeEmail,
+      phone: inviteePhone,
+      fullName: inviteeName,
+      clientIp: req.ip || req.connection.remoteAddress || null,
+      userAgent: req.headers['user-agent'] || null,
+      utmSource: utmSource || null,
+      utmMedium: utmMedium || null,
+      utmCampaign: utmCampaign || null,
+      utmContent: utmContent || null,
+      utmTerm: utmTerm || null,
+      eventId: newBooking.bookingId, // Use bookingId for deduplication
+      eventSourceUrl: 'https://www.flashfirejobs.com/meeting-booked',
+    }).catch((error) => {
+      // Log but don't fail the webhook if Conversion API fails
+      Logger.warn('⚠️ LinkedIn Conversion API call failed (non-critical):', error.message);
+    });
+  } catch (importError) {
+    Logger.warn('⚠️ Failed to import LinkedIn Conversion API service:', importError.message);
+  }
+
   // Prepare booking details for Discord
   const bookingDetails = {
     "Booking ID": newBooking.bookingId,
