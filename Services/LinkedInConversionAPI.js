@@ -1,0 +1,255 @@
+/**
+ * LinkedIn Conversion API Service
+ * 
+ * Sends server-side conversion events to LinkedIn for better tracking accuracy
+ * and privacy compliance (ad blockers, iOS 14.5+, etc.)
+ * 
+ * Required Environment Variables:
+ * - LINKEDIN_PARTNER_ID: Your LinkedIn Partner ID (e.g., 515334183)
+ * - LINKEDIN_ACCESS_TOKEN: Your LinkedIn API Access Token (with ads_management permission)
+ * - LINKEDIN_SCHEDULE_CONVERSION_ID: Your Schedule conversion ID from Campaign Manager
+ * 
+ * Setup Steps:
+ * 1. Go to LinkedIn Campaign Manager → Analyze → Sources → Google Tag Manager
+ * 2. Generate an API Access Token
+ * 3. Create a conversion action in Campaign Manager → Conversion Tracking
+ * 4. Get the conversion ID from the conversion action
+ * 5. Add these to your environment variables
+ * 
+ * Documentation: https://learn.microsoft.com/en-us/linkedin/marketing/integrations/ads-reporting/conversions-api
+ */
+
+import crypto from 'crypto';
+
+const LINKEDIN_PARTNER_ID = process.env.LINKEDIN_PARTNER_ID || process.env.NEXT_PUBLIC_LINKEDIN_PARTNER_ID || '515334183';
+const LINKEDIN_ACCESS_TOKEN = process.env.LINKEDIN_ACCESS_TOKEN;
+const LINKEDIN_SCHEDULE_CONVERSION_ID = process.env.LINKEDIN_SCHEDULE_CONVERSION_ID || process.env.NEXT_PUBLIC_LINKEDIN_SCHEDULE_CONVERSION_ID;
+
+// LinkedIn Conversions API endpoint
+// Format: https://api.linkedin.com/v2/conversionEvents
+const CONVERSION_API_URL = 'https://api.linkedin.com/v2/conversionEvents';
+
+// Get current year-month for LinkedIn-Version header (e.g., "202412")
+const getLinkedInVersion = () => {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  return `${year}${month}`;
+};
+
+/**
+ * Hash user data for privacy compliance (SHA256)
+ * LinkedIn requires hashed email/phone for matching
+ */
+function hashData(data) {
+  if (!data) return null;
+  return crypto
+    .createHash('sha256')
+    .update(data.toLowerCase().trim())
+    .digest('hex');
+}
+
+/**
+ * Extract first name and last name from full name
+ */
+function parseName(fullName) {
+  if (!fullName) return { firstName: null, lastName: null };
+  const parts = fullName.trim().split(/\s+/);
+  return {
+    firstName: parts[0] || null,
+    lastName: parts.slice(1).join(' ') || null,
+  };
+}
+
+/**
+ * Send conversion event to LinkedIn Conversion API
+ * 
+ * @param {Object} params - Event parameters
+ * @param {string} params.conversionId - Conversion ID from Campaign Manager
+ * @param {string} params.email - User email (will be hashed)
+ * @param {string} params.phone - User phone (will be hashed)
+ * @param {string} params.firstName - User first name (will be hashed)
+ * @param {string} params.lastName - User last name (will be hashed)
+ * @param {string} params.clientIp - User IP address
+ * @param {string} params.userAgent - User agent string
+ * @param {string} params.eventId - Unique event ID (for deduplication)
+ * @param {string} params.eventSourceUrl - URL where event occurred
+ * @param {Object} params.customData - Custom event data (value, currency, etc.)
+ * @returns {Promise<Object>} API response
+ */
+export async function sendConversionEvent({
+  conversionId,
+  email = null,
+  phone = null,
+  firstName = null,
+  lastName = null,
+  clientIp = null,
+  userAgent = null,
+  eventId = null,
+  eventSourceUrl = null,
+  customData = {},
+}) {
+  // Validate required configuration
+  if (!LINKEDIN_PARTNER_ID) {
+    console.warn('⚠️ LINKEDIN_PARTNER_ID not configured, skipping Conversion API call');
+    return { success: false, error: 'LINKEDIN_PARTNER_ID not configured' };
+  }
+
+  if (!LINKEDIN_ACCESS_TOKEN) {
+    console.warn('⚠️ LINKEDIN_ACCESS_TOKEN not configured, skipping Conversion API call');
+    return { success: false, error: 'LINKEDIN_ACCESS_TOKEN not configured' };
+  }
+
+  if (!conversionId && !LINKEDIN_SCHEDULE_CONVERSION_ID) {
+    console.warn('⚠️ LinkedIn conversion ID not provided, skipping Conversion API call');
+    return { success: false, error: 'Conversion ID not provided' };
+  }
+
+  const finalConversionId = conversionId || LINKEDIN_SCHEDULE_CONVERSION_ID;
+
+  // At least one identifier is required (email, phone, or user ID)
+  if (!email && !phone) {
+    console.warn('⚠️ LinkedIn Conversion API requires at least email or phone');
+    return { success: false, error: 'Email or phone is required' };
+  }
+
+  try {
+    // Prepare user data (hashed for privacy)
+    const userData = {};
+    
+    if (email) {
+      userData.emailAddress = hashData(email);
+    }
+    if (phone) {
+      // Remove non-numeric characters before hashing
+      const cleanPhone = phone.replace(/\D/g, '');
+      if (cleanPhone) {
+        userData.phoneNumber = hashData(cleanPhone);
+      }
+    }
+    if (firstName) {
+      userData.firstName = hashData(firstName);
+    }
+    if (lastName) {
+      userData.lastName = hashData(lastName);
+    }
+
+    // Prepare conversion event data
+    const conversionEvent = {
+      conversion: `urn:li:partnerConversion:${LINKEDIN_PARTNER_ID}:${finalConversionId}`,
+      conversionHappenedAt: Math.floor(Date.now() / 1000), // Unix timestamp in seconds
+      user: userData,
+      ...(eventId && { eventId }), // For deduplication
+      ...(eventSourceUrl && { eventSourceUrl }),
+      ...(clientIp && { ipAddress: clientIp }),
+      ...(userAgent && { userAgent }),
+      // Add custom data if provided
+      ...(customData.value !== undefined && { value: customData.value }),
+      ...(customData.currency && { currency: customData.currency }),
+    };
+
+    // Prepare API request
+    const requestBody = {
+      conversionEvents: [conversionEvent],
+    };
+
+    const linkedInVersion = getLinkedInVersion();
+
+    console.log('📤 Sending LinkedIn Conversion API event:', {
+      conversionId: finalConversionId,
+      partnerId: LINKEDIN_PARTNER_ID,
+      email: email ? `${email.substring(0, 3)}***` : 'none',
+      hasUserData: Object.keys(userData).length > 0,
+    });
+
+    // Send to LinkedIn Conversion API
+    const response = await fetch(CONVERSION_API_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LINKEDIN_ACCESS_TOKEN}`,
+        'LinkedIn-Version': linkedInVersion,
+        'X-Restli-Protocol-Version': '2.0.0',
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const responseData = await response.json();
+
+    if (!response.ok) {
+      console.error('❌ LinkedIn Conversion API error:', {
+        status: response.status,
+        error: responseData,
+      });
+
+      return {
+        success: false,
+        error: responseData.message || responseData.error || 'Unknown error',
+        response: responseData,
+      };
+    }
+
+    console.log('✅ LinkedIn Conversion API event sent successfully:', {
+      conversionId: finalConversionId,
+      status: response.status,
+      response: responseData,
+    });
+
+    return {
+      success: true,
+      data: responseData,
+    };
+  } catch (error) {
+    console.error('❌ LinkedIn Conversion API request failed:', error);
+    return {
+      success: false,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Send Schedule event for meeting booking
+ * Convenience wrapper for booking conversions
+ */
+export async function sendScheduleEvent({
+  email,
+  phone,
+  fullName,
+  clientIp,
+  userAgent,
+  utmSource,
+  utmMedium,
+  utmCampaign,
+  utmContent,
+  utmTerm,
+  eventId,
+  eventSourceUrl,
+  conversionId = null,
+}) {
+  const { firstName, lastName } = parseName(fullName);
+
+  const customData = {
+    value: 0,
+    currency: 'USD',
+    // Add UTM parameters for attribution
+    ...(utmSource && { utm_source: utmSource }),
+    ...(utmMedium && { utm_medium: utmMedium }),
+    ...(utmCampaign && { utm_campaign: utmCampaign }),
+    ...(utmContent && { utm_content: utmContent }),
+    ...(utmTerm && { utm_term: utmTerm }),
+  };
+
+  return sendConversionEvent({
+    conversionId: conversionId || LINKEDIN_SCHEDULE_CONVERSION_ID,
+    email,
+    phone,
+    firstName,
+    lastName,
+    clientIp,
+    userAgent,
+    eventId,
+    eventSourceUrl,
+    customData,
+  });
+}
