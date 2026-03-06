@@ -135,8 +135,10 @@ export async function sendConversionEvent({
     }
 
     // Prepare conversion event data
+    // Note: URN format should be urn:lla:llaPartnerConversion:{conversionId}
+    // The conversion ID from Campaign Manager is the llaPartnerConversionId
     const conversionEvent = {
-      conversion: `urn:li:partnerConversion:${LINKEDIN_PARTNER_ID}:${finalConversionId}`,
+      conversion: `urn:lla:llaPartnerConversion:${finalConversionId}`,
       conversionHappenedAt: Math.floor(Date.now() / 1000), // Unix timestamp in seconds
       user: userData,
       ...(eventId && { eventId }), // For deduplication
