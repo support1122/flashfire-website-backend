@@ -26,8 +26,8 @@ const LINKEDIN_ACCESS_TOKEN = process.env.LINKEDIN_ACCESS_TOKEN;
 const LINKEDIN_SCHEDULE_CONVERSION_ID = process.env.LINKEDIN_SCHEDULE_CONVERSION_ID || process.env.NEXT_PUBLIC_LINKEDIN_SCHEDULE_CONVERSION_ID;
 
 // LinkedIn Conversions API endpoint
-// Format: https://api.linkedin.com/v2/conversionEvents
-const CONVERSION_API_URL = 'https://api.linkedin.com/v2/conversionEvents';
+// Format: https://api.linkedin.com/rest/conversionEvents
+const CONVERSION_API_URL = 'https://api.linkedin.com/rest/conversionEvents';
 
 // Get current year-month for LinkedIn-Version header (e.g., "202412")
 const getLinkedInVersion = () => {
@@ -107,31 +107,52 @@ export async function sendConversionEvent({
 
   const finalConversionId = conversionId || LINKEDIN_SCHEDULE_CONVERSION_ID;
 
-  // At least one identifier is required (email, phone, or user ID)
-  if (!email && !phone) {
-    console.warn('⚠️ LinkedIn Conversion API requires at least email or phone');
-    return { success: false, error: 'Email or phone is required' };
+  // At least one identifier is required (email OR firstName+lastName)
+  // LinkedIn accepts: SHA256_EMAIL OR (firstName + lastName)
+  if (!email && (!firstName || !lastName)) {
+    console.warn('⚠️ LinkedIn Conversion API requires email OR (firstName + lastName)');
+    return { success: false, error: 'Email or (firstName + lastName) is required' };
   }
 
   try {
-    // Prepare user data (hashed for privacy)
-    const userData = {};
+    // Prepare user data according to LinkedIn Conversions API schema
+    // LinkedIn requires userIds array and userInfo object
+    // At least one identifier is required: SHA256_EMAIL or (firstName + lastName)
+    const userIds = [];
+    const userInfo = {};
     
+    // Add email to userIds array (hashed) - REQUIRED if available
+    // LinkedIn accepts: SHA256_EMAIL OR (firstName + lastName)
     if (email) {
-      userData.emailAddress = hashData(email);
+      userIds.push({
+        idType: 'SHA256_EMAIL',
+        idValue: hashData(email),
+      });
     }
-    if (phone) {
-      // Remove non-numeric characters before hashing
-      const cleanPhone = phone.replace(/\D/g, '');
-      if (cleanPhone) {
-        userData.phoneNumber = hashData(cleanPhone);
-      }
-    }
+    
+    // Add user info (plain text, not hashed)
+    // Required if no email: must have firstName AND lastName
     if (firstName) {
-      userData.firstName = hashData(firstName);
+      userInfo.firstName = firstName;
     }
     if (lastName) {
-      userData.lastName = hashData(lastName);
+      userInfo.lastName = lastName;
+    }
+    
+    // Build user object - must have at least userIds OR (firstName + lastName)
+    const userData = {};
+    if (userIds.length > 0) {
+      userData.userIds = userIds;
+    }
+    if (Object.keys(userInfo).length > 0) {
+      userData.userInfo = userInfo;
+    }
+    
+    // Validate: Must have at least email OR (firstName + lastName)
+    // LinkedIn requires: SHA256_EMAIL OR LINKEDIN_FIRST_PARTY_ADS_TRACKING_UUID OR (firstName + lastName)
+    if (userIds.length === 0 && (!userInfo.firstName || !userInfo.lastName)) {
+      console.warn('⚠️ LinkedIn Conversion API requires SHA256_EMAIL or (firstName + lastName)');
+      return { success: false, error: 'Email or (firstName + lastName) is required' };
     }
 
     // Prepare conversion event data
@@ -139,21 +160,24 @@ export async function sendConversionEvent({
     // The conversion ID from Campaign Manager is the llaPartnerConversionId
     const conversionEvent = {
       conversion: `urn:lla:llaPartnerConversion:${finalConversionId}`,
-      conversionHappenedAt: Math.floor(Date.now() / 1000), // Unix timestamp in seconds
-      user: userData,
+      conversionHappenedAt: Date.now(), // Unix timestamp in milliseconds
+      user: userData, // Always include user object
       ...(eventId && { eventId }), // For deduplication
       ...(eventSourceUrl && { eventSourceUrl }),
       ...(clientIp && { ipAddress: clientIp }),
       ...(userAgent && { userAgent }),
-      // Add custom data if provided
-      ...(customData.value !== undefined && { value: customData.value }),
-      ...(customData.currency && { currency: customData.currency }),
+      // Add conversion value if provided
+      ...(customData.value !== undefined && {
+        conversionValue: {
+          currencyCode: customData.currency || 'USD',
+          amount: String(customData.value),
+        },
+      }),
     };
 
     // Prepare API request
-    const requestBody = {
-      conversionEvents: [conversionEvent],
-    };
+    // For single event, send the event object directly (not wrapped)
+    const requestBody = conversionEvent;
 
     const linkedInVersion = getLinkedInVersion();
 
