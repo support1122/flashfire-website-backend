@@ -177,11 +177,15 @@ export async function sendConversionEvent({
     const requestBody = conversionEvent;
 
     // LinkedIn API requires version format YYYYMM. Using supported version 202402.
+    // IMPORTANT: Version must be exactly 6 digits (YYYYMM), not 8 digits (YYYYMMDD)
+    const linkedInVersionHeader = String(LINKEDIN_API_VERSION); // Ensure it's a string
+    
     console.log('📤 Sending LinkedIn Conversion API event:', {
       conversionId: finalConversionId,
       partnerId: LINKEDIN_PARTNER_ID,
       email: email ? `${email.substring(0, 3)}***` : 'none',
       hasUserData: Object.keys(userData).length > 0,
+      linkedInVersion: linkedInVersionHeader, // Debug: log the version being sent
     });
 
     // Send to LinkedIn Conversion API
@@ -190,7 +194,7 @@ export async function sendConversionEvent({
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${LINKEDIN_ACCESS_TOKEN}`,
-        'LinkedIn-Version': LINKEDIN_API_VERSION,
+        'LinkedIn-Version': linkedInVersionHeader, // Use explicit variable to ensure correct format
         'X-Restli-Protocol-Version': '2.0.0',
       },
       body: JSON.stringify(requestBody),
