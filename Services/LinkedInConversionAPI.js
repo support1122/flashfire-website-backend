@@ -29,10 +29,11 @@ const LINKEDIN_SCHEDULE_CONVERSION_ID = process.env.LINKEDIN_SCHEDULE_CONVERSION
 // Format: https://api.linkedin.com/rest/conversionEvents
 const CONVERSION_API_URL = 'https://api.linkedin.com/rest/conversionEvents';
 
-// LinkedIn API requires version format YYYYMM. Using supported version 202402.
+// LinkedIn API requires version format YYYYMM. Using supported version 202501 (January 2025).
 // DO NOT use dynamic date generation - LinkedIn versions are released monthly
-// and must match an active, supported version (e.g., 202402, 202403, etc.)
-const LINKEDIN_API_VERSION = '202402';
+// and must match an active, supported version. Versions are supported for minimum 1 year.
+// See: https://learn.microsoft.com/en-us/linkedin/marketing/versioning
+const LINKEDIN_API_VERSION = '202501';
 
 /**
  * Hash user data for privacy compliance (SHA256)
@@ -176,16 +177,14 @@ export async function sendConversionEvent({
     // For single event, send the event object directly (not wrapped)
     const requestBody = conversionEvent;
 
-    // LinkedIn API requires version format YYYYMM. Using supported version 202402.
+    // LinkedIn API requires version format YYYYMM. Using supported version 202501.
     // IMPORTANT: Version must be exactly 6 digits (YYYYMM), not 8 digits (YYYYMMDD)
-    const linkedInVersionHeader = String(LINKEDIN_API_VERSION); // Ensure it's a string
-    
     console.log('📤 Sending LinkedIn Conversion API event:', {
       conversionId: finalConversionId,
       partnerId: LINKEDIN_PARTNER_ID,
       email: email ? `${email.substring(0, 3)}***` : 'none',
       hasUserData: Object.keys(userData).length > 0,
-      linkedInVersion: linkedInVersionHeader, // Debug: log the version being sent
+      linkedInVersion: LINKEDIN_API_VERSION, // Debug: log the version being sent
     });
 
     // Send to LinkedIn Conversion API
@@ -194,7 +193,7 @@ export async function sendConversionEvent({
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${LINKEDIN_ACCESS_TOKEN}`,
-        'LinkedIn-Version': linkedInVersionHeader, // Use explicit variable to ensure correct format
+        'LinkedIn-Version': LINKEDIN_API_VERSION,
         'X-Restli-Protocol-Version': '2.0.0',
       },
       body: JSON.stringify(requestBody),
