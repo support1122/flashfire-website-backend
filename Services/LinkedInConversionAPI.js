@@ -29,13 +29,10 @@ const LINKEDIN_SCHEDULE_CONVERSION_ID = process.env.LINKEDIN_SCHEDULE_CONVERSION
 // Format: https://api.linkedin.com/rest/conversionEvents
 const CONVERSION_API_URL = 'https://api.linkedin.com/rest/conversionEvents';
 
-// Get current year-month for LinkedIn-Version header (e.g., "202412")
-const getLinkedInVersion = () => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  return `${year}${month}`;
-};
+// LinkedIn API requires version format YYYYMM. Using supported version 202402.
+// DO NOT use dynamic date generation - LinkedIn versions are released monthly
+// and must match an active, supported version (e.g., 202402, 202403, etc.)
+const LINKEDIN_API_VERSION = '202402';
 
 /**
  * Hash user data for privacy compliance (SHA256)
@@ -179,8 +176,7 @@ export async function sendConversionEvent({
     // For single event, send the event object directly (not wrapped)
     const requestBody = conversionEvent;
 
-    const linkedInVersion = getLinkedInVersion();
-
+    // LinkedIn API requires version format YYYYMM. Using supported version 202402.
     console.log('📤 Sending LinkedIn Conversion API event:', {
       conversionId: finalConversionId,
       partnerId: LINKEDIN_PARTNER_ID,
@@ -194,7 +190,7 @@ export async function sendConversionEvent({
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${LINKEDIN_ACCESS_TOKEN}`,
-        'LinkedIn-Version': linkedInVersion,
+        'LinkedIn-Version': LINKEDIN_API_VERSION,
         'X-Restli-Protocol-Version': '2.0.0',
       },
       body: JSON.stringify(requestBody),
