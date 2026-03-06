@@ -281,23 +281,28 @@ export const saveCalendlyBooking = async (bookingData) => {
 
     // Send LinkedIn Conversion API event (non-blocking)
     // Server-side tracking bypasses ad blockers and works regardless of browser settings
-    sendLinkedInScheduleEvent({
-      email: booking.clientEmail,
-      phone: booking.clientPhone,
-      fullName: booking.clientName,
-      clientIp: ipAddress || null,
-      userAgent: userAgent || null,
-      utmSource: booking.utmSource || null,
-      utmMedium: utmMedium || null,
-      utmCampaign: utmCampaign || null,
-      utmContent: utmContent || null,
-      utmTerm: utmTerm || null,
-      eventId: booking.bookingId, // Use bookingId for deduplication
-      eventSourceUrl: 'https://www.flashfirejobs.com/meeting-booked',
-    }).catch((error) => {
-      // Log but don't fail the booking save if Conversion API fails
-      console.warn('⚠️ LinkedIn Conversion API call failed (non-critical):', error.message);
-    });
+    // Skip if email is placeholder - real email will come from Calendly webhook
+    if (booking.clientEmail && !booking.clientEmail.includes('@calendly.placeholder')) {
+      sendLinkedInScheduleEvent({
+        email: booking.clientEmail,
+        phone: booking.clientPhone,
+        fullName: booking.clientName,
+        clientIp: ipAddress || null,
+        userAgent: userAgent || null,
+        utmSource: booking.utmSource || null,
+        utmMedium: utmMedium || null,
+        utmCampaign: utmCampaign || null,
+        utmContent: utmContent || null,
+        utmTerm: utmTerm || null,
+        eventId: booking.bookingId, // Use bookingId for deduplication
+        eventSourceUrl: 'https://www.flashfirejobs.com/meeting-booked',
+      }).catch((error) => {
+        // Log but don't fail the booking save if Conversion API fails
+        console.warn('⚠️ LinkedIn Conversion API call failed (non-critical):', error.message);
+      });
+    } else {
+      console.log('⏭️ Skipping LinkedIn conversion - placeholder email, will send when webhook arrives with real email');
+    }
 
     return {
       success: true,
