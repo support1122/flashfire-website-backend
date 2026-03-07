@@ -166,14 +166,18 @@ export async function sendConversionEvent({
     // Prepare conversion event data
     // Note: URN format should be urn:lla:llaPartnerConversion:{conversionId}
     // The conversion ID from Campaign Manager is the llaPartnerConversionId
+    // LinkedIn Conversions API (202503) only accepts these fields:
+    // - conversion (URN)
+    // - conversionHappenedAt (timestamp)
+    // - user (userIds + userInfo)
+    // - eventId (for deduplication)
+    // - conversionValue (currency + amount)
+    // Note: eventSourceUrl, ipAddress, userAgent are NOT supported in this API version
     const conversionEvent = {
       conversion: `urn:lla:llaPartnerConversion:${finalConversionId}`,
       conversionHappenedAt: Date.now(), // Unix timestamp in milliseconds
       user: userData, // Always include user object
       ...(eventId && { eventId }), // For deduplication
-      ...(eventSourceUrl && { eventSourceUrl }),
-      ...(clientIp && { ipAddress: clientIp }),
-      ...(userAgent && { userAgent }),
       // Always include conversionValue (LinkedIn prefers it always present, even if 0)
       conversionValue: {
         currencyCode: customData.currency || 'USD',
