@@ -65,6 +65,8 @@ import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController
 import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
 // Facebook Conversion API Controllers
 import { sendScheduleEventManual, sendCustomEvent } from "./Controllers/FacebookConversionController.js";
+// Meta Lead Ads Webhook Controllers
+import { verifyMetaWebhook, handleMetaLeadWebhook, createMetaLeadManually } from "./Controllers/MetaLeadWebhookController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
 // Payment Controllers
@@ -355,6 +357,10 @@ export default function Routes(app) {
   app.post('/api/webhooks/paypal', handlePayPalWebhook); // Handle PayPal webhook events (PAYMENT.CAPTURE.COMPLETED, etc.)
   // Google Meet / recording metadata (from n8n or other automations)
   app.post('/api/webhooks/google-meet-metadata', handleGoogleMeetMetadataWebhook); // Attach Google Meet / video URLs to CRM leads
+  // Meta Lead Ads Webhooks
+  app.get('/api/webhooks/meta-leads', verifyMetaWebhook); // Meta webhook verification (GET)
+  app.post('/api/webhooks/meta-leads', handleMetaLeadWebhook); // Receive Meta Lead Ad submissions (POST)
+  app.post('/api/meta-leads/manual', createMetaLeadManually); // Manually create Meta lead (for testing)
   // Fireflies Webhooks (DISABLED - Fireflies integration removed)
   // app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
   //   try {
