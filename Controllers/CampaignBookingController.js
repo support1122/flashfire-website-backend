@@ -1693,8 +1693,17 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
 
+    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad) to appear
+    // Only enforce scheduledEventStartTime filter when no date filter is already applied
     if (!matchQuery.scheduledEventStartTime) {
-      matchQuery.scheduledEventStartTime = { $exists: true, $ne: null };
+      // Show all leads: those with scheduled times + meta leads without meetings
+      if (!matchQuery.$and) matchQuery.$and = [];
+      matchQuery.$and.push({
+        $or: [
+          { scheduledEventStartTime: { $exists: true, $ne: null } },
+          { leadSource: 'meta_lead_ad' }
+        ]
+      });
     }
 
     const pipeline = [
@@ -1943,8 +1952,17 @@ export const getLeadsIds = async (req, res) => {
         { utmSource: { $regex: escapedSearch, $options: 'i' } }
       ];
     }
+    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad) to appear
+    // Only enforce scheduledEventStartTime filter when no date filter is already applied
     if (!matchQuery.scheduledEventStartTime) {
-      matchQuery.scheduledEventStartTime = { $exists: true, $ne: null };
+      // Show all leads: those with scheduled times + meta leads without meetings
+      if (!matchQuery.$and) matchQuery.$and = [];
+      matchQuery.$and.push({
+        $or: [
+          { scheduledEventStartTime: { $exists: true, $ne: null } },
+          { leadSource: 'meta_lead_ad' }
+        ]
+      });
     }
 
     const idsPipeline = [

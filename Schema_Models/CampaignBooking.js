@@ -109,6 +109,46 @@ export const CampaignBookingSchema = new mongoose.Schema({
     default: Date.now,
     index: true
   },
+  // Lead source tracking (where the lead originated from)
+  leadSource: {
+    type: String,
+    enum: ['calendly', 'meta_lead_ad', 'manual', 'frontend_direct', 'bulk_import'],
+    default: 'calendly'
+  },
+  // Meta Lead Ads specific fields
+  metaLeadId: {
+    type: String,
+    default: null,
+    index: true
+  },
+  metaFormId: {
+    type: String,
+    default: null
+  },
+  metaAdId: {
+    type: String,
+    default: null
+  },
+  metaCampaignId: {
+    type: String,
+    default: null
+  },
+  metaAdsetId: {
+    type: String,
+    default: null
+  },
+  metaPageId: {
+    type: String,
+    default: null
+  },
+  metaFormName: {
+    type: String,
+    default: null
+  },
+  metaRawData: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null
+  },
   // Visitor tracking
   visitorId: {
     type: String,
