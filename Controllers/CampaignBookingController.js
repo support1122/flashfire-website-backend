@@ -1743,35 +1743,12 @@ export const getLeadsPaginated = async (req, res) => {
       });
     }
 
+    // For Meta leads (meta_lead_ad), show ALL leads including duplicates
+    // For other leads, group by email/phone to show unique leads only
+    const isMetaLeadsOnly = utmSource === 'meta_lead_ad';
+    
     const pipeline = [
       { $match: matchQuery },
-      {
-        $addFields: {
-          groupKey: {
-            $ifNull: ['$clientPhone', '$clientEmail']
-          }
-        }
-      },
-      {
-        $sort: {
-          scheduledEventStartTime: -1,
-          bookingCreatedAt: -1
-        }
-      },
-      {
-        $group: {
-          _id: '$groupKey',
-          booking: { $first: '$$ROOT' },
-          totalBookings: { $sum: 1 }
-        }
-      },
-      {
-        $replaceRoot: {
-          newRoot: {
-            $mergeObjects: ['$booking', { totalBookings: '$totalBookings' }]
-          }
-        }
-      },
       {
         $sort: {
           scheduledEventStartTime: -1,
@@ -1779,6 +1756,46 @@ export const getLeadsPaginated = async (req, res) => {
         }
       }
     ];
+
+    // Only group if NOT Meta leads (Meta leads should show all individual records)
+    if (!isMetaLeadsOnly) {
+      pipeline.push(
+        {
+          $addFields: {
+            groupKey: {
+              $ifNull: ['$clientPhone', '$clientEmail']
+            }
+          }
+        },
+        {
+          $group: {
+            _id: '$groupKey',
+            booking: { $first: '$$ROOT' },
+            totalBookings: { $sum: 1 }
+          }
+        },
+        {
+          $replaceRoot: {
+            newRoot: {
+              $mergeObjects: ['$booking', { totalBookings: '$totalBookings' }]
+            }
+          }
+        },
+        {
+          $sort: {
+            scheduledEventStartTime: -1,
+            bookingCreatedAt: -1
+          }
+        }
+      );
+    } else {
+      // For Meta leads, add totalBookings: 1 to each record (no grouping)
+      pipeline.push({
+        $addFields: {
+          totalBookings: 1
+        }
+      });
+    }
 
     if (search) {
       const trimmedSearch = search.trim();
@@ -1810,24 +1827,33 @@ export const getLeadsPaginated = async (req, res) => {
 
     const bookings = await CampaignBookingModel.aggregate(pipeline);
 
-    const groupedMap = new Map();
-    for (const booking of bookings) {
-      const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
-      const groupKey = normalizedPhone || booking.clientEmail;
-      
-      if (!groupedMap.has(groupKey)) {
-        groupedMap.set(groupKey, booking);
-      } else {
-        const existing = groupedMap.get(groupKey);
-        const existingTime = existing.scheduledEventStartTime ? new Date(existing.scheduledEventStartTime).getTime() : 0;
-        const currentTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
-        if (currentTime > existingTime || (currentTime === existingTime && new Date(booking.bookingCreatedAt).getTime() > new Date(existing.bookingCreatedAt).getTime())) {
+    // Only do additional grouping if NOT Meta leads (Meta leads already show all records)
+    let finalBookings;
+    if (!isMetaLeadsOnly) {
+      const groupedMap = new Map();
+      for (const booking of bookings) {
+        const normalizedPhone = normalizePhoneForMatching(booking.clientPhone);
+        const groupKey = normalizedPhone || booking.clientEmail;
+        
+        if (!groupedMap.has(groupKey)) {
           groupedMap.set(groupKey, booking);
+        } else {
+          const existing = groupedMap.get(groupKey);
+          const existingTime = existing.scheduledEventStartTime ? new Date(existing.scheduledEventStartTime).getTime() : 0;
+          const currentTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : 0;
+          if (currentTime > existingTime || (currentTime === existingTime && new Date(booking.bookingCreatedAt).getTime() > new Date(existing.bookingCreatedAt).getTime())) {
+            groupedMap.set(groupKey, booking);
+          }
         }
       }
+      finalBookings = Array.from(groupedMap.values());
+    } else {
+      // For Meta leads, return all bookings as-is (no additional grouping)
+      finalBookings = bookings;
     }
 
-    const finalBookings = Array.from(groupedMap.values()).sort((a, b) => {
+    // Sort final bookings
+    finalBookings = finalBookings.sort((a, b) => {
       const aTime = a.scheduledEventStartTime ? new Date(a.scheduledEventStartTime).getTime() : 0;
       const bTime = b.scheduledEventStartTime ? new Date(b.scheduledEventStartTime).getTime() : 0;
       if (bTime !== aTime) return bTime - aTime;
