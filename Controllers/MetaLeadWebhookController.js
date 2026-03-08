@@ -72,6 +72,15 @@ function parseLeadFields(fieldData) {
       parsed.phone = value;
     } else if (name.includes('job') || name.includes('role') || name.includes('position')) {
       parsed.jobTitle = value;
+    } else if (name.includes('utm_source') || name === 'utm_source' || name === 'utmsource') {
+      // Extract UTM source from form field
+      parsed.utmSource = value;
+    } else if (name.includes('utm_medium') || name === 'utm_medium' || name === 'utmmedium') {
+      // Extract UTM medium from form field
+      parsed.utmMedium = value;
+    } else if (name.includes('utm_campaign') || name === 'utm_campaign' || name === 'utmcampaign') {
+      // Extract UTM campaign from form field
+      parsed.utmCampaign = value;
     } else {
       // Store any other custom fields
       if (!parsed.customFields) parsed.customFields = {};
@@ -161,21 +170,25 @@ export const handleMetaLeadWebhook = async (req, res) => {
         let clientPhone = '';
         let formName = '';
         let additionalNotes = '';
+        let parsedFields = {};
 
         if (leadData) {
-          const parsed = parseLeadFields(leadData.field_data);
+          parsedFields = parseLeadFields(leadData.field_data);
 
-          clientName = parsed.fullName || 'Meta Lead';
-          clientEmail = parsed.email || '';
-          clientPhone = parsed.phone || '';
+          clientName = parsedFields.fullName || 'Meta Lead';
+          clientEmail = parsedFields.email || '';
+          clientPhone = parsedFields.phone || '';
           formName = leadData.form_name || '';
 
-          // Build additional notes from custom fields
+          // Build additional notes from custom fields (excluding UTM fields)
           const noteParts = [];
-          if (parsed.jobTitle) noteParts.push(`Job/Role: ${parsed.jobTitle}`);
-          if (parsed.customFields) {
-            for (const [key, val] of Object.entries(parsed.customFields)) {
-              noteParts.push(`${key}: ${val}`);
+          if (parsedFields.jobTitle) noteParts.push(`Job/Role: ${parsedFields.jobTitle}`);
+          if (parsedFields.customFields) {
+            for (const [key, val] of Object.entries(parsedFields.customFields)) {
+              // Skip UTM fields from notes (they're stored separately)
+              if (!key.includes('utm')) {
+                noteParts.push(`${key}: ${val}`);
+              }
             }
           }
           if (noteParts.length > 0) {
@@ -189,16 +202,23 @@ export const handleMetaLeadWebhook = async (req, res) => {
           console.warn(`Could not fetch email for lead ${leadgen_id}, using placeholder`);
         }
 
+        // Extract UTM parameters from form fields (if provided in Meta Lead Form)
+        // This allows dynamic UTM tracking without code changes
+        // Users can add hidden fields "utm_source" and "utm_medium" in Meta Lead Form
+        const dynamicUtmSource = parsedFields.utmSource || 'meta_lead_ad'; // Default fallback
+        const dynamicUtmMedium = parsedFields.utmMedium || 'paid'; // Default fallback
+        const dynamicUtmCampaign = parsedFields.utmCampaign || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form');
+
         // Create the CampaignBooking record
         const newBooking = new CampaignBookingModel({
           clientName: clientName.trim(),
           clientEmail: clientEmail.trim().toLowerCase(),
           clientPhone: clientPhone || null,
-          utmSource: 'meta_lead_ad',
-          utmMedium: 'paid',
-          utmCampaign: ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form',
+          utmSource: dynamicUtmSource, // Dynamic from form field or default
+          utmMedium: dynamicUtmMedium, // Dynamic from form field or default
+          utmCampaign: dynamicUtmCampaign, // Dynamic from form field or ad_id
           bookingStatus: 'scheduled',
-          leadSource: 'meta_lead_ad',
+          leadSource: 'meta_lead_ad', // ALWAYS 'meta_lead_ad' so Meta Leads tab works
           metaLeadId: leadgen_id,
           metaFormId: form_id || null,
           metaAdId: ad_id || null,
