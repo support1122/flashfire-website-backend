@@ -373,7 +373,18 @@ export const getAllBookingsPaginated = async (req, res) => {
       ];
     }
 
-    query.scheduledEventStartTime = query.scheduledEventStartTime || { $exists: true, $ne: null };
+    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad) to appear
+    // Only enforce scheduledEventStartTime filter when no date filter is already applied
+    if (!query.scheduledEventStartTime) {
+      // Show all leads: those with scheduled times + meta leads without meetings
+      if (!query.$and) query.$and = [];
+      query.$and.push({
+        $or: [
+          { scheduledEventStartTime: { $exists: true, $ne: null } },
+          { leadSource: 'meta_lead_ad' }
+        ]
+      });
+    }
 
     const total = await CampaignBookingModel.countDocuments(query);
 
