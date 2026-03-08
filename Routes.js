@@ -33,6 +33,10 @@ import {
   getCampaignStatistics
 } from "./Controllers/CampaignController.js";
 import {
+  trackAllPageVisits,
+  getRealTimeStats
+} from "./Controllers/PageVisitController.js";
+import {
   getAllBookings,
   getAllBookingsPaginated,
   getMeetingsBookedToday,
@@ -288,6 +292,10 @@ export default function Routes(app) {
   // Tracking
   app.post('/api/campaigns/track/visit', trackPageVisit); // Track page visit with UTM
   app.post('/api/campaigns/track/button-click', trackButtonClick); // Track button click with UTM
+  
+  // Real-time page visit tracking (all traffic - campaigns + organic + direct)
+  app.post('/api/track/page-visit', trackAllPageVisits); // Track all page visits (real-time)
+  app.get('/api/stats/realtime', getRealTimeStats); // Get real-time stats
 
   // Booking Management
   app.post('/api/campaign-bookings/manual', createBookingManually); // Create booking manually
