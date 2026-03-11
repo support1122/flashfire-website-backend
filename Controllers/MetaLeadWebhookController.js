@@ -1,5 +1,6 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { Logger } from '../Utils/Logger.js';
+import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
 const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
@@ -155,10 +156,10 @@ export const handleMetaLeadWebhook = async (req, res) => {
           continue;
         }
 
-        // Check for duplicate lead
-        const existing = await CampaignBookingModel.findOne({ metaLeadId: leadgen_id });
-        if (existing) {
-          console.log(`Meta lead ${leadgen_id} already exists as booking ${existing.bookingId}, skipping`);
+        // Check for duplicate by Meta lead ID (same Meta lead submitted twice)
+        const existingByMetaId = await CampaignBookingModel.findOne({ metaLeadId: leadgen_id });
+        if (existingByMetaId) {
+          console.log(`Meta lead ${leadgen_id} already exists as booking ${existingByMetaId.bookingId}, skipping`);
           continue;
         }
 
@@ -202,52 +203,83 @@ export const handleMetaLeadWebhook = async (req, res) => {
           console.warn(`Could not fetch email for lead ${leadgen_id}, using placeholder`);
         }
 
-        // Extract UTM parameters from form fields (if provided in Meta Lead Form)
-        // This allows dynamic UTM tracking without code changes
-        // Users can add hidden fields "utm_source" and "utm_medium" in Meta Lead Form
-        const dynamicUtmSource = parsedFields.utmSource || 'meta_lead_ad'; // Default fallback
-        const dynamicUtmMedium = parsedFields.utmMedium || 'paid'; // Default fallback
-        const dynamicUtmCampaign = parsedFields.utmCampaign || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form');
+        const normalizedEmail = clientEmail.trim().toLowerCase();
+        const normalizedPhone = normalizePhoneForMatching(clientPhone);
 
-        // Create the CampaignBooking record
-        const newBooking = new CampaignBookingModel({
-          clientName: clientName.trim(),
-          clientEmail: clientEmail.trim().toLowerCase(),
-          clientPhone: clientPhone || null,
-          utmSource: dynamicUtmSource, // Dynamic from form field or default
-          utmMedium: dynamicUtmMedium, // Dynamic from form field or default
-          utmCampaign: dynamicUtmCampaign, // Dynamic from form field or ad_id
-          bookingStatus: 'scheduled',
-          leadSource: 'meta_lead_ad', // ALWAYS 'meta_lead_ad' so Meta Leads tab works
-          metaLeadId: leadgen_id,
-          metaFormId: form_id || null,
-          metaAdId: ad_id || null,
-          metaAdsetId: adgroup_id || null,
-          metaPageId: pageId || null,
-          metaFormName: formName || null,
-          metaCampaignId: leadValue.campaign_id || null,
-          metaRawData: leadData || leadValue,
-          anythingToKnow: additionalNotes || null,
-          bookingCreatedAt: created_time ? new Date(created_time * 1000) : new Date()
-        });
+        // Sync: find existing lead by Email or Phone (without country code) to merge with current status
+        const orConditions = [{ clientEmail: normalizedEmail }];
+        if (normalizedPhone) {
+          orConditions.push({ normalizedClientPhone: normalizedPhone });
+          // Fallback for docs that don't have normalizedClientPhone yet (legacy)
+          orConditions.push({ clientPhone: { $regex: normalizedPhone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' } });
+        }
+        const existingLead = await CampaignBookingModel.findOne({ $or: orConditions }).sort({ bookingCreatedAt: -1 });
 
-        await newBooking.save();
+        if (existingLead) {
+          // Merge: attach Meta lead data to existing lead; keep existing status and lead source
+          await CampaignBookingModel.findOneAndUpdate(
+            { bookingId: existingLead.bookingId },
+            {
+              $set: {
+                metaLeadId: leadgen_id,
+                metaFormId: form_id || null,
+                metaAdId: ad_id || null,
+                metaAdsetId: adgroup_id || null,
+                metaPageId: pageId || null,
+                metaFormName: formName || null,
+                metaCampaignId: leadValue.campaign_id || null,
+                metaRawData: leadData || leadValue
+              }
+            }
+          );
+          console.log(`Meta lead merged with existing: ${existingLead.bookingId} | ${existingLead.clientEmail} | status: ${existingLead.bookingStatus} | Form: ${formName}`);
+        } else {
+          // No existing lead: create new CampaignBooking
+          const dynamicUtmSource = parsedFields.utmSource || 'meta_lead_ad';
+          const dynamicUtmMedium = parsedFields.utmMedium || 'paid';
+          const dynamicUtmCampaign = parsedFields.utmCampaign || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form');
 
-        console.log(`Meta lead saved: ${newBooking.bookingId} | ${clientName} | ${clientEmail} | Form: ${formName}`);
-
-        // Send Discord notification for new Meta lead
-        try {
-          await sendMetaLeadDiscordNotification({
-            bookingId: newBooking.bookingId,
-            clientName,
-            clientEmail,
-            clientPhone,
-            formName,
-            leadgenId: leadgen_id,
-            adId: ad_id
+          const newBooking = new CampaignBookingModel({
+            clientName: clientName.trim(),
+            clientEmail: normalizedEmail,
+            clientPhone: clientPhone || null,
+            utmSource: dynamicUtmSource,
+            utmMedium: dynamicUtmMedium,
+            utmCampaign: dynamicUtmCampaign,
+            bookingStatus: 'scheduled',
+            leadSource: 'meta_lead_ad',
+            metaLeadId: leadgen_id,
+            metaFormId: form_id || null,
+            metaAdId: ad_id || null,
+            metaAdsetId: adgroup_id || null,
+            metaPageId: pageId || null,
+            metaFormName: formName || null,
+            metaCampaignId: leadValue.campaign_id || null,
+            metaRawData: leadData || leadValue,
+            anythingToKnow: additionalNotes || null,
+            bookingCreatedAt: created_time ? new Date(created_time * 1000) : new Date()
           });
-        } catch (discordErr) {
-          console.error('Failed to send Discord notification for Meta lead:', discordErr.message);
+
+          await newBooking.save();
+          console.log(`Meta lead saved: ${newBooking.bookingId} | ${clientName} | ${clientEmail} | Form: ${formName}`);
+        }
+
+        // Discord notification: use the lead we merged with or the newly created one
+        const targetBooking = existingLead || await CampaignBookingModel.findOne({ metaLeadId: leadgen_id });
+        if (targetBooking) {
+          try {
+            await sendMetaLeadDiscordNotification({
+              bookingId: targetBooking.bookingId,
+              clientName: clientName || targetBooking.clientName,
+              clientEmail: clientEmail || targetBooking.clientEmail,
+              clientPhone: clientPhone || targetBooking.clientPhone || '',
+              formName,
+              leadgenId: leadgen_id,
+              adId: ad_id
+            });
+          } catch (discordErr) {
+            console.error('Failed to send Discord notification for Meta lead:', discordErr.message);
+          }
         }
       }
     }
@@ -285,7 +317,8 @@ async function sendMetaLeadDiscordNotification(leadInfo) {
 }
 
 /**
- * Manual endpoint to test Meta lead creation (for debugging)
+ * Manual endpoint to test Meta lead creation (for debugging).
+ * Uses same merge-by-email-or-phone logic as webhook: existing lead is updated with Meta fields.
  */
 export const createMetaLeadManually = async (req, res) => {
   try {
@@ -298,9 +331,43 @@ export const createMetaLeadManually = async (req, res) => {
       });
     }
 
+    const normalizedEmail = clientEmail.trim().toLowerCase();
+    const normalizedPhone = normalizePhoneForMatching(clientPhone || '');
+
+    const orConditions = [{ clientEmail: normalizedEmail }];
+    if (normalizedPhone) {
+      orConditions.push({ normalizedClientPhone: normalizedPhone });
+      orConditions.push({ clientPhone: { $regex: normalizedPhone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' } });
+    }
+    const existingLead = await CampaignBookingModel.findOne({ $or: orConditions }).sort({ bookingCreatedAt: -1 });
+
+    if (existingLead) {
+      await CampaignBookingModel.findOneAndUpdate(
+        { bookingId: existingLead.bookingId },
+        {
+          $set: {
+            metaFormName: formName || null,
+            metaAdId: adId || null
+          }
+        }
+      );
+      return res.status(200).json({
+        success: true,
+        message: 'Meta lead merged with existing lead',
+        merged: true,
+        booking: {
+          bookingId: existingLead.bookingId,
+          clientName: existingLead.clientName,
+          clientEmail: existingLead.clientEmail,
+          bookingStatus: existingLead.bookingStatus,
+          leadSource: existingLead.leadSource
+        }
+      });
+    }
+
     const newBooking = new CampaignBookingModel({
       clientName: clientName.trim(),
-      clientEmail: clientEmail.trim().toLowerCase(),
+      clientEmail: normalizedEmail,
       clientPhone: clientPhone || null,
       utmSource: 'meta_lead_ad',
       utmMedium: 'paid',

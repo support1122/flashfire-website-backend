@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { normalizePhoneForMatching } from "../Utils/normalizePhoneForMatching.js";
 
 // Schema for tracking successful Calendly bookings from campaigns
 export const CampaignBookingSchema = new mongoose.Schema({
@@ -51,6 +52,12 @@ export const CampaignBookingSchema = new mongoose.Schema({
   clientPhone: {
     type: String,
     default: null
+  },
+  // Normalized phone (no country code) for matching/sync (e.g. Meta leads merge)
+  normalizedClientPhone: {
+    type: String,
+    default: null,
+    index: true
   },
   // Calendly details
   calendlyEventUri: {
@@ -379,6 +386,16 @@ export const CampaignBookingSchema = new mongoose.Schema({
   }
 }, {
   timestamps: true
+});
+
+// Keep normalizedClientPhone in sync with clientPhone for lead matching/sync
+CampaignBookingSchema.pre('save', function (next) {
+  if (this.clientPhone) {
+    this.normalizedClientPhone = normalizePhoneForMatching(this.clientPhone) || null;
+  } else {
+    this.normalizedClientPhone = null;
+  }
+  next();
 });
 
 // Indexes for efficient queries
