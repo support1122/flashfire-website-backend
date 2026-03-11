@@ -1683,7 +1683,18 @@ export const getLeadsPaginated = async (req, res) => {
     }
 
     if (utmSource && utmSource !== 'all') {
-      matchQuery.utmSource = utmSource;
+      if (utmSource === 'meta_lead_ad') {
+        // Meta Leads tab: show all leads that have Meta lead data (native or merged)
+        matchQuery.$and = matchQuery.$and || [];
+        matchQuery.$and.push({
+          $or: [
+            { metaLeadId: { $exists: true, $ne: null } },
+            { leadSource: 'meta_lead_ad' }
+          ]
+        });
+      } else {
+        matchQuery.utmSource = utmSource;
+      }
     }
 
     if (normalizedPlanName && normalizedPlanName !== 'ALL') {
@@ -1733,12 +1744,13 @@ export const getLeadsPaginated = async (req, res) => {
     // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad) to appear
     // Only enforce scheduledEventStartTime filter when no date filter is already applied
     if (!matchQuery.scheduledEventStartTime) {
-      // Show all leads: those with scheduled times + meta leads without meetings
+      // Show all leads: those with scheduled times + meta leads (native or merged) without meetings
       if (!matchQuery.$and) matchQuery.$and = [];
       matchQuery.$and.push({
         $or: [
           { scheduledEventStartTime: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' }
+          { leadSource: 'meta_lead_ad' },
+          { metaLeadId: { $exists: true, $ne: null } }
         ]
       });
     }
