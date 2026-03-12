@@ -280,14 +280,16 @@ async function handleCreatedEvent(req, res, payload) {
       Logger.warn('Failed to cancel not-scheduled workflows during meta sync', { error: cancelErr.message });
     }
 
-    // Merge Calendly data into the existing meta lead and set status to scheduled
+    // Merge Calendly data into the existing meta lead and set status to scheduled (keep normalizedClientPhone in sync)
+    const mergedPhone = inviteePhone || existingMetaLead.clientPhone;
     const mergedBooking = await CampaignBookingModel.findOneAndUpdate(
       { bookingId: existingMetaLead.bookingId },
       {
         $set: {
           bookingStatus: 'scheduled',
           clientName: inviteeName || existingMetaLead.clientName,
-          clientPhone: inviteePhone || existingMetaLead.clientPhone,
+          clientPhone: mergedPhone || existingMetaLead.clientPhone,
+          normalizedClientPhone: normalizePhoneForMatching(mergedPhone) || null,
           calendlyEventUri: payload?.scheduled_event?.uri || null,
           calendlyInviteeUri: payload?.invitee?.uri || null,
           calendlyMeetLink: meetLink || null,

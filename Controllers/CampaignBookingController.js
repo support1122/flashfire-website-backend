@@ -196,14 +196,16 @@ export const saveCalendlyBooking = async (bookingData) => {
         console.warn('Failed to cancel not-scheduled workflows during meta sync:', cancelErr.message);
       }
 
-      // Merge Calendly data into the existing meta lead
+      // Merge Calendly data into the existing meta lead (keep normalizedClientPhone in sync for future matching)
+      const mergedPhone = clientPhone || existingMetaLead.clientPhone;
       const mergedBooking = await CampaignBookingModel.findOneAndUpdate(
         { bookingId: existingMetaLead.bookingId },
         {
           $set: {
             bookingStatus: 'scheduled',
             clientName: clientName?.trim() || existingMetaLead.clientName,
-            clientPhone: clientPhone || existingMetaLead.clientPhone,
+            clientPhone: mergedPhone || existingMetaLead.clientPhone,
+            normalizedClientPhone: normalizePhoneForMatching(mergedPhone) || null,
             campaignId: campaignId || existingMetaLead.campaignId,
             calendlyEventUri: calendlyEventUri || null,
             calendlyInviteeUri: calendlyInviteeUri || null,
@@ -1690,33 +1692,6 @@ export const bulkCreateLeads = async (req, res) => {
     });
   }
 };
-
-/**
- * Normalize phone number for matching (extracts last 10 digits for US numbers)
- * This allows matching +12272188477 with 2272188477
- */
-function normalizePhoneForMatching(phone) {
-  if (!phone) return null;
-  
-  // Remove all non-digit characters except leading +
-  const cleaned = phone.replace(/[\s\-\(\)]/g, '');
-  
-  // Extract last 10 digits (US phone numbers)
-  // Handle formats: +12272188477, 12272188477, 2272188477
-  if (cleaned.startsWith('+1') && cleaned.length >= 12) {
-    // Format: +1XXXXXXXXXX -> extract last 10 digits
-    return cleaned.slice(-10);
-  } else if (cleaned.startsWith('1') && cleaned.length >= 11 && /^\d+$/.test(cleaned)) {
-    // Format: 1XXXXXXXXXX -> extract last 10 digits
-    return cleaned.slice(-10);
-  } else if (cleaned.length >= 10 && /^\d+$/.test(cleaned)) {
-    // Format: XXXXXXXXXX -> use last 10 digits
-    return cleaned.slice(-10);
-  }
-  
-  // For other formats, return cleaned version
-  return cleaned.replace(/\D/g, '').slice(-10);
-}
 
 export const getLeadsPaginated = async (req, res) => {
   try {
