@@ -1280,10 +1280,12 @@ export const getBookingsByStatusForBulk = async (req, res) => {
     }
 
     const statusMap = {
+      'not-scheduled': 'not-scheduled',
       'no-show': 'no-show',
       'completed': 'completed',
       'canceled': 'canceled',
-      'rescheduled': 'rescheduled'
+      'rescheduled': 'rescheduled',
+      'paid': 'paid'
     };
 
     const dbStatus = statusMap[status];
@@ -1303,9 +1305,16 @@ export const getBookingsByStatusForBulk = async (req, res) => {
       }
     }
 
-    const allBookings = await CampaignBookingModel.find({
-      scheduledEventStartTime: { $exists: true, $ne: null }
-    })
+    // For not-scheduled status, include leads without scheduledEventStartTime (meta leads)
+    const baseQuery = dbStatus === 'not-scheduled'
+      ? { $or: [
+          { scheduledEventStartTime: { $exists: true, $ne: null } },
+          { leadSource: 'meta_lead_ad' },
+          { bookingStatus: 'not-scheduled' }
+        ]}
+      : { scheduledEventStartTime: { $exists: true, $ne: null } };
+
+    const allBookings = await CampaignBookingModel.find(baseQuery)
       .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .lean();
@@ -1624,10 +1633,12 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
     }
 
     const statusMap = {
+      'not-scheduled': { dbStatus: 'not-scheduled', action: 'not-scheduled' },
       'no-show': { dbStatus: 'no-show', action: 'no-show' },
       'completed': { dbStatus: 'completed', action: 'completed' },
       'canceled': { dbStatus: 'canceled', action: 'canceled' },
-      'rescheduled': { dbStatus: 'rescheduled', action: 'rescheduled' }
+      'rescheduled': { dbStatus: 'rescheduled', action: 'rescheduled' },
+      'paid': { dbStatus: 'paid', action: 'paid' }
     };
 
     const statusInfo = statusMap[status];
@@ -1638,9 +1649,16 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
       });
     }
 
-    const allBookings = await CampaignBookingModel.find({
-      scheduledEventStartTime: { $exists: true, $ne: null }
-    })
+    // For not-scheduled status, include leads without scheduledEventStartTime (meta leads)
+    const baseQuery = statusInfo.dbStatus === 'not-scheduled'
+      ? { $or: [
+          { scheduledEventStartTime: { $exists: true, $ne: null } },
+          { leadSource: 'meta_lead_ad' },
+          { bookingStatus: 'not-scheduled' }
+        ]}
+      : { scheduledEventStartTime: { $exists: true, $ne: null } };
+
+    const allBookings = await CampaignBookingModel.find(baseQuery)
       .select('bookingId clientEmail clientName clientPhone bookingStatus scheduledEventStartTime scheduledWorkflows bookingCreatedAt')
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .lean();
