@@ -159,7 +159,7 @@ export const createWorkflow = async (req, res) => {
       });
     }
 
-    const validActions = ['no-show', 'complete', 'cancel', 're-schedule', 'custom'];
+    const validActions = ['not-scheduled', 'no-show', 'complete', 'cancel', 're-schedule', 'paid', 'custom'];
     if (!validActions.includes(triggerAction)) {
       return res.status(400).json({
         success: false,
@@ -307,7 +307,7 @@ export const updateWorkflow = async (req, res) => {
 
     // Validate triggerAction if provided
     if (triggerAction) {
-      const validActions = ['no-show', 'complete', 'cancel', 're-schedule', 'custom'];
+      const validActions = ['not-scheduled', 'no-show', 'complete', 'cancel', 're-schedule', 'paid', 'custom'];
       if (!validActions.includes(triggerAction)) {
         return res.status(400).json({
           success: false,
@@ -591,10 +591,12 @@ export const checkWorkflowsNeedPlanDetails = async (req, res) => {
     }
 
     const actionMap = {
+      'not-scheduled': 'not-scheduled',
       'no-show': 'no-show',
       'completed': 'complete',
       'canceled': 'cancel',
-      'rescheduled': 're-schedule'
+      'rescheduled': 're-schedule',
+      'paid': 'paid'
     };
 
     const triggerAction = actionMap[action];
@@ -648,6 +650,7 @@ export const triggerWorkflow = async (bookingId, action) => {
   try {
     // Map action to triggerAction format
     const actionMap = {
+      'not-scheduled': 'not-scheduled',
       'no-show': 'no-show',
       'completed': 'complete',
       'canceled': 'cancel',
@@ -747,7 +750,7 @@ export const cancelScheduledWorkflows = async (bookingId, newStatus, oldStatus =
     // Statuses that should cancel all scheduled workflows
     // Cancel workflows when moving to these statuses from workflow-triggering statuses (like 'no-show')
     // This prevents old workflows from executing for the wrong status
-    const cancelTriggerStatuses = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled'];
+    const cancelTriggerStatuses = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled', 'not-scheduled'];
     
     if (!cancelTriggerStatuses.includes(newStatus)) {
       return { success: true, cancelled: 0, message: 'Status does not require workflow cancellation' };
@@ -1404,16 +1407,18 @@ export const resendAllFailedWhatsApp = async (req, res) => {
     const { status } = req.body || {};
 
     const statusMap = {
+      'not-scheduled': 'not-scheduled',
       'no-show': 'no-show',
       'completed': 'completed',
       'canceled': 'canceled',
-      'rescheduled': 'rescheduled'
+      'rescheduled': 'rescheduled',
+      'paid': 'paid'
     };
 
     if (!status || !statusMap[status]) {
       return res.status(400).json({
         success: false,
-        message: 'Valid status is required (no-show, completed, canceled, rescheduled)'
+        message: 'Valid status is required (not-scheduled, no-show, completed, canceled, rescheduled, paid)'
       });
     }
 
@@ -1719,10 +1724,12 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
     const bookings = filteredBookings;
 
     const actionMap = {
+      'not-scheduled': 'not-scheduled',
       'no-show': 'no-show',
       'completed': 'complete',
       'canceled': 'cancel',
-      'rescheduled': 're-schedule'
+      'rescheduled': 're-schedule',
+      'paid': 'paid'
     };
 
     const triggerAction = actionMap[statusInfo.action];
