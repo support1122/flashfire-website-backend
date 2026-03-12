@@ -11,6 +11,7 @@ import { Logger } from '../Utils/Logger.js';
 import { sendScheduleEvent } from '../Services/FacebookConversionAPI.js';
 import { sendScheduleEvent as sendGoogleAdsScheduleEvent } from '../Services/GoogleAdsConversionAPI.js';
 import { sendScheduleEvent as sendLinkedInScheduleEvent } from '../Services/LinkedInConversionAPI.js';
+import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 
 const PLAN_CATALOG = {
   PRIME: { price: 99, currency: 'USD', displayPrice: '$99' },
@@ -19,7 +20,7 @@ const PLAN_CATALOG = {
   EXECUTIVE: { price: 599, currency: 'USD', displayPrice: '$599' },
 };
 
-const MQL_STATUSES = ['scheduled', 'rescheduled', 'no-show', 'canceled', 'ignored'];
+const MQL_STATUSES = ['not-scheduled', 'scheduled', 'rescheduled', 'no-show', 'canceled', 'ignored'];
 const SQL_STATUSES = ['completed'];
 const CONVERTED_STATUSES = ['paid'];
 
@@ -169,6 +170,74 @@ export const saveCalendlyBooking = async (bookingData) => {
           duplicate: true
         };
       }
+    }
+
+    // META LEAD SYNC: Check if there's a not-scheduled meta lead matching by email/phone
+    const normalizedPhone = normalizePhoneForMatching(clientPhone);
+    const metaSyncConditions = [{ clientEmail: clientEmail.trim().toLowerCase() }];
+    if (normalizedPhone) {
+      metaSyncConditions.push({ normalizedClientPhone: normalizedPhone });
+      metaSyncConditions.push({ clientPhone: { $regex: normalizedPhone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' } });
+    }
+
+    const existingMetaLead = await CampaignBookingModel.findOne({
+      bookingStatus: 'not-scheduled',
+      leadSource: 'meta_lead_ad',
+      $or: metaSyncConditions
+    }).sort({ bookingCreatedAt: -1 });
+
+    if (existingMetaLead) {
+      console.log(`🔗 Meta lead sync: upgrading not-scheduled meta lead ${existingMetaLead.bookingId} to scheduled`);
+
+      // Cancel not-scheduled workflows before status change
+      try {
+        await cancelScheduledWorkflows(existingMetaLead.bookingId, 'scheduled', 'not-scheduled');
+      } catch (cancelErr) {
+        console.warn('Failed to cancel not-scheduled workflows during meta sync:', cancelErr.message);
+      }
+
+      // Merge Calendly data into the existing meta lead (keep normalizedClientPhone in sync for future matching)
+      const mergedPhone = clientPhone || existingMetaLead.clientPhone;
+      const mergedBooking = await CampaignBookingModel.findOneAndUpdate(
+        { bookingId: existingMetaLead.bookingId },
+        {
+          $set: {
+            bookingStatus: 'scheduled',
+            clientName: clientName?.trim() || existingMetaLead.clientName,
+            clientPhone: mergedPhone || existingMetaLead.clientPhone,
+            normalizedClientPhone: normalizePhoneForMatching(mergedPhone) || null,
+            campaignId: campaignId || existingMetaLead.campaignId,
+            calendlyEventUri: calendlyEventUri || null,
+            calendlyInviteeUri: calendlyInviteeUri || null,
+            calendlyMeetLink: calendlyMeetLink || null,
+            scheduledEventStartTime: scheduledEventStartTime || null,
+            scheduledEventEndTime: scheduledEventEndTime || null,
+            anythingToKnow: anythingToKnow || existingMetaLead.anythingToKnow,
+            questionsAndAnswers: questionsAndAnswers || null,
+            visitorId: visitorId || null,
+            userAgent: userAgent || null,
+            ipAddress: ipAddress || null
+          }
+        },
+        { new: true }
+      );
+
+      // Mark user as booked
+      try {
+        const escapedEmail = mergedBooking.clientEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        await UserModel.updateOne(
+          { email: { $regex: new RegExp(`^${escapedEmail}$`, 'i') } },
+          { $set: { booked: true } }
+        );
+      } catch (userUpdateError) {
+        console.warn('Failed to update user booked status during meta sync:', userUpdateError.message);
+      }
+
+      return {
+        success: true,
+        data: mergedBooking,
+        metaSynced: true
+      };
     }
 
     // Create booking record
@@ -373,15 +442,16 @@ export const getAllBookingsPaginated = async (req, res) => {
       ];
     }
 
-    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad) to appear
+    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad, not-scheduled) to appear
     // Only enforce scheduledEventStartTime filter when no date filter is already applied
     if (!query.scheduledEventStartTime) {
-      // Show all leads: those with scheduled times + meta leads without meetings
+      // Show all leads: those with scheduled times + meta leads without meetings + not-scheduled leads
       if (!query.$and) query.$and = [];
       query.$and.push({
         $or: [
           { scheduledEventStartTime: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' }
+          { leadSource: 'meta_lead_ad' },
+          { bookingStatus: 'not-scheduled' }
         ]
       });
     }
@@ -695,7 +765,7 @@ export const updateBookingStatus = async (req, res) => {
     const { bookingId } = req.params;
     const { status, plan, planDetails, paymentBreakdown } = req.body;
 
-    const validStatuses = ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid', 'ignored'];
+    const validStatuses = ['not-scheduled', 'scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid', 'ignored'];
 
     if (!validStatuses.includes(status)) {
       return res.status(400).json({
@@ -1015,7 +1085,7 @@ export const updateBookingStatus = async (req, res) => {
     // Cancel workflows when moving away from workflow-triggering statuses (like 'no-show') 
     // to other statuses, so old workflows don't execute for the wrong status
     const oldStatus = existingBooking.bookingStatus;
-    const statusesThatCancelWorkflows = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled'];
+    const statusesThatCancelWorkflows = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled', 'not-scheduled'];
     
     // Cancel workflows if:
     // 1. New status is in the cancellation list AND
@@ -1049,7 +1119,7 @@ export const updateBookingStatus = async (req, res) => {
     }
 
     // Trigger workflows for specific status changes
-    const workflowTriggerStatuses = ['completed', 'canceled', 'rescheduled', 'no-show', 'paid'];
+    const workflowTriggerStatuses = ['not-scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid'];
     if (workflowTriggerStatuses.includes(status)) {
       try {
         Logger.info('Triggering workflows for status change', {
@@ -1623,33 +1693,6 @@ export const bulkCreateLeads = async (req, res) => {
   }
 };
 
-/**
- * Normalize phone number for matching (extracts last 10 digits for US numbers)
- * This allows matching +12272188477 with 2272188477
- */
-function normalizePhoneForMatching(phone) {
-  if (!phone) return null;
-  
-  // Remove all non-digit characters except leading +
-  const cleaned = phone.replace(/[\s\-\(\)]/g, '');
-  
-  // Extract last 10 digits (US phone numbers)
-  // Handle formats: +12272188477, 12272188477, 2272188477
-  if (cleaned.startsWith('+1') && cleaned.length >= 12) {
-    // Format: +1XXXXXXXXXX -> extract last 10 digits
-    return cleaned.slice(-10);
-  } else if (cleaned.startsWith('1') && cleaned.length >= 11 && /^\d+$/.test(cleaned)) {
-    // Format: 1XXXXXXXXXX -> extract last 10 digits
-    return cleaned.slice(-10);
-  } else if (cleaned.length >= 10 && /^\d+$/.test(cleaned)) {
-    // Format: XXXXXXXXXX -> use last 10 digits
-    return cleaned.slice(-10);
-  }
-  
-  // For other formats, return cleaned version
-  return cleaned.replace(/\D/g, '').slice(-10);
-}
-
 export const getLeadsPaginated = async (req, res) => {
   try {
     const {
@@ -1741,16 +1784,17 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
 
-    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad) to appear
+    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad, not-scheduled) to appear
     // Only enforce scheduledEventStartTime filter when no date filter is already applied
     if (!matchQuery.scheduledEventStartTime) {
-      // Show all leads: those with scheduled times + meta leads (native or merged) without meetings
+      // Show all leads: those with scheduled times + meta leads (native or merged) without meetings + not-scheduled leads
       if (!matchQuery.$and) matchQuery.$and = [];
       matchQuery.$and.push({
         $or: [
           { scheduledEventStartTime: { $exists: true, $ne: null } },
           { leadSource: 'meta_lead_ad' },
-          { metaLeadId: { $exists: true, $ne: null } }
+          { metaLeadId: { $exists: true, $ne: null } },
+          { bookingStatus: 'not-scheduled' }
         ]
       });
     }
@@ -2027,15 +2071,16 @@ export const getLeadsIds = async (req, res) => {
         { utmSource: { $regex: escapedSearch, $options: 'i' } }
       ];
     }
-    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad) to appear
+    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad, not-scheduled) to appear
     // Only enforce scheduledEventStartTime filter when no date filter is already applied
     if (!matchQuery.scheduledEventStartTime) {
-      // Show all leads: those with scheduled times + meta leads without meetings
+      // Show all leads: those with scheduled times + meta leads without meetings + not-scheduled leads
       if (!matchQuery.$and) matchQuery.$and = [];
       matchQuery.$and.push({
         $or: [
           { scheduledEventStartTime: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' }
+          { leadSource: 'meta_lead_ad' },
+          { bookingStatus: 'not-scheduled' }
         ]
       });
     }

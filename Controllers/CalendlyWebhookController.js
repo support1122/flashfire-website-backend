@@ -8,6 +8,8 @@ import { cancelCall, scheduleCall } from '../Utils/CallScheduler.js';
 import { cancelWhatsAppReminder, scheduleAllWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler.js';
 import { cancelDiscordMeetRemindersForMeeting, scheduleDiscordMeetReminder } from '../Utils/DiscordMeetReminderScheduler.js';
 import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
+import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
+import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 import { DateTime } from 'luxon';
 import crypto from 'crypto';
 
@@ -246,6 +248,86 @@ async function handleCreatedEvent(req, res, payload) {
       message: 'Duplicate booking detected and suppressed',
       duplicate: true,
       existingBookingId: existingBooking.bookingId
+    });
+  }
+
+  // META LEAD SYNC: Check if there's an existing meta lead with 'not-scheduled' status
+  // matching by email or phone (without country code). If found, upgrade it to 'scheduled'
+  // and merge Calendly booking data into it instead of creating a new booking.
+  const normalizedPhone = normalizePhoneForMatching(inviteePhone);
+  const metaSyncConditions = [{ clientEmail: inviteeEmail.trim().toLowerCase() }];
+  if (normalizedPhone) {
+    metaSyncConditions.push({ normalizedClientPhone: normalizedPhone });
+    metaSyncConditions.push({ clientPhone: { $regex: normalizedPhone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' } });
+  }
+
+  const existingMetaLead = await CampaignBookingModel.findOne({
+    bookingStatus: 'not-scheduled',
+    leadSource: 'meta_lead_ad',
+    $or: metaSyncConditions
+  }).sort({ bookingCreatedAt: -1 });
+
+  if (existingMetaLead) {
+    Logger.info('🔗 Meta lead sync: upgrading not-scheduled meta lead to scheduled', {
+      metaBookingId: existingMetaLead.bookingId,
+      email: inviteeEmail
+    });
+
+    // Cancel any 'not-scheduled' workflows before status change
+    try {
+      await cancelScheduledWorkflows(existingMetaLead.bookingId, 'scheduled', 'not-scheduled');
+    } catch (cancelErr) {
+      Logger.warn('Failed to cancel not-scheduled workflows during meta sync', { error: cancelErr.message });
+    }
+
+    // Merge Calendly data into the existing meta lead and set status to scheduled (keep normalizedClientPhone in sync)
+    const mergedPhone = inviteePhone || existingMetaLead.clientPhone;
+    const mergedBooking = await CampaignBookingModel.findOneAndUpdate(
+      { bookingId: existingMetaLead.bookingId },
+      {
+        $set: {
+          bookingStatus: 'scheduled',
+          clientName: inviteeName || existingMetaLead.clientName,
+          clientPhone: mergedPhone || existingMetaLead.clientPhone,
+          normalizedClientPhone: normalizePhoneForMatching(mergedPhone) || null,
+          calendlyEventUri: payload?.scheduled_event?.uri || null,
+          calendlyInviteeUri: payload?.invitee?.uri || null,
+          calendlyMeetLink: meetLink || null,
+          calendlyRescheduleLink: rescheduleLink || null,
+          scheduledEventStartTime: payload?.scheduled_event?.start_time || null,
+          scheduledEventEndTime: payload?.scheduled_event?.end_time || null,
+          inviteeTimezone: inviteeTimezone || null,
+          anythingToKnow: anythingToKnow || existingMetaLead.anythingToKnow,
+          questionsAndAnswers: payload?.questions_and_answers || null,
+          userAgent: req.headers['user-agent'],
+          ipAddress: req.ip || req.connection.remoteAddress
+        }
+      },
+      { new: true }
+    );
+
+    Logger.info('✅ Meta lead synced to scheduled', {
+      bookingId: mergedBooking.bookingId,
+      clientEmail: mergedBooking.clientEmail,
+      metaLeadId: mergedBooking.metaLeadId
+    });
+
+    // Mark user as booked
+    try {
+      const escapedEmail = inviteeEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      await UserModel.updateOne(
+        { email: { $regex: new RegExp(`^${escapedEmail}$`, 'i') } },
+        { $set: { booked: true } }
+      );
+    } catch (userUpdateError) {
+      Logger.warn('Failed to update user booked status during meta sync', { error: userUpdateError.message });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Meta lead synced and upgraded to scheduled',
+      bookingId: mergedBooking.bookingId,
+      metaSynced: true
     });
   }
 

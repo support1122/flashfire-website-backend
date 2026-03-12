@@ -1,6 +1,7 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { Logger } from '../Utils/Logger.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
+import { triggerWorkflow } from './WorkflowController.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
 const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
@@ -246,7 +247,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
             utmSource: dynamicUtmSource,
             utmMedium: dynamicUtmMedium,
             utmCampaign: dynamicUtmCampaign,
-            bookingStatus: 'scheduled',
+            bookingStatus: 'not-scheduled',
             leadSource: 'meta_lead_ad',
             metaLeadId: leadgen_id,
             metaFormId: form_id || null,
@@ -262,6 +263,16 @@ export const handleMetaLeadWebhook = async (req, res) => {
 
           await newBooking.save();
           console.log(`Meta lead saved: ${newBooking.bookingId} | ${clientName} | ${clientEmail} | Form: ${formName}`);
+
+          // Auto-trigger 'not-scheduled' workflows for new meta leads
+          try {
+            const workflowResult = await triggerWorkflow(newBooking.bookingId, 'not-scheduled');
+            if (workflowResult.success && workflowResult.triggered) {
+              console.log(`✅ Not-scheduled workflows triggered for meta lead ${newBooking.bookingId}`);
+            }
+          } catch (wfError) {
+            console.error(`Failed to trigger not-scheduled workflows for meta lead ${newBooking.bookingId}:`, wfError.message);
+          }
         }
 
         // Discord notification: use the lead we merged with or the newly created one
@@ -372,7 +383,7 @@ export const createMetaLeadManually = async (req, res) => {
       utmSource: 'meta_lead_ad',
       utmMedium: 'paid',
       utmCampaign: adId ? `meta_ad_${adId}` : 'meta_lead_form',
-      bookingStatus: 'scheduled',
+      bookingStatus: 'not-scheduled',
       leadSource: 'meta_lead_ad',
       metaFormName: formName || null,
       metaAdId: adId || null,
@@ -380,6 +391,16 @@ export const createMetaLeadManually = async (req, res) => {
     });
 
     await newBooking.save();
+
+    // Auto-trigger 'not-scheduled' workflows for new meta leads
+    try {
+      const workflowResult = await triggerWorkflow(newBooking.bookingId, 'not-scheduled');
+      if (workflowResult.success && workflowResult.triggered) {
+        console.log(`✅ Not-scheduled workflows triggered for manual meta lead ${newBooking.bookingId}`);
+      }
+    } catch (wfError) {
+      console.error(`Failed to trigger not-scheduled workflows for manual meta lead ${newBooking.bookingId}:`, wfError.message);
+    }
 
     return res.status(201).json({
       success: true,

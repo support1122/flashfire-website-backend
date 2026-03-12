@@ -172,7 +172,7 @@ export const CampaignBookingSchema = new mongoose.Schema({
   // Status tracking
   bookingStatus: {
     type: String,
-    enum: ['scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'ignored', 'paid'],
+    enum: ['not-scheduled', 'scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'ignored', 'paid'],
     default: 'scheduled'
   },
   paymentPlan: {
