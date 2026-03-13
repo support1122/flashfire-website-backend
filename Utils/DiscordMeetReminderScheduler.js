@@ -17,7 +17,8 @@ let isRunning = false;
 let pollInterval = null;
 
 /**
- * Schedule a Discord reminder 3 minutes before a meeting start time.
+ * Schedule a Discord BDA reminder 5 minutes before a meeting start time.
+ * Fires at the same time as the WhatsApp reminder to the client.
  * Uses DISCORD_MEET_2MIN_WEBHOOK_URL env (same webhook).
  */
 export async function scheduleDiscordMeetReminder({
@@ -51,7 +52,8 @@ export async function scheduleDiscordMeetReminder({
       return { success: false, error: 'Invalid meetingStartISO' };
     }
 
-    const reminderTime = new Date(meetingStart.getTime() - 3 * 60 * 1000);
+    // 5 minutes before meeting (same time as WhatsApp to client)
+    const reminderTime = new Date(meetingStart.getTime() - 5 * 60 * 1000);
     const now = new Date();
 
     // If reminder time is already past, skip scheduling
@@ -67,7 +69,7 @@ export async function scheduleDiscordMeetReminder({
     }
 
     const baseId = bookingId || clientEmail || clientName || 'unknown';
-    const reminderId = `discord_meet_3min_${baseId}_${meetingStart.getTime()}`;
+    const reminderId = `discord_meet_5min_${baseId}_${meetingStart.getTime()}`;
 
     // Idempotency: do not create duplicates
     const existing = await ScheduledDiscordMeetReminderModel.findOne({ reminderId });

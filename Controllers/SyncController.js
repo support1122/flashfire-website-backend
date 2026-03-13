@@ -3,7 +3,7 @@ import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDis
 import { scheduleDiscordMeetReminder } from '../Utils/DiscordMeetReminderScheduler.js';
 
 /**
- * Sync Discord BDA reminders: find all upcoming meetings that don't have a 3-min
+ * Sync Discord BDA reminders: find all upcoming meetings that don't have a 5-min
  * Discord reminder in DB and create one. Call this route periodically or once to
  * backfill (e.g. for meetings booked before Discord reminders were implemented).
  *
@@ -12,7 +12,7 @@ import { scheduleDiscordMeetReminder } from '../Utils/DiscordMeetReminderSchedul
 export const syncDiscordBdaReminders = async (req, res) => {
   try {
     const now = new Date();
-    const minMeetingStart = new Date(now.getTime() + 4 * 60 * 1000); // meeting at least 4 min away (so 3-min reminder is in future)
+    const minMeetingStart = new Date(now.getTime() + 6 * 60 * 1000); // meeting at least 6 min away (so 5-min reminder is in future)
 
     const bookings = await CampaignBookingModel.find({
       scheduledEventStartTime: { $gte: minMeetingStart },
@@ -28,7 +28,7 @@ export const syncDiscordBdaReminders = async (req, res) => {
     for (const booking of bookings) {
       const meetingStart = new Date(booking.scheduledEventStartTime);
       const baseId = booking.bookingId || booking.clientEmail || booking.clientName || 'unknown';
-      const reminderId = `discord_meet_3min_${baseId}_${meetingStart.getTime()}`;
+      const reminderId = `discord_meet_5min_${baseId}_${meetingStart.getTime()}`;
 
       const existing = await ScheduledDiscordMeetReminderModel.findOne({ reminderId }).lean();
       if (existing) {

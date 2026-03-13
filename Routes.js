@@ -381,7 +381,7 @@ export default function Routes(app) {
   // }, handleFirefliesWebhook); // Handle Fireflies webhook events (Transcription completed)
 
   // ==================== SYNC ROUTES ====================
-  app.get('/sync/discordbdareminders', syncDiscordBdaReminders); // Backfill 3-min Discord reminders for all upcoming meetings
+  app.get('/sync/discordbdareminders', syncDiscordBdaReminders); // Backfill 5-min Discord BDA reminders for all upcoming meetings
   app.post('/sync/discordbdareminders', syncDiscordBdaReminders);
 
   // ==================== TEST ROUTES ====================
