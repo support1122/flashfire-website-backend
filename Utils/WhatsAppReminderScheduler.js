@@ -350,8 +350,8 @@ export async function scheduleAllWhatsAppReminders({
     );
   }
 
-  // Ensure Discord 3-min meeting reminder exists (idempotent: no duplicate if already in DB)
-  // Covers previously booked meetings that get WA reminders but weren't in Calendly webhook flow
+  // Ensure Discord BDA meeting reminder exists at 5 min before (same time as client WhatsApp)
+  // Idempotent: no duplicate if already in DB. Covers previously booked meetings that get WA reminders but weren't in Calendly webhook flow.
   try {
     const inviteeTimezone =
       timezone === 'ET'
@@ -371,7 +371,7 @@ export async function scheduleAllWhatsAppReminders({
     });
   } catch (discordErr) {
     console.warn(
-      '[WhatsAppReminderScheduler] Discord 3-min meet reminder schedule failed (non-fatal):',
+      '[WhatsAppReminderScheduler] Discord BDA meet reminder schedule failed (non-fatal):',
       discordErr?.message ?? discordErr
     );
   }
