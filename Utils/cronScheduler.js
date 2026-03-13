@@ -64,17 +64,24 @@ function getISTEmailWindow(date, bookingId = null) {
  * @param {number} daysAfter - Days after trigger date
  * @param {string} channel - 'email' or 'whatsapp' (for workflows)
  * @param {string} bookingId - Optional booking ID for deterministic email timing
+ * @param {number} hoursAfter - Hours after trigger date (added on top of days)
  */
-function calculateScheduledDate(triggerDate, daysAfter, channel = null, bookingId = null) {
+function calculateScheduledDate(triggerDate, daysAfter, channel = null, bookingId = null, hoursAfter = 0) {
   const targetDate = new Date(triggerDate);
   targetDate.setDate(targetDate.getDate() + daysAfter);
+
+  // If hoursAfter is set, use exact time scheduling (no window-based)
+  if (hoursAfter > 0) {
+    targetDate.setTime(targetDate.getTime() + (hoursAfter * 60 * 60 * 1000));
+    return targetDate;
+  }
 
   if (channel === 'whatsapp') {
     return getIST11PM(targetDate);
   } else if (channel === 'email') {
     return getISTEmailWindow(targetDate, bookingId);
   }
-  
+
   // Default: 7:30 PM IST (for backward compatibility with campaigns)
   return getIST730PM(targetDate);
 }
@@ -398,10 +405,22 @@ async function processScheduledItems() {
     }).limit(100);
 
     if (allDueWorkflows.length > 0) {
-      // Separate workflows by channel
-      const emailWorkflows = allDueWorkflows.filter(log => log.step?.channel === 'email');
-      const whatsappWorkflows = allDueWorkflows.filter(log => log.step?.channel === 'whatsapp');
-      
+      // Separate hour-based workflows (process immediately) from day-based (window-based)
+      const hourBasedWorkflows = allDueWorkflows.filter(log => (log.step?.hoursAfter || 0) > 0);
+      const dayBasedWorkflows = allDueWorkflows.filter(log => !(log.step?.hoursAfter > 0));
+
+      // Process hour-based workflows immediately (no window restriction)
+      if (hourBasedWorkflows.length > 0) {
+        console.log(`⏰ Processing ${hourBasedWorkflows.length} hour-based workflow logs (exact time scheduling)`);
+        for (const log of hourBasedWorkflows) {
+          await executeWorkflowLog(log);
+        }
+      }
+
+      // Separate day-based workflows by channel
+      const emailWorkflows = dayBasedWorkflows.filter(log => log.step?.channel === 'email');
+      const whatsappWorkflows = dayBasedWorkflows.filter(log => log.step?.channel === 'whatsapp');
+
       // Process email workflows only during email window (8-10 PM IST)
       if (isEmailWorkflowWindow && emailWorkflows.length > 0) {
         console.log(`📧 Processing ${emailWorkflows.length} scheduled email workflow logs (8-10 PM IST window)`);
@@ -409,7 +428,7 @@ async function processScheduledItems() {
           await executeWorkflowLog(log);
         }
       }
-      
+
       // Process WhatsApp workflows only during WhatsApp window (11 PM IST)
       if (isWhatsAppWorkflowWindow && whatsappWorkflows.length > 0) {
         console.log(`📱 Processing ${whatsappWorkflows.length} scheduled WhatsApp workflow logs (11 PM IST window)`);
@@ -417,11 +436,11 @@ async function processScheduledItems() {
           await executeWorkflowLog(log);
         }
       }
-      
+
       // Log if workflows are waiting outside their windows (for monitoring)
       const waitingEmail = emailWorkflows.length > 0 && !isEmailWorkflowWindow;
       const waitingWhatsApp = whatsappWorkflows.length > 0 && !isWhatsAppWorkflowWindow;
-      
+
       if (waitingEmail || waitingWhatsApp) {
         const emailCount = waitingEmail ? emailWorkflows.length : 0;
         const whatsappCount = waitingWhatsApp ? whatsappWorkflows.length : 0;

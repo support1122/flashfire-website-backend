@@ -189,6 +189,12 @@ export const createWorkflow = async (req, res) => {
           message: `Step ${i + 1}: daysAfter must be a non-negative number`
         });
       }
+      if (step.hoursAfter !== undefined && (typeof step.hoursAfter !== 'number' || step.hoursAfter < 0 || step.hoursAfter > 23)) {
+        return res.status(400).json({
+          success: false,
+          message: `Step ${i + 1}: hoursAfter must be a number between 0 and 23`
+        });
+      }
       if (!step.templateId || step.templateId.trim() === '') {
         return res.status(400).json({
           success: false,
@@ -200,6 +206,7 @@ export const createWorkflow = async (req, res) => {
     // Sort steps by order
     const sortedSteps = steps.map((step, index) => ({
       ...step,
+      hoursAfter: step.hoursAfter || 0,
       order: step.order !== undefined ? step.order : index
     })).sort((a, b) => a.order - b.order);
 
@@ -340,6 +347,12 @@ export const updateWorkflow = async (req, res) => {
             message: `Step ${i + 1}: daysAfter must be a non-negative number`
           });
         }
+        if (step.hoursAfter !== undefined && (typeof step.hoursAfter !== 'number' || step.hoursAfter < 0 || step.hoursAfter > 23)) {
+          return res.status(400).json({
+            success: false,
+            message: `Step ${i + 1}: hoursAfter must be a number between 0 and 23`
+          });
+        }
         if (!step.templateId || step.templateId.trim() === '') {
           return res.status(400).json({
             success: false,
@@ -351,6 +364,7 @@ export const updateWorkflow = async (req, res) => {
       // Sort steps by order
       const sortedSteps = steps.map((step, index) => ({
         ...step,
+        hoursAfter: step.hoursAfter || 0,
         order: step.order !== undefined ? step.order : index
       })).sort((a, b) => a.order - b.order);
 
@@ -527,7 +541,8 @@ export const triggerCustomWorkflowForBooking = async (req, res) => {
     const { calculateScheduledDate } = await import('../Utils/cronScheduler.js');
     for (const step of workflow.steps) {
       try {
-        if (step.daysAfter === 0) {
+        const hoursAfter = step.hoursAfter || 0;
+        if (step.daysAfter === 0 && hoursAfter === 0) {
           await executeWorkflowStep(step, booking, workflow.workflowId, workflow.name, 'custom');
           results.workflowsTriggered.push({
             workflowId: workflow.workflowId,
@@ -537,7 +552,7 @@ export const triggerCustomWorkflowForBooking = async (req, res) => {
             executedAt: new Date()
           });
         } else {
-          const executionDate = calculateScheduledDate(new Date(), step.daysAfter, step.channel, bookingId);
+          const executionDate = calculateScheduledDate(new Date(), step.daysAfter, step.channel, bookingId, hoursAfter);
           await scheduleWorkflowStep(bookingId, step, workflow.workflowId, executionDate, booking, workflow.name, 'custom');
           results.workflowsTriggered.push({
             workflowId: workflow.workflowId,
@@ -692,7 +707,8 @@ export const triggerWorkflow = async (bookingId, action) => {
     for (const workflow of workflows) {
       for (const step of workflow.steps) {
         try {
-          if (step.daysAfter === 0) {
+          const stepHoursAfter = step.hoursAfter || 0;
+          if (step.daysAfter === 0 && stepHoursAfter === 0) {
             await executeWorkflowStep(step, booking, workflow.workflowId, workflow.name, triggerAction);
             results.workflowsTriggered.push({
               workflowId: workflow.workflowId,
@@ -702,8 +718,8 @@ export const triggerWorkflow = async (bookingId, action) => {
               executedAt: new Date()
             });
           } else {
-            // Use channel-specific timing for workflows
-            const executionDate = calculateScheduledDate(new Date(), step.daysAfter, step.channel, bookingId);
+            // Use channel-specific timing for workflows (or exact time if hoursAfter > 0)
+            const executionDate = calculateScheduledDate(new Date(), step.daysAfter, step.channel, bookingId, stepHoursAfter);
             await scheduleWorkflowStep(bookingId, step, workflow.workflowId, executionDate, booking, workflow.name, triggerAction);
             results.workflowsTriggered.push({
               workflowId: workflow.workflowId,
@@ -1183,6 +1199,7 @@ async function logWorkflowExecution({ workflowId, workflowName, triggerAction, b
       step: {
         channel: step.channel,
         daysAfter: step.daysAfter,
+        hoursAfter: step.hoursAfter || 0,
         templateId: step.templateId,
         templateName: step.templateName || null,
         domainName: step.domainName || null,
@@ -1505,6 +1522,7 @@ export const resendAllFailedWhatsApp = async (req, res) => {
           'step.channel': 'whatsapp',
           'step.templateId': log.step.templateId,
           'step.daysAfter': log.step.daysAfter,
+          'step.hoursAfter': log.step.hoursAfter || 0,
           status: 'executed'
         }).lean();
 
@@ -1516,7 +1534,7 @@ export const resendAllFailedWhatsApp = async (req, res) => {
 
         // Dedupe: if we've already re-scheduled this exact client/template/day,
         // don't schedule another message – just delete the extra failed log.
-        const dedupeKey = `${log.bookingId || booking.bookingId}_${log.step.templateId || ''}_${log.step.daysAfter || 0}`;
+        const dedupeKey = `${log.bookingId || booking.bookingId}_${log.step.templateId || ''}_${log.step.daysAfter || 0}_${log.step.hoursAfter || 0}`;
         if (dedupeKeys.has(dedupeKey)) {
           await WorkflowLogModel.deleteOne({ logId: log.logId });
           results.deleted++;
@@ -1537,10 +1555,11 @@ export const resendAllFailedWhatsApp = async (req, res) => {
           workflowCache.set(log.workflowId, workflow);
         }
 
-        const step = workflow.steps.find(s => 
+        const step = workflow.steps.find(s =>
           s.channel === log.step.channel &&
           s.templateId === log.step.templateId &&
-          s.daysAfter === log.step.daysAfter
+          s.daysAfter === log.step.daysAfter &&
+          (s.hoursAfter || 0) === (log.step.hoursAfter || 0)
         );
 
         if (!step) {
@@ -1581,7 +1600,7 @@ export const resendAllFailedWhatsApp = async (req, res) => {
           );
 
           // Mark this combination as processed to avoid duplicate sends
-          const dedupeKey = `${log.bookingId || booking.bookingId}_${log.step.templateId || ''}_${log.step.daysAfter || 0}`;
+          const dedupeKey = `${log.bookingId || booking.bookingId}_${log.step.templateId || ''}_${log.step.daysAfter || 0}_${log.step.hoursAfter || 0}`;
           dedupeKeys.add(dedupeKey);
 
           await WorkflowLogModel.deleteOne({ logId: log.logId });

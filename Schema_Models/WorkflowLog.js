@@ -51,6 +51,10 @@ export const WorkflowLogSchema = new mongoose.Schema({
       type: Number,
       required: true
     },
+    hoursAfter: {
+      type: Number,
+      default: 0
+    },
     templateId: {
       type: String,
       required: true
