@@ -30,6 +30,11 @@ export const WorkflowSchema = new mongoose.Schema({
       min: 0,
       default: 0
     },
+    hoursAfter: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
     templateId: {
       type: String,
       required: true,
