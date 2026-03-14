@@ -281,7 +281,7 @@ class WatiService {
 
       const formattedParameters = (parameters || []).map((value, idx) => ({
         name: `${idx + 1}`,
-        value
+        value: (value === null || value === undefined || String(value).trim() === '') ? ' ' : String(value)
       }));
 
       // Always send by template NAME to WATI.

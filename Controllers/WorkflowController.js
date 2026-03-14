@@ -994,6 +994,25 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
           planName: planName,
           planPrice: planPrice
         });
+      } else if (templateName === 'meta_1' || step.templateId === 'meta_1') {
+        // Handle meta_1 template
+        // Template body: Hi {{1}}, Thank you for submitting your request to Flashfire.
+        //   To continue with the next step, you can schedule your consultation here: {{2}}
+        // Parameters: {{1}} = client name, {{2}} = scheduling link
+
+        const schedulingLink = step.templateConfig?.schedulingLink
+          || booking.calendlyRescheduleLink
+          || 'https://calendly.com/feedback-flashfire/30min';
+
+        parameters = [
+          booking.clientName || 'Valued Client', // {{1}}
+          schedulingLink // {{2}}
+        ];
+
+        console.log(`📋 meta_1 template parameters:`, {
+          clientName: parameters[0],
+          schedulingLink: parameters[1]
+        });
       } else if (templateName === 'cancelled1' || step.templateId === 'cancelled1') {
         if (!booking.scheduledEventStartTime) {
           throw new Error('Meeting date/time not available for cancelled1 template');
@@ -1065,6 +1084,88 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
           timeWithTimezone: parameters[2],
           rescheduleLink: parameters[3]
         });
+      } else if (templateName === 'flashfire_appointment_reminder' || step.templateId === 'flashfire_appointment_reminder') {
+        // Handle flashfire_appointment_reminder template
+        // Parameters: {{1}} = name, {{2}} = date, {{3}} = time with timezone, {{4}} = meeting link, {{5}} = reschedule link
+        if (!booking.scheduledEventStartTime) {
+          throw new Error('Meeting date/time not available for flashfire_appointment_reminder template');
+        }
+
+        const meetingStart = new Date(booking.scheduledEventStartTime);
+        const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
+        const meetingEndUTC = booking.scheduledEventEndTime
+          ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime), { zone: 'utc' })
+          : meetingStartUTC.plus({ minutes: 15 });
+
+        const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('MMM d');
+
+        const startTimeET = meetingStartUTC.setZone('America/New_York');
+        const startTimeFormatted = startTimeET.minute === 0
+          ? startTimeET.toFormat('ha').toLowerCase()
+          : startTimeET.toFormat('h:mma').toLowerCase();
+
+        const endTimeET = meetingEndUTC.setZone('America/New_York');
+        const endTimeFormatted = endTimeET.minute === 0
+          ? endTimeET.toFormat('ha').toLowerCase()
+          : endTimeET.toFormat('h:mma').toLowerCase();
+
+        const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
+
+        let timezone;
+        if (booking.inviteeTimezone) {
+          timezone = getTimezoneAbbreviationFromIANA(booking.inviteeTimezone, booking.scheduledEventStartTime);
+        } else {
+          const meetingET = meetingStartUTC.setZone('America/New_York');
+          const etOffset = meetingET.offset / 60;
+          timezone = (etOffset === -5 || etOffset === -4) ? 'ET' : 'ET';
+        }
+
+        const meetingTimeWithTimezone = `${meetingTimeFormatted} ${timezone}`;
+
+        const meetingLink = booking.calendlyMeetLink || booking.googleMeetUrl || booking.meetingVideoUrl || 'Not Provided';
+
+        let rescheduleLink = booking.calendlyRescheduleLink || null;
+        if (!rescheduleLink) {
+          try {
+            const fetchedLink = await getRescheduleLinkForBooking(booking);
+            if (fetchedLink) {
+              rescheduleLink = fetchedLink;
+            }
+          } catch (error) {
+            console.warn('⚠️ [WorkflowController] Could not fetch reschedule link:', error.message);
+          }
+        }
+        if (!rescheduleLink) {
+          rescheduleLink = 'https://calendly.com/feedback-flashfire/30min';
+        }
+
+        parameters = [
+          booking.clientName || 'Valued Client', // {{1}}
+          meetingDateFormatted, // {{2}}
+          meetingTimeWithTimezone, // {{3}}
+          meetingLink, // {{4}}
+          rescheduleLink // {{5}}
+        ];
+
+        console.log(`📋 flashfire_appointment_reminder template parameters:`, {
+          clientName: parameters[0],
+          date: parameters[1],
+          timeWithTimezone: parameters[2],
+          meetingLink: parameters[3],
+          rescheduleLink: parameters[4]
+        });
+      } else {
+        // Generic fallback: populate {{1}} with client name for any unhandled template
+        // This prevents "blank text" errors for templates that at minimum need a client name
+        console.warn(`⚠️ [WorkflowController] No specific handler for template "${templateName}", using generic parameters`);
+        parameters = [
+          booking.clientName || 'Valued Client' // {{1}} - at minimum provide client name
+        ];
+
+        // If templateConfig has a schedulingLink, add it as {{2}}
+        if (step.templateConfig?.schedulingLink) {
+          parameters.push(step.templateConfig.schedulingLink);
+        }
       }
 
       const watiTemplateName = step.templateName;
