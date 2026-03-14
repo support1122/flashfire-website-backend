@@ -1,5 +1,6 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { watiCircuitBreaker } from './CircuitBreaker.js';
 
 dotenv.config();
 
@@ -281,7 +282,7 @@ class WatiService {
 
       const formattedParameters = (parameters || []).map((value, idx) => ({
         name: `${idx + 1}`,
-        value
+        value: (value === null || value === undefined || String(value).trim() === '') ? ' ' : String(value)
       }));
 
       // Always send by template NAME to WATI.
@@ -313,10 +314,12 @@ class WatiService {
         payload: messageData
       });
 
-      const response = await axios.post(url, messageData, {
-        headers: this.headers,
-        timeout: 15000
-      });
+      const response = await watiCircuitBreaker.execute(() =>
+        axios.post(url, messageData, {
+          headers: this.headers,
+          timeout: 15000
+        })
+      );
 
       console.log('📥 WATI response:', {
         status: response.status,

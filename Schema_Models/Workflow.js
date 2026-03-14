@@ -71,6 +71,10 @@ export const WorkflowSchema = new mongoose.Schema({
       days: {
         type: Number,
         default: 7
+      },
+      schedulingLink: {
+        type: String,
+        default: null
       }
     }
   }],

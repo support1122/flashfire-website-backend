@@ -74,12 +74,16 @@ export const WorkflowLogSchema = new mongoose.Schema({
     order: {
       type: Number,
       default: 0
+    },
+    templateConfig: {
+      type: mongoose.Schema.Types.Mixed,
+      default: null
     }
   },
   // Execution details
   status: {
     type: String,
-    enum: ['scheduled', 'executed', 'failed', 'cancelled'],
+    enum: ['scheduled', 'processing', 'executed', 'failed', 'cancelled'],
     required: true,
     default: 'scheduled',
     index: true
@@ -93,12 +97,30 @@ export const WorkflowLogSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+  claimedAt: {
+    type: Date,
+    default: null
+  },
   error: {
     type: String,
     default: null
   },
   errorDetails: {
     type: mongoose.Schema.Types.Mixed,
+    default: null
+  },
+  // Retry support
+  attempts: {
+    type: Number,
+    default: 0
+  },
+  maxAttempts: {
+    type: Number,
+    default: 3
+  },
+  // Idempotency key to prevent duplicate scheduling
+  idempotencyKey: {
+    type: String,
     default: null
   },
   // Response details
@@ -121,6 +143,7 @@ WorkflowLogSchema.index({ status: 1, scheduledFor: 1 });
 WorkflowLogSchema.index({ createdAt: -1 });
 WorkflowLogSchema.index({ triggerAction: 1, status: 1 });
 WorkflowLogSchema.index({ bookingId: 1, workflowId: 1, 'step.templateId': 1 });
+WorkflowLogSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
 
 export const WorkflowLogModel = mongoose.model('WorkflowLog', WorkflowLogSchema);
 
