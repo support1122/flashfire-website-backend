@@ -1,5 +1,6 @@
 import axios from 'axios';
 import dotenv from 'dotenv';
+import { watiCircuitBreaker } from './CircuitBreaker.js';
 
 dotenv.config();
 
@@ -313,10 +314,12 @@ class WatiService {
         payload: messageData
       });
 
-      const response = await axios.post(url, messageData, {
-        headers: this.headers,
-        timeout: 15000
-      });
+      const response = await watiCircuitBreaker.execute(() =>
+        axios.post(url, messageData, {
+          headers: this.headers,
+          timeout: 15000
+        })
+      );
 
       console.log('📥 WATI response:', {
         status: response.status,

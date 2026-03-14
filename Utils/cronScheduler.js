@@ -8,6 +8,9 @@ import watiService from './WatiService.js';
 import { EmailCampaignModel } from '../Schema_Models/EmailCampaign.js';
 import { DateTime } from 'luxon';
 import { scheduleEmailBatch, scheduleWhatsAppBatch } from './JobScheduler.js';
+import { buildTemplateParameters } from './TemplateParameterBuilder.js';
+import { safeErrorDetails } from './safeErrorDetails.js';
+import { sendgridCircuitBreaker } from './CircuitBreaker.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
@@ -104,6 +107,13 @@ export async function executeWorkflowLog(log) {
     }
 
     if (log.step.channel === 'email') {
+      if (!booking.clientEmail) {
+        await WorkflowLogModel.updateOne(
+          { logId: log.logId },
+          { $set: { status: 'failed', error: 'Client email not available', executedAt: new Date() } }
+        );
+        return;
+      }
       const domainName = log.step.domainName || 'flashfiremails.com';
       let senderEmail = log.step.senderEmail || process.env.SENDER_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'elizabeth@flashfirehq.com';
 
@@ -118,7 +128,7 @@ export async function executeWorkflowLog(log) {
         }
       };
 
-      const result = await sgMail.send(msg);
+      const result = await sendgridCircuitBreaker.execute(() => sgMail.send(msg));
       const responseData = { statusCode: result[0]?.statusCode, messageId: result[0]?.headers?.['x-message-id'] };
 
       await WorkflowLogModel.updateOne(
@@ -148,11 +158,19 @@ export async function executeWorkflowLog(log) {
         return;
       }
 
+      // Build template parameters from booking data (was previously sending empty [])
+      const templateName = log.step.templateName || log.step.templateId;
+      const parameters = await buildTemplateParameters(templateName, {
+        booking,
+        step: log.step,
+        executedAt: new Date()
+      });
+
       const result = await watiService.sendTemplateMessage({
         mobileNumber: booking.clientPhone,
         templateId: log.step.templateId,
         templateName: log.step.templateName,
-        parameters: [],
+        parameters,
         campaignId: `workflow_${log.workflowId}_${Date.now()}`
       });
 
@@ -174,18 +192,45 @@ export async function executeWorkflowLog(log) {
       console.log(`✅ Workflow WhatsApp sent: ${log.logId} to ${booking.clientPhone}`);
     }
   } catch (error) {
-    console.error(`❌ Error executing workflow log ${log.logId}:`, error);
-    await WorkflowLogModel.updateOne(
-      { logId: log.logId },
-      {
-        $set: {
-          status: 'failed',
-          error: error.message,
-          errorDetails: error.response || error,
-          executedAt: new Date()
+    console.error(`[cronScheduler] Error executing workflow log ${log.logId}:`, error.message);
+
+    const currentAttempts = (log.attempts || 0) + 1;
+    const maxAttempts = log.maxAttempts || 3;
+
+    if (currentAttempts < maxAttempts) {
+      // Exponential backoff: 5min, 20min, 80min...
+      const delayMs = Math.pow(4, currentAttempts) * 5 * 60 * 1000;
+      const nextRetry = new Date(Date.now() + delayMs);
+
+      console.log(`[cronScheduler] Retry ${currentAttempts}/${maxAttempts} for ${log.logId}, next at ${nextRetry.toISOString()}`);
+
+      await WorkflowLogModel.updateOne(
+        { logId: log.logId },
+        {
+          $set: {
+            status: 'scheduled',
+            scheduledFor: nextRetry,
+            error: `Attempt ${currentAttempts} failed: ${error.message}`,
+            errorDetails: safeErrorDetails(error),
+            attempts: currentAttempts
+          }
         }
-      }
-    );
+      );
+    } else {
+      // Max retries exhausted — mark as permanently failed
+      await WorkflowLogModel.updateOne(
+        { logId: log.logId },
+        {
+          $set: {
+            status: 'failed',
+            error: error.message,
+            errorDetails: safeErrorDetails(error),
+            executedAt: new Date(),
+            attempts: currentAttempts
+          }
+        }
+      );
+    }
   }
 }
 
@@ -397,54 +442,66 @@ async function processScheduledItems() {
     // Legacy send window for campaigns (7:30 PM IST)
     const isSendWindow = currentHour === SEND_HOUR && currentMinute >= SEND_MINUTE && currentMinute < SEND_MINUTE + 15;
 
-    // Process workflow logs based on channel type and timing
-    // Find workflows that are due (scheduledFor <= now)
-    const allDueWorkflows = await WorkflowLogModel.find({
-      status: 'scheduled',
-      scheduledFor: { $lte: now }
-    }).limit(100);
+    // Atomic claim pattern: use findOneAndUpdate to claim one log at a time.
+    // This prevents duplicate execution when multiple cron ticks or server instances overlap.
 
-    if (allDueWorkflows.length > 0) {
-      // Separate hour-based workflows (process immediately) from day-based (window-based)
-      const hourBasedWorkflows = allDueWorkflows.filter(log => (log.step?.hoursAfter || 0) > 0);
-      const dayBasedWorkflows = allDueWorkflows.filter(log => !(log.step?.hoursAfter > 0));
-
-      // Process hour-based workflows immediately (no window restriction)
-      if (hourBasedWorkflows.length > 0) {
-        console.log(`⏰ Processing ${hourBasedWorkflows.length} hour-based workflow logs (exact time scheduling)`);
-        for (const log of hourBasedWorkflows) {
-          await executeWorkflowLog(log);
+    // Helper: atomically claim and execute workflow logs matching a filter
+    async function claimAndExecute(extraFilter, label) {
+      let count = 0;
+      let claimed;
+      do {
+        claimed = await WorkflowLogModel.findOneAndUpdate(
+          {
+            status: 'scheduled',
+            scheduledFor: { $lte: now },
+            ...extraFilter
+          },
+          {
+            $set: { status: 'processing', claimedAt: now }
+          },
+          { returnDocument: 'after', sort: { scheduledFor: 1 } }
+        );
+        if (claimed) {
+          count++;
+          await executeWorkflowLog(claimed);
         }
+      } while (claimed);
+      if (count > 0) {
+        console.log(`[cronScheduler] ${label}: processed ${count} workflow logs`);
       }
+    }
 
-      // Separate day-based workflows by channel
-      const emailWorkflows = dayBasedWorkflows.filter(log => log.step?.channel === 'email');
-      const whatsappWorkflows = dayBasedWorkflows.filter(log => log.step?.channel === 'whatsapp');
+    // 1. Hour-based workflows execute immediately (no window restriction)
+    await claimAndExecute(
+      { 'step.hoursAfter': { $gt: 0 } },
+      'Hour-based (immediate)'
+    );
 
-      // Process email workflows only during email window (8-10 PM IST)
-      if (isEmailWorkflowWindow && emailWorkflows.length > 0) {
-        console.log(`📧 Processing ${emailWorkflows.length} scheduled email workflow logs (8-10 PM IST window)`);
-        for (const log of emailWorkflows) {
-          await executeWorkflowLog(log);
-        }
-      }
+    // 2. Day-based email workflows — only during email window (8-10 PM IST)
+    if (isEmailWorkflowWindow) {
+      await claimAndExecute(
+        { 'step.channel': 'email', $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }] },
+        'Email workflows (8-10 PM IST)'
+      );
+    }
 
-      // Process WhatsApp workflows only during WhatsApp window (11 PM IST)
-      if (isWhatsAppWorkflowWindow && whatsappWorkflows.length > 0) {
-        console.log(`📱 Processing ${whatsappWorkflows.length} scheduled WhatsApp workflow logs (11 PM IST window)`);
-        for (const log of whatsappWorkflows) {
-          await executeWorkflowLog(log);
-        }
-      }
+    // 3. Day-based WhatsApp workflows — only during WhatsApp window (11 PM IST)
+    if (isWhatsAppWorkflowWindow) {
+      await claimAndExecute(
+        { 'step.channel': 'whatsapp', $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }] },
+        'WhatsApp workflows (11 PM IST)'
+      );
+    }
 
-      // Log if workflows are waiting outside their windows (for monitoring)
-      const waitingEmail = emailWorkflows.length > 0 && !isEmailWorkflowWindow;
-      const waitingWhatsApp = whatsappWorkflows.length > 0 && !isWhatsAppWorkflowWindow;
-
-      if (waitingEmail || waitingWhatsApp) {
-        const emailCount = waitingEmail ? emailWorkflows.length : 0;
-        const whatsappCount = waitingWhatsApp ? whatsappWorkflows.length : 0;
-        console.log(`⏳ Workflows waiting for their send windows: ${emailCount > 0 ? `${emailCount} email (waiting for 8-10 PM IST)` : ''} ${whatsappCount > 0 ? `${whatsappCount} WhatsApp (waiting for 11 PM IST)` : ''}`);
+    // Log waiting workflows outside their windows (for monitoring)
+    if (!isEmailWorkflowWindow || !isWhatsAppWorkflowWindow) {
+      const waitingCount = await WorkflowLogModel.countDocuments({
+        status: 'scheduled',
+        scheduledFor: { $lte: now },
+        $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }]
+      });
+      if (waitingCount > 0) {
+        console.log(`[cronScheduler] ${waitingCount} day-based workflows waiting for their send windows`);
       }
     }
 

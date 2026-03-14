@@ -6,6 +6,8 @@ import sgMail from '@sendgrid/mail';
 import watiService from '../Utils/WatiService.js';
 import { DateTime } from 'luxon';
 import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
+import { buildTemplateParameters } from '../Utils/TemplateParameterBuilder.js';
+import { safeErrorDetails } from '../Utils/safeErrorDetails.js';
 
 function normalizePhoneForMatching(phone) {
   if (!phone) return null;
@@ -877,6 +879,9 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
   
   try {
     if (step.channel === 'email') {
+      if (!booking.clientEmail) {
+        throw new Error('Client email not available');
+      }
       const domainName = step.domainName || 'flashfiremails.com';
 
       let senderEmail;
@@ -924,249 +929,9 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
         throw new Error('Client phone number not available');
       }
 
-      // Prepare parameters based on template
-      let parameters = [];
+      // Build template parameters using shared builder (single source of truth)
       const templateName = step.templateName || step.templateId;
-
-      // Handle finalkk template with custom parameters
-      if (templateName === 'finalkk' || step.templateId === 'finalkk') {
-        // Get plan details from booking.planDetails (from status update), templateConfig (from workflow), or defaults
-        const planName = booking.paymentPlan?.name || step.templateConfig?.planName || 'PRIME';
-        const days = booking.planDetails?.days || step.templateConfig?.days || 7;
-        
-        // Calculate date (days from execution)
-        const executionDate = new Date(executedAt);
-        const reminderDate = new Date(executionDate);
-        reminderDate.setDate(reminderDate.getDate() + days);
-        
-        // Format date as "MMM DD, YYYY" (e.g., "Jan 15, 2024")
-        const dateOptions = { year: 'numeric', month: 'short', day: 'numeric' };
-        const formattedDate = reminderDate.toLocaleDateString('en-US', dateOptions);
-
-        // Parameters: {{1}} = client name, {{2}} = plan name, {{3}} = date
-        parameters = [
-          booking.clientName || 'Valued Client', // {{1}}
-          planName, // {{2}}
-          formattedDate // {{3}}
-        ];
-
-        console.log(`📋 finalkk template parameters:`, {
-          clientName: parameters[0],
-          planName: parameters[1],
-          date: parameters[2],
-          daysFromExecution: days
-        });
-      } else if (templateName === 'plan_followup_utility_01dd' || step.templateId === 'plan_followup_utility_01dd') {
-        // Handle plan_followup_utility_01dd template
-        // Use plan details from booking.paymentPlan (from status update) or templateConfig
-        // Default safely to PROFESSIONAL plan amount ($349) when nothing valid is available
-        const DEFAULT_PLAN_PRICE = 349;
-
-        const planName = booking.paymentPlan?.name || step.templateConfig?.planName || 'PROFESSIONAL';
-        const rawPlanPrice = booking.paymentPlan?.price ?? step.templateConfig?.planAmount;
-        const planPrice = typeof rawPlanPrice === 'number' && rawPlanPrice > 0 ? rawPlanPrice : DEFAULT_PLAN_PRICE;
-        
-        // Format plan amount - prefer displayPrice, otherwise format price with safe fallback
-        let planAmount = booking.paymentPlan?.displayPrice;
-        const normalizedDisplay = typeof planAmount === 'string' ? planAmount.trim() : '';
-        const lowerDisplay = normalizedDisplay.toLowerCase();
-        const hasValidDisplay =
-          !!normalizedDisplay &&
-          lowerDisplay !== 'null' &&
-          lowerDisplay !== 'undefined' &&
-          lowerDisplay !== '$null' &&
-          lowerDisplay !== '$undefined';
-
-        if (!hasValidDisplay) {
-          planAmount = `$${planPrice}`;
-        } else {
-          planAmount = normalizedDisplay;
-        }
-        
-        parameters = [
-          booking.clientName || 'Valued Client', // {{1}}
-          planAmount // {{2}}
-        ];
-        
-        console.log(`📋 plan_followup_utility_01dd template parameters:`, {
-          clientName: parameters[0],
-          planAmount: parameters[1],
-          planName: planName,
-          planPrice: planPrice
-        });
-      } else if (templateName === 'meta_1' || step.templateId === 'meta_1') {
-        // Handle meta_1 template
-        // Template body: Hi {{1}}, Thank you for submitting your request to Flashfire.
-        //   To continue with the next step, you can schedule your consultation here: {{2}}
-        // Parameters: {{1}} = client name, {{2}} = scheduling link
-
-        const schedulingLink = step.templateConfig?.schedulingLink
-          || booking.calendlyRescheduleLink
-          || 'https://calendly.com/feedback-flashfire/30min';
-
-        parameters = [
-          booking.clientName || 'Valued Client', // {{1}}
-          schedulingLink // {{2}}
-        ];
-
-        console.log(`📋 meta_1 template parameters:`, {
-          clientName: parameters[0],
-          schedulingLink: parameters[1]
-        });
-      } else if (templateName === 'cancelled1' || step.templateId === 'cancelled1') {
-        if (!booking.scheduledEventStartTime) {
-          throw new Error('Meeting date/time not available for cancelled1 template');
-        }
-
-        const meetingStart = new Date(booking.scheduledEventStartTime);
-        const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
-        const meetingEndUTC = booking.scheduledEventEndTime 
-          ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime), { zone: 'utc' })
-          : meetingStartUTC.plus({ minutes: 15 });
-
-        const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('MMM d');
-        
-        const startTimeET = meetingStartUTC.setZone('America/New_York');
-        const startTimeFormatted = startTimeET.minute === 0 
-          ? startTimeET.toFormat('ha').toLowerCase()
-          : startTimeET.toFormat('h:mma').toLowerCase();
-        
-        const endTimeET = meetingEndUTC.setZone('America/New_York');
-        const endTimeFormatted = endTimeET.minute === 0
-          ? endTimeET.toFormat('ha').toLowerCase()
-          : endTimeET.toFormat('h:mma').toLowerCase();
-        
-        const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
-
-        // Use invitee_timezone from webhook if available, otherwise fallback to hardcoded logic
-        let timezone;
-        if (booking.inviteeTimezone) {
-          timezone = getTimezoneAbbreviationFromIANA(booking.inviteeTimezone, booking.scheduledEventStartTime);
-          console.log(`✅ [WorkflowController] Using invitee_timezone from webhook: ${booking.inviteeTimezone} -> ${timezone}`);
-        } else {
-          // Fallback to hardcoded logic if invitee_timezone not available
-          const meetingPST = meetingStartUTC.setZone('America/Los_Angeles');
-          const pstOffset = meetingPST.offset / 60;
-          const meetingET = meetingStartUTC.setZone('America/New_York');
-          const etOffset = meetingET.offset / 60;
-          timezone = (pstOffset === -8 || pstOffset === -7) ? 'PST' : ((etOffset === -5 || etOffset === -4) ? 'ET' : 'ET');
-          console.warn('⚠️ [WorkflowController] invitee_timezone not available, using fallback logic:', timezone);
-        }
-        
-        const meetingTimeWithTimezone = `${meetingTimeFormatted} ${timezone}`;
-
-        let rescheduleLink = booking.calendlyRescheduleLink || null;
-        if (!rescheduleLink) {
-          try {
-            const fetchedLink = await getRescheduleLinkForBooking(booking);
-            if (fetchedLink) {
-              rescheduleLink = fetchedLink;
-            }
-          } catch (error) {
-            console.warn('⚠️ [WorkflowController] Could not fetch reschedule link:', error.message);
-          }
-        }
-
-        if (!rescheduleLink) {
-          rescheduleLink = 'https://calendly.com/feedback-flashfire/30min';
-        }
-
-        parameters = [
-          booking.clientName || 'Valued Client',
-          meetingDateFormatted,
-          meetingTimeWithTimezone,
-          rescheduleLink
-        ];
-
-        console.log(`📋 cancelled1 template parameters:`, {
-          clientName: parameters[0],
-          date: parameters[1],
-          timeWithTimezone: parameters[2],
-          rescheduleLink: parameters[3]
-        });
-      } else if (templateName === 'flashfire_appointment_reminder' || step.templateId === 'flashfire_appointment_reminder') {
-        // Handle flashfire_appointment_reminder template
-        // Parameters: {{1}} = name, {{2}} = date, {{3}} = time with timezone, {{4}} = meeting link, {{5}} = reschedule link
-        if (!booking.scheduledEventStartTime) {
-          throw new Error('Meeting date/time not available for flashfire_appointment_reminder template');
-        }
-
-        const meetingStart = new Date(booking.scheduledEventStartTime);
-        const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
-        const meetingEndUTC = booking.scheduledEventEndTime
-          ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime), { zone: 'utc' })
-          : meetingStartUTC.plus({ minutes: 15 });
-
-        const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('MMM d');
-
-        const startTimeET = meetingStartUTC.setZone('America/New_York');
-        const startTimeFormatted = startTimeET.minute === 0
-          ? startTimeET.toFormat('ha').toLowerCase()
-          : startTimeET.toFormat('h:mma').toLowerCase();
-
-        const endTimeET = meetingEndUTC.setZone('America/New_York');
-        const endTimeFormatted = endTimeET.minute === 0
-          ? endTimeET.toFormat('ha').toLowerCase()
-          : endTimeET.toFormat('h:mma').toLowerCase();
-
-        const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
-
-        let timezone;
-        if (booking.inviteeTimezone) {
-          timezone = getTimezoneAbbreviationFromIANA(booking.inviteeTimezone, booking.scheduledEventStartTime);
-        } else {
-          const meetingET = meetingStartUTC.setZone('America/New_York');
-          const etOffset = meetingET.offset / 60;
-          timezone = (etOffset === -5 || etOffset === -4) ? 'ET' : 'ET';
-        }
-
-        const meetingTimeWithTimezone = `${meetingTimeFormatted} ${timezone}`;
-
-        const meetingLink = booking.calendlyMeetLink || booking.googleMeetUrl || booking.meetingVideoUrl || 'Not Provided';
-
-        let rescheduleLink = booking.calendlyRescheduleLink || null;
-        if (!rescheduleLink) {
-          try {
-            const fetchedLink = await getRescheduleLinkForBooking(booking);
-            if (fetchedLink) {
-              rescheduleLink = fetchedLink;
-            }
-          } catch (error) {
-            console.warn('⚠️ [WorkflowController] Could not fetch reschedule link:', error.message);
-          }
-        }
-        if (!rescheduleLink) {
-          rescheduleLink = 'https://calendly.com/feedback-flashfire/30min';
-        }
-
-        parameters = [
-          booking.clientName || 'Valued Client', // {{1}}
-          meetingDateFormatted, // {{2}}
-          meetingTimeWithTimezone, // {{3}}
-          meetingLink, // {{4}}
-          rescheduleLink // {{5}}
-        ];
-
-        console.log(`📋 flashfire_appointment_reminder template parameters:`, {
-          clientName: parameters[0],
-          date: parameters[1],
-          timeWithTimezone: parameters[2],
-          meetingLink: parameters[3],
-          rescheduleLink: parameters[4]
-        });
-      } else {
-        // Generic fallback: populate {{1}} with client name for any unhandled template
-        // This prevents "blank text" errors for templates that at minimum need a client name
-        console.warn(`⚠️ [WorkflowController] No specific handler for template "${templateName}", using generic parameters`);
-        parameters = [
-          booking.clientName || 'Valued Client' // {{1}} - at minimum provide client name
-        ];
-
-        // If templateConfig has a schedulingLink, add it as {{2}}
-        if (step.templateConfig?.schedulingLink) {
-          parameters.push(step.templateConfig.schedulingLink);
-        }
-      }
+      const parameters = await buildTemplateParameters(templateName, { booking, step, executedAt });
 
       const watiTemplateName = step.templateName;
       const watiTemplateId = step.templateId;
@@ -1230,7 +995,7 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
       status: 'failed',
       executedAt,
       error: error.message,
-      errorDetails: error.response || error
+      errorDetails: safeErrorDetails(error)
     });
     
     throw error;
@@ -1289,7 +1054,12 @@ async function scheduleWorkflowStep(bookingId, step, workflowId, executionDate, 
 // ==================== LOG WORKFLOW EXECUTION ====================
 async function logWorkflowExecution({ workflowId, workflowName, triggerAction, bookingId, booking, step, status, scheduledFor, executedAt = null, error = null, errorDetails = null, responseData = null, cancellationReason = null }) {
   try {
-    const log = new WorkflowLogModel({
+    // Generate idempotency key for scheduled workflows to prevent duplicates
+    const idempotencyKey = status === 'scheduled'
+      ? `${bookingId}_${workflowId}_${step.templateId || step.templateName}_${step.daysAfter}_${step.hoursAfter || 0}`
+      : undefined;
+
+    const logData = {
       workflowId,
       workflowName: workflowName || null,
       triggerAction: triggerAction || null,
@@ -1305,7 +1075,8 @@ async function logWorkflowExecution({ workflowId, workflowName, triggerAction, b
         templateName: step.templateName || null,
         domainName: step.domainName || null,
         senderEmail: step.senderEmail || null,
-        order: step.order || 0
+        order: step.order || 0,
+        templateConfig: step.templateConfig || null
       },
       status,
       scheduledFor: scheduledFor || executedAt || new Date(),
@@ -1313,11 +1084,27 @@ async function logWorkflowExecution({ workflowId, workflowName, triggerAction, b
       error: error || cancellationReason || null,
       errorDetails: errorDetails || null,
       responseData: responseData || null
-    });
+    };
 
+    if (idempotencyKey) {
+      // Use findOneAndUpdate with upsert to deduplicate scheduled entries
+      const existing = await WorkflowLogModel.findOneAndUpdate(
+        { idempotencyKey },
+        { $setOnInsert: { ...logData, idempotencyKey } },
+        { upsert: true, returnDocument: 'after' }
+      );
+      return existing;
+    }
+
+    const log = new WorkflowLogModel(logData);
     await log.save();
     return log;
   } catch (error) {
+    // Handle duplicate key error gracefully (idempotency working as expected)
+    if (error.code === 11000 && error.keyPattern?.idempotencyKey) {
+      console.log(`[WorkflowController] Duplicate workflow log prevented (idempotency key exists) for booking ${bookingId}`);
+      return null;
+    }
     console.error('Error logging workflow execution:', error);
     // Don't throw - logging errors shouldn't break workflow execution
     return null;
