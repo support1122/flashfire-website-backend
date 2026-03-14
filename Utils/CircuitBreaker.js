@@ -1,10 +1,11 @@
 /**
- * Simple Circuit Breaker for external API calls (WATI, SendGrid).
- * Prevents cascading failures when an external service is down.
+ * Circuit Breaker for external API calls (WATI, SendGrid).
+ * Only trips on infrastructure failures (network errors, timeouts, 5xx).
+ * Does NOT trip on client errors (4xx) — those indicate bad input, not a down service.
  *
  * States:
- *   CLOSED   - Normal operation, all calls go through
- *   OPEN     - Service is down, fast-fail all calls
+ *   CLOSED    - Normal operation, all calls go through
+ *   OPEN      - Service is down, fast-fail all calls
  *   HALF_OPEN - Testing one call to see if service recovered
  */
 export class CircuitBreaker {
@@ -15,6 +16,39 @@ export class CircuitBreaker {
     this.failureThreshold = failureThreshold;
     this.resetTimeoutMs = resetTimeoutMs;
     this.lastFailureTime = null;
+  }
+
+  /**
+   * Returns true if this error represents an infrastructure failure
+   * (service is actually down), false for client/business errors.
+   */
+  isInfrastructureFailure(error) {
+    // Network errors (ECONNREFUSED, ECONNRESET, ETIMEDOUT, etc.)
+    if (error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET' ||
+        error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND' ||
+        error.code === 'ERR_NETWORK') {
+      return true;
+    }
+
+    // Axios timeout
+    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+      return true;
+    }
+
+    // Server errors (5xx) — service is having problems
+    const status = error.response?.status;
+    if (status && status >= 500) {
+      return true;
+    }
+
+    // 429 Too Many Requests — service is rate limiting us
+    if (status === 429) {
+      return true;
+    }
+
+    // 4xx errors (400, 401, 403, 404, 422) are client errors — NOT infrastructure failures
+    // These mean our request was wrong, not that the service is down
+    return false;
   }
 
   async execute(fn) {
@@ -32,7 +66,10 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (error) {
-      this.onFailure();
+      if (this.isInfrastructureFailure(error)) {
+        this.onFailure();
+      }
+      // Always rethrow — caller handles the error
       throw error;
     }
   }
@@ -51,7 +88,7 @@ export class CircuitBreaker {
 
     if (this.state === 'HALF_OPEN' || this.failureCount >= this.failureThreshold) {
       this.state = 'OPEN';
-      console.error(`[CircuitBreaker:${this.name}] OPEN - ${this.failureCount} failures, pausing calls for ${this.resetTimeoutMs / 1000}s`);
+      console.error(`[CircuitBreaker:${this.name}] OPEN - ${this.failureCount} infrastructure failures, pausing calls for ${this.resetTimeoutMs / 1000}s`);
     }
   }
 
