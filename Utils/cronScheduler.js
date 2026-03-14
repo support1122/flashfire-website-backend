@@ -194,12 +194,18 @@ export async function executeWorkflowLog(log) {
   } catch (error) {
     console.error(`[cronScheduler] Error executing workflow log ${log.logId}:`, error.message);
 
-    const currentAttempts = (log.attempts || 0) + 1;
+    const isCircuitBreakerError = error.message?.includes('Circuit breaker');
+    const currentAttempts = isCircuitBreakerError
+      ? (log.attempts || 0)  // Don't count circuit breaker blocks as real attempts
+      : (log.attempts || 0) + 1;
     const maxAttempts = log.maxAttempts || 3;
 
     if (currentAttempts < maxAttempts) {
-      // Exponential backoff: 5min, 20min, 80min...
-      const delayMs = Math.pow(4, currentAttempts) * 5 * 60 * 1000;
+      // Circuit breaker errors: retry in 2 minutes (service might be back)
+      // Other errors: exponential backoff — 5min, 20min, 80min
+      const delayMs = isCircuitBreakerError
+        ? 2 * 60 * 1000
+        : Math.pow(4, currentAttempts) * 5 * 60 * 1000;
       const nextRetry = new Date(Date.now() + delayMs);
 
       console.log(`[cronScheduler] Retry ${currentAttempts}/${maxAttempts} for ${log.logId}, next at ${nextRetry.toISOString()}`);
