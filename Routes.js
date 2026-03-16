@@ -67,6 +67,19 @@ import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhoo
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
 import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController.js";
 import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
+// BDA Attendance Controllers
+import {
+  registerBda,
+  getMyMeetings,
+  reportJoin,
+  reportLeave,
+  manualMark,
+  markAbsent,
+  sseConnection,
+  getAttendanceByBooking,
+  getAttendanceBulk
+} from "./Controllers/BdaAttendanceController.js";
+import { requireBdaExtension } from "./Middlewares/CrmAuth.js";
 // Facebook Conversion API Controllers
 import { sendScheduleEventManual, sendCustomEvent } from "./Controllers/FacebookConversionController.js";
 // Meta Lead Ads Webhook Controllers
@@ -260,7 +273,18 @@ export default function Routes(app) {
   app.get('/api/bda/approvals/:approvalId/email-action', handleBdaApprovalEmailAction);
   app.get('/api/crm/admin/bda-approvals/pending', requireCrmAdmin, getPendingBdaApprovalsForCrm);
   app.post('/api/crm/admin/bda-approvals/:approvalId/decision', requireCrmAdmin, adminResolveBdaApproval);
-  
+
+  // ==================== BDA ATTENDANCE (Extension) ====================
+  app.post('/api/bda-attendance/register', registerBda);
+  app.get('/api/bda-attendance/my-meetings', requireBdaExtension, getMyMeetings);
+  app.post('/api/bda-attendance/report-join', requireBdaExtension, reportJoin);
+  app.post('/api/bda-attendance/report-leave', requireBdaExtension, reportLeave);
+  app.post('/api/bda-attendance/manual-mark', requireBdaExtension, manualMark);
+  app.post('/api/bda-attendance/mark-absent', requireBdaExtension, markAbsent);
+  app.get('/api/bda-attendance/sse', sseConnection);
+  app.get('/api/bda-attendance/by-booking/:bookingId', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceByBooking);
+  app.get('/api/bda-attendance/bulk', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceBulk);
+
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);
   app.get('/api/email-templates', getEmailTemplates);

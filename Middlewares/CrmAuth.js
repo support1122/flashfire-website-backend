@@ -47,6 +47,21 @@ export function requireCrmUser(req, res, next) {
   }
 }
 
+export function requireBdaExtension(req, res, next) {
+  try {
+    const token = readBearerToken(req);
+    if (!token) return res.status(401).json({ success: false, error: 'Missing Authorization bearer token' });
+    const payload = jwt.verify(token, getCrmJwtSecret());
+    if (payload?.role !== 'bda_extension') {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    req.bdaUser = payload;
+    return next();
+  } catch (error) {
+    return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+  }
+}
+
 export function requireCrmPermission(permission) {
   return (req, res, next) => {
     const perms = req.crmUser?.permissions;

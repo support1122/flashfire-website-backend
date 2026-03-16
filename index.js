@@ -250,6 +250,7 @@ import { startJobScheduler, getJobSchedulerStats } from './Utils/JobScheduler.js
 import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js';
 import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderScheduler.js';
 import { scheduleDiscordMeetReminder, startDiscordMeetReminderScheduler } from './Utils/DiscordMeetReminderScheduler.js';
+import { startBdaAbsentScheduler } from './Utils/BdaAbsentScheduler.js';
 import { getRescheduleLinkForBooking } from './Utils/CalendlyAPIHelper.js';
 import watiService from './Utils/WatiService.js';
 
@@ -855,6 +856,7 @@ app.listen(PORT || 4001, async () => {
   startScheduler();
   startWhatsAppReminderScheduler(); // Start WhatsApp reminder scheduler
   startDiscordMeetReminderScheduler(); // Start Discord 2-minute meeting reminder scheduler
+  startBdaAbsentScheduler(); // Start BDA absent detection scheduler (polls every 60s)
   
   // NEW: Start MongoDB-based Job Scheduler for email and WhatsApp campaigns
   // This replaces Redis/BullMQ workers with time-spreading and rate limiting
