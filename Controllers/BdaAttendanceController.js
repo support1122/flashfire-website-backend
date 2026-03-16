@@ -1,0 +1,644 @@
+import jwt from 'jsonwebtoken';
+import { DateTime } from 'luxon';
+import { getCrmJwtSecret } from '../Middlewares/CrmAuth.js';
+import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
+import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { DiscordConnect } from '../Utils/DiscordConnect.js';
+
+// ==================== Helpers ====================
+
+function formatIST(date) {
+  if (!date) return 'N/A';
+  return DateTime.fromJSDate(new Date(date))
+    .setZone('Asia/Kolkata')
+    .toFormat('dd MMM yyyy, hh:mm a');
+}
+
+// Present/Join/Leave/Manual → goes to the attendance webhook
+async function sendPresentDiscord(message) {
+  const url = process.env.DISCORD_BDA_ATTENDANCE_WEBHOOK_URL || null;
+  if (!url) {
+    console.warn('[BdaAttendance] DISCORD_BDA_ATTENDANCE_WEBHOOK_URL not configured');
+    return;
+  }
+  await DiscordConnect(url, message, false);
+}
+
+// Absent/Error → goes to the error webhook
+async function sendAbsentDiscord(message) {
+  const url = process.env.DISCORD_BDA_ABSENT_WEBHOOK_URL || null;
+  if (!url) {
+    console.warn('[BdaAttendance] DISCORD_BDA_ABSENT_WEBHOOK_URL not configured');
+    return;
+  }
+  await DiscordConnect(url, message, false);
+}
+
+// Simple in-memory rate limiter
+const rateLimitMap = new Map();
+const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
+const RATE_LIMIT_MAX = 10;
+
+function checkRateLimit(key) {
+  const now = Date.now();
+  const entry = rateLimitMap.get(key);
+  if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW) {
+    rateLimitMap.set(key, { windowStart: now, count: 1 });
+    return true;
+  }
+  if (entry.count >= RATE_LIMIT_MAX) return false;
+  entry.count++;
+  return true;
+}
+
+// Cleanup rate limit map every 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of rateLimitMap) {
+    if (now - entry.windowStart > RATE_LIMIT_WINDOW) {
+      rateLimitMap.delete(key);
+    }
+  }
+}, 10 * 60 * 1000);
+
+// SSE connections map: bdaEmail -> Set<res>
+const sseConnections = new Map();
+
+export function notifyBdaSSE(bdaEmail, event, data) {
+  const connections = sseConnections.get(bdaEmail);
+  if (!connections || connections.size === 0) return;
+  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const res of connections) {
+    try {
+      res.write(payload);
+    } catch (err) {
+      connections.delete(res);
+    }
+  }
+}
+
+// ==================== POST /api/bda-attendance/register ====================
+
+export async function registerBda(req, res) {
+  try {
+    const { name, email } = req.body;
+
+    if (!name || !email) {
+      return res.status(400).json({ success: false, error: 'Name and email are required' });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).json({ success: false, error: 'Invalid email format' });
+    }
+
+    // Rate limit by IP
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+    if (!checkRateLimit(`register:${ip}`)) {
+      return res.status(429).json({ success: false, error: 'Too many registration attempts. Try again later.' });
+    }
+
+    const token = jwt.sign(
+      {
+        role: 'bda_extension',
+        email: email.toLowerCase().trim(),
+        name: name.trim(),
+      },
+      getCrmJwtSecret(),
+      { expiresIn: '90d' }
+    );
+
+    return res.status(200).json({
+      success: true,
+      token,
+      expiresIn: '90d',
+      bda: { name: name.trim(), email: email.toLowerCase().trim() },
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] Register error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== GET /api/bda-attendance/my-meetings ====================
+
+export async function getMyMeetings(req, res) {
+  try {
+    const { email } = req.bdaUser;
+    const now = new Date();
+
+    // Upcoming: next 3 scheduled meetings (visible to all BDAs), from now onwards
+    const upcoming = await CampaignBookingModel.find({
+      bookingStatus: { $in: ['scheduled'] },
+      scheduledEventStartTime: { $exists: true, $ne: null, $gte: now },
+    })
+      .sort({ scheduledEventStartTime: 1 })
+      .limit(3)
+      .select(
+        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy'
+      )
+      .lean();
+
+    // Previous/current: last 1 meeting that already started (current or most recent past)
+    const previous = await CampaignBookingModel.find({
+      bookingStatus: { $in: ['scheduled', 'completed', 'paid'] },
+      scheduledEventStartTime: { $exists: true, $ne: null, $lt: now },
+    })
+      .sort({ scheduledEventStartTime: -1 })
+      .limit(1)
+      .select(
+        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy'
+      )
+      .lean();
+
+    // Get attendance records for all these bookings
+    const allBookingIds = [
+      ...upcoming.map((b) => b.bookingId),
+      ...previous.map((b) => b.bookingId),
+    ];
+
+    const attendanceRecords = await BdaAttendanceModel.find({
+      bookingId: { $in: allBookingIds },
+    }).lean();
+
+    // Group attendance by bookingId (there may be multiple BDAs per booking)
+    const attendanceMap = {};
+    for (const att of attendanceRecords) {
+      // Prefer the record matching this BDA, otherwise use any
+      if (!attendanceMap[att.bookingId] || att.bdaEmail === email) {
+        attendanceMap[att.bookingId] = {
+          status: att.status,
+          source: att.source,
+          bdaName: att.bdaName,
+          bdaEmail: att.bdaEmail,
+          joinedAt: att.joinedAt,
+          leftAt: att.leftAt,
+          markedAt: att.markedAt,
+          meetLink: att.meetLink,
+        };
+      }
+    }
+
+    const mapBooking = (b) => ({
+      bookingId: b.bookingId,
+      clientName: b.clientName,
+      clientEmail: b.clientEmail,
+      scheduledStart: b.scheduledEventStartTime,
+      scheduledEnd: b.scheduledEventEndTime,
+      googleMeetUrl: b.googleMeetUrl,
+      googleMeetCode: b.googleMeetCode,
+      calendlyMeetLink: b.calendlyMeetLink,
+      claimedBy: b.claimedBy ? { name: b.claimedBy.name, email: b.claimedBy.email } : null,
+      attendance: attendanceMap[b.bookingId] || null,
+    });
+
+    return res.status(200).json({
+      success: true,
+      upcoming: upcoming.map(mapBooking),
+      previous: previous.map(mapBooking),
+      serverTime: now.toISOString(),
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] getMyMeetings error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== POST /api/bda-attendance/report-join ====================
+
+export async function reportJoin(req, res) {
+  try {
+    const { email, name } = req.bdaUser;
+    const { bookingId, meetLink, joinedAt } = req.body;
+
+    if (!bookingId) {
+      return res.status(400).json({ success: false, error: 'bookingId is required' });
+    }
+
+    // Verify booking exists (any BDA can report for any meeting)
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+
+    // Validate meet link
+    if (meetLink && !meetLink.includes('meet.google.com')) {
+      return res.status(400).json({ success: false, error: 'Invalid meet link' });
+    }
+
+    // Upsert attendance record
+    const attendance = await BdaAttendanceModel.findOneAndUpdate(
+      { bookingId, bdaEmail: email },
+      {
+        $set: {
+          bdaName: name,
+          bdaEmail: email,
+          bookingId,
+          meetLink: meetLink || null,
+          joinedAt: joinedAt ? new Date(joinedAt) : new Date(),
+          status: 'present',
+          source: 'auto',
+          markedAt: new Date(),
+          meetingScheduledStart: booking.scheduledEventStartTime,
+          meetingScheduledEnd: booking.scheduledEventEndTime || null,
+        },
+        $setOnInsert: {
+          attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    // Send Discord notification
+    if (!attendance.discordNotified || attendance.source !== 'auto') {
+      const message =
+        `✅ **BDA Joined Meeting**\n` +
+        `**BDA:** ${name} (${email})\n` +
+        `**Client:** ${booking.clientName}\n` +
+        `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
+        `**Meet Link:** ${meetLink || 'N/A'}\n` +
+        `**Joined At:** ${formatIST(joinedAt || new Date())}`;
+
+      await sendPresentDiscord(message);
+      await BdaAttendanceModel.updateOne(
+        { _id: attendance._id },
+        { discordNotified: true }
+      );
+    }
+
+    // Notify SSE
+    notifyBdaSSE(email, 'attendance_update', {
+      bookingId,
+      status: 'present',
+      source: 'auto',
+      joinedAt: attendance.joinedAt,
+    });
+
+    return res.status(200).json({
+      success: true,
+      attendanceId: attendance.attendanceId,
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] reportJoin error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== POST /api/bda-attendance/report-leave ====================
+
+export async function reportLeave(req, res) {
+  try {
+    const { email, name } = req.bdaUser;
+    const { bookingId, leftAt } = req.body;
+
+    if (!bookingId) {
+      return res.status(400).json({ success: false, error: 'bookingId is required' });
+    }
+
+    const attendance = await BdaAttendanceModel.findOne({
+      bookingId,
+      bdaEmail: email,
+    });
+
+    if (!attendance) {
+      return res.status(404).json({ success: false, error: 'No attendance record found for this meeting' });
+    }
+
+    const leaveTime = leftAt ? new Date(leftAt) : new Date();
+    attendance.leftAt = leaveTime;
+    await attendance.save();
+
+    // Calculate duration
+    let durationMin = 'N/A';
+    if (attendance.joinedAt) {
+      durationMin = Math.round((leaveTime - attendance.joinedAt) / 60000);
+    }
+
+    // Get booking for client name
+    const booking = await CampaignBookingModel.findOne({ bookingId }).select('clientName').lean();
+
+    const message =
+      `🚪 **BDA Left Meeting**\n` +
+      `**BDA:** ${name} (${email})\n` +
+      `**Client:** ${booking?.clientName || 'Unknown'}\n` +
+      `**Duration:** ${durationMin} min\n` +
+      `**Left At:** ${formatIST(leaveTime)}`;
+
+    await sendPresentDiscord(message);
+
+    // Notify SSE
+    notifyBdaSSE(email, 'attendance_update', {
+      bookingId,
+      status: 'present',
+      leftAt: leaveTime,
+      durationMin,
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('[BdaAttendance] reportLeave error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== POST /api/bda-attendance/manual-mark ====================
+
+export async function manualMark(req, res) {
+  try {
+    const { email, name } = req.bdaUser;
+    const { bookingId } = req.body;
+
+    if (!bookingId) {
+      return res.status(400).json({ success: false, error: 'bookingId is required' });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+
+    const now = new Date();
+    const meetStart = new Date(booking.scheduledEventStartTime);
+
+    // Strict: only after meeting start time
+    if (now < meetStart) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot mark attendance before meeting start time',
+      });
+    }
+
+    // Strict: within 2 hours of meeting start
+    const twoHoursAfter = new Date(meetStart.getTime() + 2 * 60 * 60 * 1000);
+    if (now > twoHoursAfter) {
+      return res.status(400).json({
+        success: false,
+        error: 'Cannot mark attendance more than 2 hours after meeting start',
+      });
+    }
+
+    // Check if already present via auto
+    const existing = await BdaAttendanceModel.findOne({
+      bookingId,
+      bdaEmail: email,
+      status: 'present',
+      source: 'auto',
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        success: false,
+        error: 'Attendance already recorded automatically',
+      });
+    }
+
+    // Upsert
+    const attendance = await BdaAttendanceModel.findOneAndUpdate(
+      { bookingId, bdaEmail: email },
+      {
+        $set: {
+          bdaName: name,
+          bdaEmail: email,
+          bookingId,
+          status: 'manual',
+          source: 'manual',
+          markedAt: now,
+          meetingScheduledStart: booking.scheduledEventStartTime,
+          meetingScheduledEnd: booking.scheduledEventEndTime || null,
+        },
+        $setOnInsert: {
+          attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        },
+      },
+      { upsert: true, new: true }
+    );
+
+    // Discord notification
+    const message =
+      `✋ **BDA Manual Attendance**\n` +
+      `**BDA:** ${name} (${email})\n` +
+      `**Client:** ${booking.clientName}\n` +
+      `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
+      `_Note: Auto-detection did not trigger; BDA manually confirmed attendance._`;
+
+    await sendPresentDiscord(message);
+    await BdaAttendanceModel.updateOne(
+      { _id: attendance._id },
+      { discordNotified: true }
+    );
+
+    // Notify SSE
+    notifyBdaSSE(email, 'attendance_update', {
+      bookingId,
+      status: 'manual',
+      source: 'manual',
+      markedAt: now,
+    });
+
+    return res.status(200).json({
+      success: true,
+      attendanceId: attendance.attendanceId,
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] manualMark error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== POST /api/bda-attendance/mark-absent ====================
+
+export async function markAbsent(req, res) {
+  try {
+    const { email, name } = req.bdaUser;
+    const { bookingId, reason } = req.body;
+
+    if (!bookingId) {
+      return res.status(400).json({ success: false, error: 'bookingId is required' });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+
+    // Don't overwrite any existing attendance record (present, manual, or already absent)
+    const existing = await BdaAttendanceModel.findOne({
+      bookingId,
+      bdaEmail: email,
+    });
+
+    if (existing) {
+      // Already has a record - return success (idempotent) but don't re-notify
+      return res.status(200).json({
+        success: true,
+        message: existing.status === 'absent' ? 'Already marked absent' : 'Attendance already recorded',
+      });
+    }
+
+    const attendance = await BdaAttendanceModel.create({
+      attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      bdaName: name,
+      bdaEmail: email,
+      bookingId,
+      status: 'absent',
+      source: 'manual',
+      markedAt: new Date(),
+      meetingScheduledStart: booking.scheduledEventStartTime,
+      meetingScheduledEnd: booking.scheduledEventEndTime || null,
+      notes: reason || 'No response to popup',
+      discordNotified: true,
+    });
+
+    const message =
+      `❌ **BDA Absent**\n` +
+      `**BDA:** ${name} (${email})\n` +
+      `**Client:** ${booking.clientName}\n` +
+      `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
+      `_Reason: ${reason || 'No response after 5min popup'}_`;
+
+    await sendAbsentDiscord(message);
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('[BdaAttendance] markAbsent error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== GET /api/bda-attendance/sse ====================
+
+export async function sseConnection(req, res) {
+  try {
+    const token = req.query.token;
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Token required' });
+    }
+
+    let payload;
+    try {
+      payload = jwt.verify(token, getCrmJwtSecret());
+    } catch (err) {
+      return res.status(401).json({ success: false, error: 'Invalid or expired token' });
+    }
+
+    if (payload?.role !== 'bda_extension') {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+
+    const email = payload.email;
+
+    // Set up SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    // Register connection
+    if (!sseConnections.has(email)) {
+      sseConnections.set(email, new Set());
+    }
+    sseConnections.get(email).add(res);
+
+    // Send initial heartbeat
+    res.write(`event: connected\ndata: ${JSON.stringify({ email, serverTime: new Date().toISOString() })}\n\n`);
+
+    // Heartbeat every 30s
+    const heartbeatInterval = setInterval(() => {
+      try {
+        res.write(`event: heartbeat\ndata: ${JSON.stringify({ serverTime: new Date().toISOString() })}\n\n`);
+      } catch (err) {
+        clearInterval(heartbeatInterval);
+      }
+    }, 30000);
+
+    // Cleanup on close
+    req.on('close', () => {
+      clearInterval(heartbeatInterval);
+      const connections = sseConnections.get(email);
+      if (connections) {
+        connections.delete(res);
+        if (connections.size === 0) {
+          sseConnections.delete(email);
+        }
+      }
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] SSE error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== GET /api/bda-attendance/by-booking/:bookingId ====================
+
+export async function getAttendanceByBooking(req, res) {
+  try {
+    const { bookingId } = req.params;
+
+    const attendance = await BdaAttendanceModel.findOne({ bookingId }).lean();
+
+    return res.status(200).json({
+      success: true,
+      attendance: attendance
+        ? {
+            status: attendance.status,
+            source: attendance.source,
+            bdaName: attendance.bdaName,
+            bdaEmail: attendance.bdaEmail,
+            joinedAt: attendance.joinedAt,
+            leftAt: attendance.leftAt,
+            markedAt: attendance.markedAt,
+            meetLink: attendance.meetLink,
+          }
+        : null,
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] getAttendanceByBooking error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
+// ==================== GET /api/bda-attendance/bulk ====================
+
+export async function getAttendanceBulk(req, res) {
+  try {
+    const bookingIdsParam = req.query.bookingIds;
+    if (!bookingIdsParam) {
+      return res.status(400).json({ success: false, error: 'bookingIds query param required' });
+    }
+
+    const bookingIds = bookingIdsParam.split(',').filter(Boolean).slice(0, 100);
+
+    const records = await BdaAttendanceModel.find({
+      bookingId: { $in: bookingIds },
+    }).lean();
+
+    const attendanceMap = {};
+    for (const att of records) {
+      attendanceMap[att.bookingId] = {
+        status: att.status,
+        source: att.source,
+        bdaName: att.bdaName,
+        bdaEmail: att.bdaEmail,
+        joinedAt: att.joinedAt,
+        leftAt: att.leftAt,
+        markedAt: att.markedAt,
+      };
+    }
+
+    // Fill nulls for missing
+    for (const id of bookingIds) {
+      if (!attendanceMap[id]) {
+        attendanceMap[id] = null;
+      }
+    }
+
+    return res.status(200).json({ success: true, attendanceMap });
+  } catch (error) {
+    console.error('[BdaAttendance] getAttendanceBulk error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
