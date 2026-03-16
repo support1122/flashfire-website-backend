@@ -263,33 +263,13 @@ const allowedOrigins = [
   "http://localhost:5174",
   "http://localhost:5174/",
   "https://www.flashfirejobs.com",
-  "https://flashfirejobs.com",
-  "https://portal.flashfirejobs.com"
+  "https://flashfirejobs.com"
 ];
 
-// CORS configuration that allows websites and Chrome extensions
+// Permissive CORS in production (allows all origins/headers). Safe with credentials when origin: true
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps or curl requests)
-      if (!origin) return callback(null, true);
-
-      // Allow FlashFire websites
-      if (
-        origin.includes("flashfirejobs.com") ||
-        origin.includes("flashfire-frontend-hoisted.vercel.app") ||
-        origin.includes("localhost")
-      ) {
-        return callback(null, true);
-      }
-
-      // Allow all Chrome extensions
-      if (origin.startsWith("chrome-extension://")) {
-        return callback(null, true);
-      }
-
-      callback(new Error("Not allowed by CORS"));
-    },
+    origin: true, // reflect request origin
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     credentials: true,
   })
@@ -297,21 +277,7 @@ app.use(
 
 // ✅ Handle preflight requests for all routes
 // Handle preflight for any path (Express 5: avoid "*" pattern)
-app.options(/.*/, cors({
-  origin: (origin, callback) => {
-    if (!origin) return callback(null, true);
-    if (
-      origin.includes("flashfirejobs.com") ||
-      origin.includes("flashfire-frontend-hoisted.vercel.app") ||
-      origin.includes("localhost") ||
-      origin.startsWith("chrome-extension://")
-    ) {
-      return callback(null, true);
-    }
-    callback(new Error("Not allowed by CORS"));
-  },
-  credentials: true
-}));
+app.options(/.*/, cors({ origin: true, credentials: true }));
 // app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
