@@ -136,9 +136,6 @@ export const getAllCampaigns = async (req, res) => {
         { $sort: { createdAt: -1 } },
         {
           $project: {
-            __v: 0,
-            pageVisits: 0,
-            buttonClicks: 0,
             campaignId: 1,
             campaignName: 1,
             utmSource: 1,
@@ -148,6 +145,9 @@ export const getAllCampaigns = async (req, res) => {
             utmTerm: 1,
             generatedUrl: 1,
             baseUrl: 1,
+            totalClicks: 1,
+            totalButtonClicks: 1,
+            uniqueVisitors: 1,
             isActive: 1,
             createdAt: 1,
             updatedAt: 1,
@@ -161,19 +161,21 @@ export const getAllCampaigns = async (req, res) => {
         }
       ];
 
-      const campaigns = await CampaignModel.aggregate(pipeline);
+      const utmSources = await CampaignModel.find(query).select('utmSource').lean().then((c) => c.map((x) => x.utmSource));
 
-      // Single aggregation for booking counts by utmSource (with date filter)
-      const utmSources = campaigns.map((c) => c.utmSource);
-      const bookingCounts = await CampaignBookingModel.aggregate([
-        {
-          $match: {
-            utmSource: { $in: utmSources },
-            bookingCreatedAt: { $gte: startDate, $lte: endDate }
-          }
-        },
-        { $group: { _id: '$utmSource', count: { $sum: 1 } } }
+      const [campaigns, bookingCounts] = await Promise.all([
+        CampaignModel.aggregate(pipeline).allowDiskUse(true),
+        CampaignBookingModel.aggregate([
+          {
+            $match: {
+              utmSource: { $in: utmSources },
+              bookingCreatedAt: { $gte: startDate, $lte: endDate }
+            }
+          },
+          { $group: { _id: '$utmSource', count: { $sum: 1 } } }
+        ]).allowDiskUse(true)
       ]);
+
       const countMap = Object.fromEntries(bookingCounts.map((b) => [b._id, b.count]));
 
       campaignsWithStats = campaigns.map((campaign) => ({
