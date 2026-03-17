@@ -602,6 +602,55 @@ export async function markAbsent(req, res) {
   }
 }
 
+// ==================== POST /api/bda-attendance/warn-absent ====================
+
+export async function warnAbsent(req, res) {
+  try {
+    const { email, name } = req.bdaUser;
+    const { bookingId } = req.body;
+
+    if (!bookingId) {
+      return res.status(400).json({ success: false, error: 'bookingId is required' });
+    }
+
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+
+    // Check if already present - no need to warn
+    const existing = await BdaAttendanceModel.findOne({
+      bookingId,
+      bdaEmail: email,
+      status: { $in: ['present', 'manual'] },
+    });
+
+    if (existing) {
+      return res.status(200).json({ success: true, message: 'Already in meeting' });
+    }
+
+    const meetLink = booking.googleMeetUrl || booking.calendlyMeetLink || 'N/A';
+    const meetCode = booking.googleMeetCode || 'N/A';
+
+    const message =
+      `⚠️ **BDA Not in Meeting**\n` +
+      `**BDA:** ${name} (${email})\n` +
+      `**Client:** ${booking.clientName}\n` +
+      `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
+      `**Meet Code:** ${meetCode}\n` +
+      `**Meet Link:** ${meetLink}\n` +
+      `_Meeting started 2 min ago — please join!_`;
+
+    await sendPresentDiscord(message);
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('[BdaAttendance] warnAbsent error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
 // ==================== GET /api/bda-attendance/sse ====================
 
 export async function sseConnection(req, res) {
