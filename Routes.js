@@ -69,7 +69,8 @@ import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController
 import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
 // BDA Attendance Controllers
 import {
-  registerBda,
+  requestBdaOtp,
+  verifyBdaOtp,
   getMyMeetings,
   reportJoin,
   reportLeave,
@@ -275,7 +276,8 @@ export default function Routes(app) {
   app.post('/api/crm/admin/bda-approvals/:approvalId/decision', requireCrmAdmin, adminResolveBdaApproval);
 
   // ==================== BDA ATTENDANCE (Extension) ====================
-  app.post('/api/bda-attendance/register', registerBda);
+  app.post('/api/bda-attendance/request-otp', requestBdaOtp);
+  app.post('/api/bda-attendance/verify-otp', verifyBdaOtp);
   app.get('/api/bda-attendance/my-meetings', requireBdaExtension, getMyMeetings);
   app.post('/api/bda-attendance/report-join', requireBdaExtension, reportJoin);
   app.post('/api/bda-attendance/report-leave', requireBdaExtension, reportLeave);

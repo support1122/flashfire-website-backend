@@ -1,9 +1,13 @@
+import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { DateTime } from 'luxon';
 import { getCrmJwtSecret } from '../Middlewares/CrmAuth.js';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { DiscordConnect } from '../Utils/DiscordConnect.js';
+import { setOtp, getOtp, decrementAttempts, deleteOtp, getOtpCacheStats } from '../Utils/CrmOtpCache.js';
+import { sendBdaOtpEmail } from '../Utils/SendGridHelper.js';
 
 // ==================== Helpers ====================
 
@@ -79,30 +83,120 @@ export function notifyBdaSSE(bdaEmail, event, data) {
 
 // ==================== POST /api/bda-attendance/register ====================
 
-export async function registerBda(req, res) {
+// ==================== OTP Helpers ====================
+
+function normalizeEmail(email) {
+  return String(email || '').trim().toLowerCase();
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function generateOtp() {
+  return String(crypto.randomInt(100000, 1000000)); // 6 digits
+}
+
+function bdaOtpHash(email, otp) {
+  const secret = process.env.CRM_OTP_HASH_SECRET || getCrmJwtSecret();
+  const value = `${normalizeEmail(email)}|${String(otp).trim()}|${secret}`;
+  return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+// ==================== POST /api/bda-attendance/request-otp ====================
+
+export async function requestBdaOtp(req, res) {
   try {
-    const { name, email } = req.body;
-
-    if (!name || !email) {
-      return res.status(400).json({ success: false, error: 'Name and email are required' });
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).json({ success: false, error: 'Invalid email format' });
+    const email = normalizeEmail(req.body?.email);
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ success: false, error: 'Invalid email' });
     }
 
     // Rate limit by IP
     const ip = req.ip || req.connection?.remoteAddress || 'unknown';
-    if (!checkRateLimit(`register:${ip}`)) {
-      return res.status(429).json({ success: false, error: 'Too many registration attempts. Try again later.' });
+    if (!checkRateLimit(`bda-otp:${ip}`)) {
+      return res.status(429).json({ success: false, error: 'Too many attempts. Try again later.' });
     }
 
+    // Check if user exists in CrmUser and is active
+    const user = await CrmUserModel.findOne({ email }).lean();
+
+    // Privacy-friendly: always return success message
+    if (!user || user.isActive === false) {
+      return res.status(200).json({
+        success: true,
+        message: 'If your email is authorized, you will receive an OTP.',
+      });
+    }
+
+    const otp = generateOtp();
+    console.log(`[BDA OTP] ${email} -> ${otp}`);
+
+    const ttlSeconds = Number(process.env.CRM_OTP_TTL_SECONDS || 300);
+    const expiresAtMs = Date.now() + ttlSeconds * 1000;
+    setOtp(email, { otpHash: bdaOtpHash(email, otp), expiresAtMs, attemptsLeft: 5 });
+
+    // Send email via SendGrid
+    await sendBdaOtpEmail(email, otp, user.name);
+
+    return res.status(200).json({
+      success: true,
+      message: 'OTP sent',
+      cache: getOtpCacheStats(),
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] requestBdaOtp error:', error?.message || error);
+    return res.status(500).json({ success: false, error: 'Server error' });
+  }
+}
+
+// ==================== POST /api/bda-attendance/verify-otp ====================
+
+export async function verifyBdaOtp(req, res) {
+  try {
+    const email = normalizeEmail(req.body?.email);
+    const otp = String(req.body?.otp || '').trim();
+
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ success: false, error: 'Invalid email' });
+    }
+    if (!/^\d{6}$/.test(otp)) {
+      return res.status(400).json({ success: false, error: 'Invalid OTP format. Enter 6 digits.' });
+    }
+
+    const entry = getOtp(email);
+    if (!entry) {
+      return res.status(401).json({ success: false, error: 'OTP expired or not found. Request a new one.' });
+    }
+
+    const incomingHash = bdaOtpHash(email, otp);
+    const ok = crypto.timingSafeEqual(Buffer.from(incomingHash), Buffer.from(entry.otpHash));
+    if (!ok) {
+      const remaining = decrementAttempts(email);
+      const attemptsLeft = remaining?.attemptsLeft || 0;
+      return res.status(401).json({
+        success: false,
+        error: attemptsLeft > 0
+          ? `Invalid OTP. ${attemptsLeft} attempt${attemptsLeft > 1 ? 's' : ''} remaining.`
+          : 'Too many failed attempts. Request a new OTP.',
+      });
+    }
+
+    // OTP valid - delete it
+    deleteOtp(email);
+
+    // Verify user exists and is active
+    const user = await CrmUserModel.findOne({ email }).lean();
+    if (!user || user.isActive === false) {
+      return res.status(403).json({ success: false, error: 'User not authorized' });
+    }
+
+    // Issue 90-day JWT for BDA extension
     const token = jwt.sign(
       {
         role: 'bda_extension',
-        email: email.toLowerCase().trim(),
-        name: name.trim(),
+        email: user.email,
+        name: user.name,
       },
       getCrmJwtSecret(),
       { expiresIn: '90d' }
@@ -112,11 +206,11 @@ export async function registerBda(req, res) {
       success: true,
       token,
       expiresIn: '90d',
-      bda: { name: name.trim(), email: email.toLowerCase().trim() },
+      bda: { name: user.name, email: user.email },
     });
   } catch (error) {
-    console.error('[BdaAttendance] Register error:', error);
-    return res.status(500).json({ success: false, error: 'Internal server error' });
+    console.error('[BdaAttendance] verifyBdaOtp error:', error?.message || error);
+    return res.status(500).json({ success: false, error: 'Server error' });
   }
 }
 
