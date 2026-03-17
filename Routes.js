@@ -76,6 +76,7 @@ import {
   reportLeave,
   manualMark,
   markAbsent,
+  warnAbsent,
   sseConnection,
   getAttendanceByBooking,
   getAttendanceBulk
@@ -283,6 +284,7 @@ export default function Routes(app) {
   app.post('/api/bda-attendance/report-leave', requireBdaExtension, reportLeave);
   app.post('/api/bda-attendance/manual-mark', requireBdaExtension, manualMark);
   app.post('/api/bda-attendance/mark-absent', requireBdaExtension, markAbsent);
+  app.post('/api/bda-attendance/warn-absent', requireBdaExtension, warnAbsent);
   app.get('/api/bda-attendance/sse', sseConnection);
   app.get('/api/bda-attendance/by-booking/:bookingId', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceByBooking);
   app.get('/api/bda-attendance/bulk', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceBulk);
