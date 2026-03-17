@@ -92,31 +92,117 @@ export const createCampaign = async (req, res) => {
 // ==================== GET ALL CAMPAIGNS ====================
 export const getAllCampaigns = async (req, res) => {
   try {
-    const { active } = req.query;
-    
+    const { active, fromDate, toDate } = req.query;
+
     let query = {};
     if (active !== undefined) {
       query.isActive = active === 'true';
     }
 
-    const campaigns = await CampaignModel.find(query)
-      .sort({ createdAt: -1 })
-      .select('-__v'); // Include pageVisits for filtering
+    let startDate = fromDate ? new Date(fromDate) : null;
+    let endDate = toDate ? new Date(toDate) : null;
+    if (startDate) startDate.setHours(0, 0, 0, 0);
+    if (endDate) endDate.setHours(23, 59, 59, 999);
+    const hasDateFilter = startDate && endDate && !isNaN(startDate.getTime()) && !isNaN(endDate.getTime());
 
-    // Enhance with booking counts
-    const campaignsWithStats = await Promise.all(
-      campaigns.map(async (campaign) => {
-        const bookingCount = await CampaignBookingModel.countDocuments({
-          utmSource: campaign.utmSource
-        });
+    let campaignsWithStats;
 
-        return {
-          ...campaign.toObject(),
-          totalBookings: bookingCount,
-          uniqueVisitorsCount: campaign.uniqueVisitors.length
-        };
-      })
-    );
+    if (hasDateFilter) {
+      // Use aggregation for date-filtered counts (reduces response payload)
+      const dateCond = {
+        $and: [
+          { $gte: ['$$v.timestamp', startDate] },
+          { $lte: ['$$v.timestamp', endDate] }
+        ]
+      };
+
+      const filteredVisits = {
+        $filter: {
+          input: { $ifNull: ['$pageVisits', []] },
+          as: 'v',
+          cond: dateCond
+        }
+      };
+      const filteredClicks = {
+        $filter: {
+          input: { $ifNull: ['$buttonClicks', []] },
+          as: 'v',
+          cond: dateCond
+        }
+      };
+
+      const pipeline = [
+        { $match: query },
+        { $sort: { createdAt: -1 } },
+        {
+          $project: {
+            __v: 0,
+            pageVisits: 0,
+            buttonClicks: 0,
+            campaignId: 1,
+            campaignName: 1,
+            utmSource: 1,
+            utmMedium: 1,
+            utmCampaign: 1,
+            utmContent: 1,
+            utmTerm: 1,
+            generatedUrl: 1,
+            baseUrl: 1,
+            isActive: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            createdBy: 1,
+            filteredClicks: { $size: filteredVisits },
+            filteredButtonClicks: { $size: filteredClicks },
+            filteredUniqueVisitors: {
+              $size: { $setUnion: [{ $map: { input: filteredVisits, as: 'f', in: '$$f.visitorId' } }] }
+            }
+          }
+        }
+      ];
+
+      const campaigns = await CampaignModel.aggregate(pipeline);
+
+      // Single aggregation for booking counts by utmSource (with date filter)
+      const utmSources = campaigns.map((c) => c.utmSource);
+      const bookingCounts = await CampaignBookingModel.aggregate([
+        {
+          $match: {
+            utmSource: { $in: utmSources },
+            bookingCreatedAt: { $gte: startDate, $lte: endDate }
+          }
+        },
+        { $group: { _id: '$utmSource', count: { $sum: 1 } } }
+      ]);
+      const countMap = Object.fromEntries(bookingCounts.map((b) => [b._id, b.count]));
+
+      campaignsWithStats = campaigns.map((campaign) => ({
+        ...campaign,
+        totalBookings: countMap[campaign.utmSource] || 0,
+        uniqueVisitorsCount: campaign.filteredUniqueVisitors ?? 0,
+        totalClicks: campaign.filteredClicks ?? 0,
+        totalButtonClicks: campaign.filteredButtonClicks ?? 0
+      }));
+    } else {
+      // Standard path: exclude heavy fields, single aggregation for bookings
+      const campaigns = await CampaignModel.find(query)
+        .sort({ createdAt: -1 })
+        .select('-__v -pageVisits -buttonClicks')
+        .lean();
+
+      const utmSources = campaigns.map((c) => c.utmSource);
+      const bookingCounts = await CampaignBookingModel.aggregate([
+        { $match: { utmSource: { $in: utmSources } } },
+        { $group: { _id: '$utmSource', count: { $sum: 1 } } }
+      ]);
+      const countMap = Object.fromEntries(bookingCounts.map((b) => [b._id, b.count]));
+
+      campaignsWithStats = campaigns.map((campaign) => ({
+        ...campaign,
+        totalBookings: countMap[campaign.utmSource] || 0,
+        uniqueVisitorsCount: campaign.uniqueVisitors?.length ?? 0
+      }));
+    }
 
     return res.status(200).json({
       success: true,

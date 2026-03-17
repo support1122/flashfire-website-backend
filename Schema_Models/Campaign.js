@@ -131,6 +131,7 @@ export const CampaignSchema = new mongoose.Schema({
 // Index for efficient queries
 CampaignSchema.index({ utmSource: 1, createdAt: -1 });
 CampaignSchema.index({ isActive: 1 });
+CampaignSchema.index({ isActive: 1, createdAt: -1 });
 
 export const CampaignModel = mongoose.model('Campaign', CampaignSchema);
 
