@@ -132,6 +132,9 @@ export const CampaignSchema = new mongoose.Schema({
 CampaignSchema.index({ utmSource: 1, createdAt: -1 });
 CampaignSchema.index({ isActive: 1 });
 CampaignSchema.index({ isActive: 1, createdAt: -1 });
+// Multikey indexes for date-filtered aggregation on embedded arrays
+CampaignSchema.index({ 'pageVisits.timestamp': 1 });
+CampaignSchema.index({ 'buttonClicks.timestamp': 1 });
 
 export const CampaignModel = mongoose.model('Campaign', CampaignSchema);
 
