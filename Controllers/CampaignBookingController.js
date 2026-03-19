@@ -3,7 +3,7 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
 import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
-import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
+import { triggerWorkflow, cancelScheduledWorkflows, cancelScheduledWorkflowLogsForBooking } from './WorkflowController.js';
 import { cancelWhatsAppRemindersForClient } from '../Utils/WhatsAppReminderScheduler.js';
 import { cancelDiscordMeetRemindersForMeeting } from '../Utils/DiscordMeetReminderScheduler.js';
 import { cancelCall } from '../Utils/CallScheduler.js';
@@ -74,7 +74,8 @@ export const saveCalendlyBooking = async (bookingData) => {
       if (Object.keys(findQuery).length > 0) {
         const existingBooking = await CampaignBookingModel.findOne(findQuery)
           .sort({ bookingCreatedAt: -1 })
-          .limit(1);
+          .limit(1)
+          .lean();
 
         if (existingBooking) {
           console.log('✅ Found existing Calendly booking, using its data to fill missing fields');
@@ -114,12 +115,12 @@ export const saveCalendlyBooking = async (bookingData) => {
     // Find the campaign
     let campaignId = null;
     if (utmSource) {
-      const campaign = await CampaignModel.findOne({ utmSource });
+      const campaign = await CampaignModel.findOne({ utmSource }).lean();
       if (campaign) {
         campaignId = campaign.campaignId;
       } else {
         // Get or create default "Calendly" campaign for direct bookings
-        let defaultCampaign = await CampaignModel.findOne({ utmSource: 'calendly_direct' });
+        let defaultCampaign = await CampaignModel.findOne({ utmSource: 'calendly_direct' }).lean();
 
         if (!defaultCampaign) {
           // Create default Calendly campaign if it doesn't exist
@@ -293,17 +294,19 @@ export const saveCalendlyBooking = async (bookingData) => {
       bookingStatus: booking.bookingStatus
     });
 
-    console.log('📊 Full booking object saved to database:', JSON.stringify({
-      bookingId: booking.bookingId,
-      campaignId: booking.campaignId,
-      utmSource: booking.utmSource,
-      clientName: booking.clientName,
-      clientEmail: booking.clientEmail,
-      clientPhone: booking.clientPhone,
-      calendlyMeetLink: booking.calendlyMeetLink,
-      scheduledEventStartTime: booking.scheduledEventStartTime,
-      bookingCreatedAt: booking.bookingCreatedAt
-    }, null, 2));
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('📊 Full booking object saved to database:', JSON.stringify({
+        bookingId: booking.bookingId,
+        campaignId: booking.campaignId,
+        utmSource: booking.utmSource,
+        clientName: booking.clientName,
+        clientEmail: booking.clientEmail,
+        clientPhone: booking.clientPhone,
+        calendlyMeetLink: booking.calendlyMeetLink,
+        scheduledEventStartTime: booking.scheduledEventStartTime,
+        bookingCreatedAt: booking.bookingCreatedAt
+      }, null, 2));
+    }
 
     // Send Facebook Conversion API event (non-blocking)
     // This runs asynchronously and won't block the booking save
@@ -720,8 +723,27 @@ export const getBookingById = async (req, res) => {
   try {
     const { bookingId } = req.params;
 
-    const booking = await CampaignBookingModel.findOne({ bookingId });
+    const results = await CampaignBookingModel.aggregate([
+      { $match: { bookingId } },
+      { $limit: 1 },
+      {
+        $lookup: {
+          from: 'campaigns',
+          localField: 'campaignId',
+          foreignField: 'campaignId',
+          as: '_campaign',
+          pipeline: [{ $project: { campaignName: 1, campaignId: 1 } }]
+        }
+      },
+      {
+        $addFields: {
+          _campaignDetail: { $arrayElemAt: ['$_campaign', 0] }
+        }
+      },
+      { $project: { _campaign: 0 } }
+    ]);
 
+    const booking = results[0];
     if (!booking) {
       return res.status(404).json({
         success: false,
@@ -729,22 +751,15 @@ export const getBookingById = async (req, res) => {
       });
     }
 
-    // Get campaign details if available
-    let campaignDetails = null;
-    if (booking.campaignId) {
-      const campaign = await CampaignModel.findOne({ campaignId: booking.campaignId });
-      if (campaign) {
-        campaignDetails = {
-          campaignName: campaign.campaignName,
-          campaignId: campaign.campaignId
-        };
-      }
-    }
+    const campaignDetails = booking._campaignDetail
+      ? { campaignName: booking._campaignDetail.campaignName, campaignId: booking._campaignDetail.campaignId }
+      : null;
+    delete booking._campaignDetail;
 
     return res.status(200).json({
       success: true,
       data: {
-        booking: booking.toObject(),
+        booking,
         campaign: campaignDetails
       }
     });
@@ -775,7 +790,7 @@ export const updateBookingStatus = async (req, res) => {
     }
 
     // Get booking before update to access client details
-    const existingBooking = await CampaignBookingModel.findOne({ bookingId });
+    const existingBooking = await CampaignBookingModel.findOne({ bookingId }).lean();
     if (!existingBooking) {
       return res.status(404).json({
         success: false,
@@ -1028,7 +1043,20 @@ export const updateBookingStatus = async (req, res) => {
           }
         }
 
-        // Cancel scheduled workflows (email and WhatsApp workflows)
+        // Cancel scheduled WorkflowLog entries (cron processes these - must cancel to prevent execution)
+        try {
+          const logCancelResult = await cancelScheduledWorkflowLogsForBooking(bookingId, 'Cancelled: Booking status changed to paid');
+          if (logCancelResult.success && logCancelResult.cancelled > 0) {
+            cancellationResults.scheduledWorkflows.cancelled += logCancelResult.cancelled;
+          }
+        } catch (logCancelError) {
+          Logger.warn('Error cancelling scheduled workflow logs for paid booking', {
+            bookingId,
+            error: logCancelError.message
+          });
+        }
+
+        // Cancel scheduled workflows (email and WhatsApp workflows) in booking document
         if (existingBooking.scheduledWorkflows && existingBooking.scheduledWorkflows.length > 0) {
           const scheduledWorkflows = existingBooking.scheduledWorkflows.filter(
             sw => sw.status === 'scheduled'
@@ -1119,7 +1147,8 @@ export const updateBookingStatus = async (req, res) => {
     }
 
     // Trigger workflows for specific status changes
-    const workflowTriggerStatuses = ['not-scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid'];
+    // NOTE: 'paid' is excluded - paid clients must NEVER receive any workflows
+    const workflowTriggerStatuses = ['not-scheduled', 'completed', 'canceled', 'rescheduled', 'no-show'];
     if (workflowTriggerStatuses.includes(status)) {
       try {
         Logger.info('Triggering workflows for status change', {
@@ -1853,22 +1882,7 @@ export const getLeadsPaginated = async (req, res) => {
       });
     }
 
-    if (search) {
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        pipeline.splice(1, 0, {
-          $match: {
-            $or: [
-              { clientName: { $regex: escapedSearch, $options: 'i' } },
-              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-              { utmSource: { $regex: escapedSearch, $options: 'i' } }
-            ]
-          }
-        });
-      }
-    }
+    // Search is already included in matchQuery.$or — no duplicate $match needed
 
     const countPipeline = [
       ...pipeline.slice(0, -1),
@@ -1936,26 +1950,58 @@ export const getLeadsPaginated = async (req, res) => {
       },
       { $group: { _id: '$qualification', count: { $sum: 1 } } }
     ];
-    if (search) {
-      const trimmedSearch = search.trim();
-      if (trimmedSearch) {
-        const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        qualStatsPipeline.splice(1, 0, {
-          $match: {
-            $or: [
-              { clientName: { $regex: escapedSearch, $options: 'i' } },
-              { clientEmail: { $regex: escapedSearch, $options: 'i' } },
-              { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-              { utmSource: { $regex: escapedSearch, $options: 'i' } }
-            ]
-          }
-        });
-      }
-    }
+    // Search is already included in baseMatchQuery.$or — no duplicate $match needed
     const qualStatsResult = await CampaignBookingModel.aggregate(qualStatsPipeline);
     const mqlCount = qualStatsResult.find((r) => r._id === 'MQL')?.count ?? 0;
     const sqlCount = qualStatsResult.find((r) => r._id === 'SQL')?.count ?? 0;
     const convertedCount = qualStatsResult.find((r) => r._id === 'Converted')?.count ?? 0;
+
+    // Status breakdown for "Meetings from X to Y" - deduplicated by client, respects qualification/status filter
+    const statusBreakdownPipeline = [
+      { $match: matchQuery },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
+      { $group: { _id: '$bookingStatus', count: { $sum: 1 } } }
+    ];
+    const statusBreakdownResult = await CampaignBookingModel.aggregate(statusBreakdownPipeline);
+    const statusBreakdown = {};
+    for (const row of statusBreakdownResult) {
+      statusBreakdown[row._id] = row.count;
+    }
+
+    // Monthly breakdown by status for bar chart (deduplicated by client)
+    const monthlyStatusPipeline = [
+      { $match: matchQuery },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' }, monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } } } },
+      {
+        $addFields: {
+          month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } }
+        }
+      },
+      { $group: { _id: { month: '$month', bookingStatus: '$bookingStatus' }, count: { $sum: 1 } } },
+      { $sort: { '_id.month': 1 } }
+    ];
+    const monthlyStatusResult = await CampaignBookingModel.aggregate(monthlyStatusPipeline);
+    const monthMap = new Map();
+    for (const row of monthlyStatusResult) {
+      const { month, bookingStatus } = row._id;
+      if (!monthMap.has(month)) {
+        monthMap.set(month, { month, 'not-scheduled': 0, scheduled: 0, completed: 0, canceled: 0, 'no-show': 0, rescheduled: 0, ignored: 0, paid: 0 });
+      }
+      const entry = monthMap.get(month);
+      if (entry.hasOwnProperty(bookingStatus)) {
+        entry[bookingStatus] = row.count;
+      }
+    }
+    const monthlyStatusBreakdown = Array.from(monthMap.values())
+      .sort((a, b) => a.month.localeCompare(b.month))
+      .map((entry) => ({
+        ...entry,
+        booked: (entry.scheduled || 0) + (entry.rescheduled || 0)
+      }));
 
     const statsPipeline = [
       { $match: matchQuery },
@@ -2002,7 +2048,9 @@ export const getLeadsPaginated = async (req, res) => {
         planBreakdown: planBreakdown,
         mqlCount,
         sqlCount,
-        convertedCount
+        convertedCount,
+        statusBreakdown,
+        monthlyStatusBreakdown
       }
     });
 
@@ -2482,6 +2530,585 @@ export const getMeetingLinks = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to fetch meeting info',
+      error: error.message
+    });
+  }
+};
+
+// ==================== LEADS ANALYTICS (Qualified Leads Graphs) ====================
+export const getLeadsAnalytics = async (req, res) => {
+  try {
+    const { fromDate, toDate, qualification, utmSource, status, planName, minAmount, maxAmount } = req.query;
+
+    // Build base match query - use scheduledEventStartTime for date (matches "Meetings from X to Y" / table)
+    const matchQuery = {};
+    if (fromDate || toDate) {
+      matchQuery.scheduledEventStartTime = {};
+      if (fromDate) {
+        const from = new Date(fromDate);
+        from.setHours(0, 0, 0, 0);
+        matchQuery.scheduledEventStartTime.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(toDate);
+        to.setHours(23, 59, 59, 999);
+        matchQuery.scheduledEventStartTime.$lte = to;
+      }
+    }
+    if (qualification && qualification !== 'all') {
+      const q = String(qualification).toLowerCase();
+      if (q === 'mql' || q === 'sql' || q === 'converted') {
+        matchQuery.bookingStatus = { $in: q === 'mql' ? MQL_STATUSES : q === 'sql' ? SQL_STATUSES : CONVERTED_STATUSES };
+      }
+    } else if (status && status !== 'all') {
+      matchQuery.bookingStatus = status;
+    }
+    if (planName && planName !== 'all') {
+      matchQuery['paymentPlan.name'] = String(planName).toUpperCase();
+    }
+    if (minAmount || maxAmount) {
+      matchQuery['paymentPlan.price'] = {};
+      if (minAmount) matchQuery['paymentPlan.price'].$gte = parseFloat(minAmount);
+      if (maxAmount) matchQuery['paymentPlan.price'].$lte = parseFloat(maxAmount);
+    }
+    if (utmSource && utmSource !== 'all') {
+      if (utmSource === 'meta_lead_ad') {
+        matchQuery.$and = matchQuery.$and || [];
+        matchQuery.$and.push({
+          $or: [
+            { metaLeadId: { $exists: true, $ne: null } },
+            { leadSource: 'meta_lead_ad' }
+          ]
+        });
+      } else {
+        matchQuery.utmSource = utmSource;
+      }
+    }
+
+    // When no date filter, include leads without scheduledEventStartTime (meta leads, not-scheduled)
+    if (!matchQuery.scheduledEventStartTime) {
+      matchQuery.$and = matchQuery.$and || [];
+      matchQuery.$and.push({
+        $or: [
+          { scheduledEventStartTime: { $exists: true, $ne: null } },
+          { leadSource: 'meta_lead_ad' },
+          { metaLeadId: { $exists: true, $ne: null } },
+          { bookingStatus: 'not-scheduled' }
+        ]
+      });
+    }
+
+    // Qualification add-fields expression (reusable)
+    const qualExpr = {
+      $cond: [
+        { $in: ['$bookingStatus', CONVERTED_STATUSES] },
+        'Converted',
+        { $cond: [{ $in: ['$bookingStatus', SQL_STATUSES] }, 'SQL', 'MQL'] }
+      ]
+    };
+
+    // Run all aggregation pipelines concurrently for max performance
+    const [
+      funnelResult,
+      trendResult,
+      conversionTrendResult,
+      revenueByPlanResult,
+      revenueTrendResult,
+      sourceResult,
+      sourceConversionResult,
+      dayOfWeekResult,
+      hourOfDayResult,
+      statusBreakdownResult,
+      avgDealSizeResult,
+      leadAgingResult,
+      planDistResult,
+      planConversionResult,
+      velocityResult,
+      bdaResult,
+      leadSourceTypeResult,
+      monthlyComparisonResult
+    ] = await Promise.all([
+
+      // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
+        {
+          $addFields: {
+            qualification: {
+              $cond: [
+                { $in: ['$bookingStatus', CONVERTED_STATUSES] },
+                'Converted',
+                { $cond: [{ $in: ['$bookingStatus', SQL_STATUSES] }, 'SQL', 'MQL'] }
+              ]
+            }
+          }
+        },
+        { $group: { _id: '$qualification', count: { $sum: 1 } } }
+      ]),
+
+      // 2. LEAD VOLUME TREND: Daily leads with qualification breakdown
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { qualification: qualExpr } },
+        {
+          $group: {
+            _id: {
+              date: { $dateToString: { format: '%Y-%m-%d', date: '$bookingCreatedAt' } },
+              qualification: '$qualification'
+            },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id.date': 1 } },
+        {
+          $group: {
+            _id: '$_id.date',
+            breakdown: { $push: { qualification: '$_id.qualification', count: '$count' } },
+            total: { $sum: '$count' }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 3. CONVERSION RATE TREND: Weekly conversion rates
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { qualification: qualExpr } },
+        {
+          $group: {
+            _id: {
+              week: { $dateToString: { format: '%Y-W%V', date: '$bookingCreatedAt' } }
+            },
+            total: { $sum: 1 },
+            sqlCount: { $sum: { $cond: [{ $eq: ['$qualification', 'SQL'] }, 1, 0] } },
+            convertedCount: { $sum: { $cond: [{ $eq: ['$qualification', 'Converted'] }, 1, 0] } },
+            mqlCount: { $sum: { $cond: [{ $eq: ['$qualification', 'MQL'] }, 1, 0] } }
+          }
+        },
+        { $sort: { _id: 1 } },
+        {
+          $project: {
+            week: '$_id.week',
+            total: 1,
+            sqlRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $multiply: [{ $divide: ['$sqlCount', '$total'] }, 100] }] },
+            convertedRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $multiply: [{ $divide: ['$convertedCount', '$total'] }, 100] }] },
+            mqlRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $multiply: [{ $divide: ['$mqlCount', '$total'] }, 100] }] }
+          }
+        }
+      ]),
+
+      // 4. REVENUE BY PLAN
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, bookingStatus: 'paid', 'paymentPlan.name': { $ne: null } } },
+        {
+          $group: {
+            _id: '$paymentPlan.name',
+            revenue: { $sum: { $ifNull: ['$paymentPlan.price', 0] } },
+            count: { $sum: 1 },
+            avgDeal: { $avg: { $ifNull: ['$paymentPlan.price', 0] } }
+          }
+        },
+        { $sort: { revenue: -1 } }
+      ]),
+
+      // 5. REVENUE TREND: Monthly revenue
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, bookingStatus: 'paid' } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            revenue: { $sum: { $ifNull: ['$paymentPlan.price', 0] } },
+            deals: { $sum: 1 }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 6. LEADS BY SOURCE (utmSource)
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { qualification: qualExpr } },
+        {
+          $group: {
+            _id: { $ifNull: ['$utmSource', 'direct'] },
+            total: { $sum: 1 },
+            mql: { $sum: { $cond: [{ $eq: ['$qualification', 'MQL'] }, 1, 0] } },
+            sql: { $sum: { $cond: [{ $eq: ['$qualification', 'SQL'] }, 1, 0] } },
+            converted: { $sum: { $cond: [{ $eq: ['$qualification', 'Converted'] }, 1, 0] } }
+          }
+        },
+        { $sort: { total: -1 } },
+        { $limit: 15 }
+      ]),
+
+      // 7. CONVERSION RATE BY SOURCE
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { qualification: qualExpr } },
+        {
+          $group: {
+            _id: { $ifNull: ['$utmSource', 'direct'] },
+            total: { $sum: 1 },
+            converted: { $sum: { $cond: [{ $eq: ['$qualification', 'Converted'] }, 1, 0] } },
+            sql: { $sum: { $cond: [{ $eq: ['$qualification', 'SQL'] }, 1, 0] } }
+          }
+        },
+        { $match: { total: { $gte: 3 } } },
+        {
+          $project: {
+            source: '$_id',
+            total: 1,
+            conversionRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $multiply: [{ $divide: ['$converted', '$total'] }, 100] }] },
+            sqlRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $multiply: [{ $divide: ['$sql', '$total'] }, 100] }] }
+          }
+        },
+        { $sort: { conversionRate: -1 } },
+        { $limit: 10 }
+      ]),
+
+      // 8. LEADS BY DAY OF WEEK
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { qualification: qualExpr } },
+        {
+          $group: {
+            _id: { $dayOfWeek: '$bookingCreatedAt' },
+            total: { $sum: 1 },
+            converted: { $sum: { $cond: [{ $eq: ['$qualification', 'Converted'] }, 1, 0] } }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 9. LEADS BY HOUR OF DAY
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        {
+          $group: {
+            _id: { $hour: '$bookingCreatedAt' },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 10. STATUS BREAKDOWN (detailed, deduplicated by client)
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
+        { $group: { _id: '$bookingStatus', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ]),
+
+      // 11. AVERAGE DEAL SIZE BY PLAN
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, bookingStatus: 'paid', 'paymentPlan.price': { $gt: 0 } } },
+        {
+          $group: {
+            _id: '$paymentPlan.name',
+            avgDeal: { $avg: '$paymentPlan.price' },
+            minDeal: { $min: '$paymentPlan.price' },
+            maxDeal: { $max: '$paymentPlan.price' },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { avgDeal: -1 } }
+      ]),
+
+      // 12. LEAD AGING: How long leads sit in current status
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, bookingStatus: { $in: MQL_STATUSES } } },
+        {
+          $addFields: {
+            ageDays: {
+              $divide: [{ $subtract: [new Date(), '$bookingCreatedAt'] }, 86400000]
+            }
+          }
+        },
+        {
+          $bucket: {
+            groupBy: '$ageDays',
+            boundaries: [0, 7, 14, 30, 60, 90, 180, 365],
+            default: '365+',
+            output: { count: { $sum: 1 } }
+          }
+        }
+      ]),
+
+      // 13. PLAN DISTRIBUTION
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, 'paymentPlan.name': { $ne: null } } },
+        {
+          $group: {
+            _id: '$paymentPlan.name',
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { count: -1 } }
+      ]),
+
+      // 14. PLAN CONVERSION RATES
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, 'paymentPlan.name': { $ne: null } } },
+        {
+          $group: {
+            _id: '$paymentPlan.name',
+            total: { $sum: 1 },
+            paid: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
+            completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } }
+          }
+        },
+        {
+          $project: {
+            plan: '$_id',
+            total: 1,
+            paidRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $multiply: [{ $divide: ['$paid', '$total'] }, 100] }] },
+            sqlRate: { $cond: [{ $eq: ['$total', 0] }, 0, { $multiply: [{ $divide: ['$completed', '$total'] }, 100] }] }
+          }
+        },
+        { $sort: { paidRate: -1 } }
+      ]),
+
+      // 15. VELOCITY: Avg days from creation to paid
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, bookingStatus: 'paid', 'paymentPlan.selectedAt': { $ne: null } } },
+        {
+          $addFields: {
+            daysToConvert: {
+              $divide: [{ $subtract: ['$paymentPlan.selectedAt', '$bookingCreatedAt'] }, 86400000]
+            }
+          }
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            avgDays: { $avg: '$daysToConvert' },
+            minDays: { $min: '$daysToConvert' },
+            maxDays: { $max: '$daysToConvert' },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 16. BDA PERFORMANCE
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, 'claimedBy.email': { $ne: null } } },
+        {
+          $group: {
+            _id: { email: '$claimedBy.email', name: '$claimedBy.name' },
+            claimed: { $sum: 1 },
+            converted: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
+            completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
+            revenue: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, { $ifNull: ['$paymentPlan.price', 0] }, 0] } }
+          }
+        },
+        { $sort: { converted: -1, claimed: -1 } },
+        { $limit: 20 }
+      ]),
+
+      // 17. LEAD SOURCE TYPE: calendly vs meta vs manual etc.
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { qualification: qualExpr } },
+        {
+          $group: {
+            _id: { $ifNull: ['$leadSource', 'calendly'] },
+            total: { $sum: 1 },
+            mql: { $sum: { $cond: [{ $eq: ['$qualification', 'MQL'] }, 1, 0] } },
+            sql: { $sum: { $cond: [{ $eq: ['$qualification', 'SQL'] }, 1, 0] } },
+            converted: { $sum: { $cond: [{ $eq: ['$qualification', 'Converted'] }, 1, 0] } }
+          }
+        },
+        { $sort: { total: -1 } }
+      ]),
+
+      // 18. MONTH-OVER-MONTH COMPARISON
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { qualification: qualExpr } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            total: { $sum: 1 },
+            mql: { $sum: { $cond: [{ $eq: ['$qualification', 'MQL'] }, 1, 0] } },
+            sql: { $sum: { $cond: [{ $eq: ['$qualification', 'SQL'] }, 1, 0] } },
+            converted: { $sum: { $cond: [{ $eq: ['$qualification', 'Converted'] }, 1, 0] } },
+            revenue: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, { $ifNull: ['$paymentPlan.price', 0] }, 0] } }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ])
+    ]);
+
+    // Transform results
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const agingLabels = { 0: '0-7d', 7: '7-14d', 14: '14-30d', 30: '30-60d', 60: '60-90d', 90: '90-180d', 180: '180-365d', '365+': '365+d' };
+
+    const funnel = {
+      mql: funnelResult.find(r => r._id === 'MQL')?.count ?? 0,
+      sql: funnelResult.find(r => r._id === 'SQL')?.count ?? 0,
+      converted: funnelResult.find(r => r._id === 'Converted')?.count ?? 0
+    };
+    funnel.total = funnel.mql + funnel.sql + funnel.converted;
+    funnel.mqlToSqlRate = funnel.mql > 0 ? ((funnel.sql + funnel.converted) / (funnel.mql + funnel.sql + funnel.converted) * 100) : 0;
+    // SQL→Converted: of those who reached SQL (completed), what % converted to paid
+    funnel.sqlToConvertedRate = funnel.sql > 0 ? (funnel.converted / funnel.sql * 100) : (funnel.converted > 0 ? 100 : 0);
+    funnel.overallConversion = funnel.total > 0 ? (funnel.converted / funnel.total * 100) : 0;
+
+    const volumeTrend = trendResult.map(day => {
+      const row = { date: day._id, total: day.total, MQL: 0, SQL: 0, Converted: 0 };
+      day.breakdown.forEach(b => { row[b.qualification] = b.count; });
+      return row;
+    });
+
+    const conversionTrend = conversionTrendResult.map(w => ({
+      week: w._id.week,
+      sqlRate: Math.round(w.sqlRate * 10) / 10,
+      convertedRate: Math.round(w.convertedRate * 10) / 10,
+      total: w.total
+    }));
+
+    const revenueByPlan = revenueByPlanResult.map(r => ({
+      plan: r._id,
+      revenue: r.revenue,
+      count: r.count,
+      avgDeal: Math.round(r.avgDeal)
+    }));
+
+    const revenueTrend = revenueTrendResult.map(r => ({
+      month: r._id,
+      revenue: r.revenue,
+      deals: r.deals
+    }));
+
+    const sourceBreakdown = sourceResult.map(r => ({
+      source: r._id,
+      total: r.total,
+      mql: r.mql,
+      sql: r.sql,
+      converted: r.converted
+    }));
+
+    const sourceConversion = sourceConversionResult.map(r => ({
+      source: r._id,
+      total: r.total,
+      conversionRate: Math.round(r.conversionRate * 10) / 10,
+      sqlRate: Math.round(r.sqlRate * 10) / 10
+    }));
+
+    const dayOfWeek = dayOfWeekResult.map(r => ({
+      day: dayNames[r._id - 1] || `Day ${r._id}`,
+      dayNum: r._id,
+      total: r.total,
+      converted: r.converted
+    }));
+
+    const hourOfDay = hourOfDayResult.map(r => ({
+      hour: r._id,
+      label: `${r._id.toString().padStart(2, '0')}:00`,
+      count: r.count
+    }));
+
+    const statusBreakdown = statusBreakdownResult.map(r => ({
+      status: r._id,
+      count: r.count
+    }));
+
+    const avgDealSize = avgDealSizeResult.map(r => ({
+      plan: r._id,
+      avgDeal: Math.round(r.avgDeal),
+      minDeal: r.minDeal,
+      maxDeal: r.maxDeal,
+      count: r.count
+    }));
+
+    const leadAging = leadAgingResult.map(r => ({
+      bucket: agingLabels[r._id] || `${r._id}+d`,
+      count: r.count
+    }));
+
+    const planDistribution = planDistResult.map(r => ({
+      plan: r._id,
+      count: r.count
+    }));
+
+    const planConversion = planConversionResult.map(r => ({
+      plan: r._id,
+      total: r.total,
+      paidRate: Math.round(r.paidRate * 10) / 10,
+      sqlRate: Math.round(r.sqlRate * 10) / 10
+    }));
+
+    const velocity = velocityResult.map(r => ({
+      month: r._id,
+      avgDays: Math.round(r.avgDays * 10) / 10,
+      minDays: Math.round(r.minDays * 10) / 10,
+      maxDays: Math.round(r.maxDays * 10) / 10,
+      count: r.count
+    }));
+
+    const bdaPerformance = bdaResult.map(r => ({
+      name: r._id.name || r._id.email,
+      email: r._id.email,
+      claimed: r.claimed,
+      converted: r.converted,
+      completed: r.completed,
+      revenue: r.revenue,
+      conversionRate: r.claimed > 0 ? Math.round((r.converted / r.claimed) * 1000) / 10 : 0
+    }));
+
+    const leadSourceType = leadSourceTypeResult.map(r => ({
+      source: r._id,
+      total: r.total,
+      mql: r.mql,
+      sql: r.sql,
+      converted: r.converted
+    }));
+
+    const monthlyComparison = monthlyComparisonResult.map(r => ({
+      month: r._id,
+      total: r.total,
+      mql: r.mql,
+      sql: r.sql,
+      converted: r.converted,
+      revenue: r.revenue
+    }));
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        funnel,
+        volumeTrend,
+        conversionTrend,
+        revenueByPlan,
+        revenueTrend,
+        sourceBreakdown,
+        sourceConversion,
+        dayOfWeek,
+        hourOfDay,
+        statusBreakdown,
+        avgDealSize,
+        leadAging,
+        planDistribution,
+        planConversion,
+        velocity,
+        bdaPerformance,
+        leadSourceType,
+        monthlyComparison
+      }
+    });
+
+  } catch (error) {
+    console.error('Error fetching leads analytics:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch leads analytics',
       error: error.message
     });
   }

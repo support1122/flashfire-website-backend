@@ -23,6 +23,7 @@
     "axios": "^1.10.0",
     "bcrypt": "^6.0.0",
     "bullmq": "^5.58.7",
+    "compression": "^1.8.1",
     "cors": "^2.8.5",
     "dotenv": "^17.0.0",
     "express": "^5.1.0",

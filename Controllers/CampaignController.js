@@ -227,7 +227,7 @@ export const getCampaignById = async (req, res) => {
   try {
     const { campaignId } = req.params;
 
-    const campaign = await CampaignModel.findOne({ campaignId });
+    const campaign = await CampaignModel.findOne({ campaignId }).lean();
 
     if (!campaign) {
       return res.status(404).json({
@@ -239,12 +239,12 @@ export const getCampaignById = async (req, res) => {
     // Get bookings for this campaign
     const bookings = await CampaignBookingModel.find({
       utmSource: campaign.utmSource
-    }).sort({ bookingCreatedAt: -1 });
+    }).sort({ bookingCreatedAt: -1 }).lean();
 
     return res.status(200).json({
       success: true,
       data: {
-        campaign: campaign.toObject(),
+        campaign,
         bookings,
         stats: {
           totalClicks: campaign.totalClicks,
@@ -498,7 +498,7 @@ export const getCampaignStatistics = async (req, res) => {
     const activeCampaigns = await CampaignModel.countDocuments({ isActive: true });
     const totalBookings = await CampaignBookingModel.countDocuments();
     
-    const allCampaigns = await CampaignModel.find();
+    const allCampaigns = await CampaignModel.find().lean();
     const totalClicks = allCampaigns.reduce((sum, camp) => sum + camp.totalClicks, 0);
     const totalUniqueVisitors = allCampaigns.reduce((sum, camp) => sum + camp.uniqueVisitors.length, 0);
 
