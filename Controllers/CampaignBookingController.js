@@ -1956,6 +1956,20 @@ export const getLeadsPaginated = async (req, res) => {
     const sqlCount = qualStatsResult.find((r) => r._id === 'SQL')?.count ?? 0;
     const convertedCount = qualStatsResult.find((r) => r._id === 'Converted')?.count ?? 0;
 
+    // Status breakdown for "Meetings from X to Y" - deduplicated by client, respects qualification/status filter
+    const statusBreakdownPipeline = [
+      { $match: matchQuery },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
+      { $group: { _id: '$bookingStatus', count: { $sum: 1 } } }
+    ];
+    const statusBreakdownResult = await CampaignBookingModel.aggregate(statusBreakdownPipeline);
+    const statusBreakdown = {};
+    for (const row of statusBreakdownResult) {
+      statusBreakdown[row._id] = row.count;
+    }
+
     const statsPipeline = [
       { $match: matchQuery },
       {
@@ -2001,7 +2015,8 @@ export const getLeadsPaginated = async (req, res) => {
         planBreakdown: planBreakdown,
         mqlCount,
         sqlCount,
-        convertedCount
+        convertedCount,
+        statusBreakdown
       }
     });
 
@@ -2489,32 +2504,64 @@ export const getMeetingLinks = async (req, res) => {
 // ==================== LEADS ANALYTICS (Qualified Leads Graphs) ====================
 export const getLeadsAnalytics = async (req, res) => {
   try {
-    const { fromDate, toDate, qualification, utmSource } = req.query;
+    const { fromDate, toDate, qualification, utmSource, status, planName, minAmount, maxAmount } = req.query;
 
-    // Build base match query
+    // Build base match query - use scheduledEventStartTime for date (matches "Meetings from X to Y" / table)
     const matchQuery = {};
     if (fromDate || toDate) {
-      matchQuery.bookingCreatedAt = {};
+      matchQuery.scheduledEventStartTime = {};
       if (fromDate) {
         const from = new Date(fromDate);
         from.setHours(0, 0, 0, 0);
-        matchQuery.bookingCreatedAt.$gte = from;
+        matchQuery.scheduledEventStartTime.$gte = from;
       }
       if (toDate) {
         const to = new Date(toDate);
         to.setHours(23, 59, 59, 999);
-        matchQuery.bookingCreatedAt.$lte = to;
+        matchQuery.scheduledEventStartTime.$lte = to;
       }
+    }
+    if (qualification && qualification !== 'all') {
+      const q = String(qualification).toLowerCase();
+      if (q === 'mql' || q === 'sql' || q === 'converted') {
+        matchQuery.bookingStatus = { $in: q === 'mql' ? MQL_STATUSES : q === 'sql' ? SQL_STATUSES : CONVERTED_STATUSES };
+      }
+    } else if (status && status !== 'all') {
+      matchQuery.bookingStatus = status;
+    }
+    if (planName && planName !== 'all') {
+      matchQuery['paymentPlan.name'] = String(planName).toUpperCase();
+    }
+    if (minAmount || maxAmount) {
+      matchQuery['paymentPlan.price'] = {};
+      if (minAmount) matchQuery['paymentPlan.price'].$gte = parseFloat(minAmount);
+      if (maxAmount) matchQuery['paymentPlan.price'].$lte = parseFloat(maxAmount);
     }
     if (utmSource && utmSource !== 'all') {
       if (utmSource === 'meta_lead_ad') {
-        matchQuery.$or = [
-          { metaLeadId: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' }
-        ];
+        matchQuery.$and = matchQuery.$and || [];
+        matchQuery.$and.push({
+          $or: [
+            { metaLeadId: { $exists: true, $ne: null } },
+            { leadSource: 'meta_lead_ad' }
+          ]
+        });
       } else {
         matchQuery.utmSource = utmSource;
       }
+    }
+
+    // When no date filter, include leads without scheduledEventStartTime (meta leads, not-scheduled)
+    if (!matchQuery.scheduledEventStartTime) {
+      matchQuery.$and = matchQuery.$and || [];
+      matchQuery.$and.push({
+        $or: [
+          { scheduledEventStartTime: { $exists: true, $ne: null } },
+          { leadSource: 'meta_lead_ad' },
+          { metaLeadId: { $exists: true, $ne: null } },
+          { bookingStatus: 'not-scheduled' }
+        ]
+      });
     }
 
     // Qualification add-fields expression (reusable)
@@ -2548,10 +2595,23 @@ export const getLeadsAnalytics = async (req, res) => {
       monthlyComparisonResult
     ] = await Promise.all([
 
-      // 1. FUNNEL: MQL → SQL → Converted counts
+      // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
-        { $addFields: { qualification: qualExpr } },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
+        {
+          $addFields: {
+            qualification: {
+              $cond: [
+                { $in: ['$bookingStatus', CONVERTED_STATUSES] },
+                'Converted',
+                { $cond: [{ $in: ['$bookingStatus', SQL_STATUSES] }, 'SQL', 'MQL'] }
+              ]
+            }
+          }
+        },
         { $group: { _id: '$qualification', count: { $sum: 1 } } }
       ]),
 
@@ -2701,15 +2761,13 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 10. STATUS BREAKDOWN (detailed)
+      // 10. STATUS BREAKDOWN (detailed, deduplicated by client)
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
-        {
-          $group: {
-            _id: '$bookingStatus',
-            count: { $sum: 1 }
-          }
-        },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
+        { $group: { _id: '$bookingStatus', count: { $sum: 1 } } },
         { $sort: { count: -1 } }
       ]),
 
@@ -2865,7 +2923,8 @@ export const getLeadsAnalytics = async (req, res) => {
     };
     funnel.total = funnel.mql + funnel.sql + funnel.converted;
     funnel.mqlToSqlRate = funnel.mql > 0 ? ((funnel.sql + funnel.converted) / (funnel.mql + funnel.sql + funnel.converted) * 100) : 0;
-    funnel.sqlToConvertedRate = (funnel.sql + funnel.converted) > 0 ? (funnel.converted / (funnel.sql + funnel.converted) * 100) : 0;
+    // SQL→Converted: of those who reached SQL (completed), what % converted to paid
+    funnel.sqlToConvertedRate = funnel.sql > 0 ? (funnel.converted / funnel.sql * 100) : (funnel.converted > 0 ? 100 : 0);
     funnel.overallConversion = funnel.total > 0 ? (funnel.converted / funnel.total * 100) : 0;
 
     const volumeTrend = trendResult.map(day => {
