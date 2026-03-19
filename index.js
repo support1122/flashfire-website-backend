@@ -219,6 +219,7 @@
 
 
 
+import compression from 'compression';
 import { handleCalendlyWebhook } from './Controllers/CalendlyWebhookController.js';
 import express from 'express';
 import Routes from './Routes.js';
@@ -280,6 +281,7 @@ app.use(
 // Handle preflight for any path (Express 5: avoid "*" pattern)
 app.options(/.*/, cors({ origin: true, credentials: true }));
 // app.use(cors());
+app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
@@ -810,16 +812,20 @@ app.get('/api/geo', (req, res) => {
   try {
     // Allow test overrides in dev: ?debugIp=1.2.3.4 or env FORCE_TEST_IP
     let ip = req.query?.debugIp || process.env.FORCE_TEST_IP || getClientIp(req);
-    console.log('[GeoAPI] Incoming /api/geo request');
-    console.log('[GeoAPI] Headers of interest:', {
-      'cf-connecting-ip': req.headers['cf-connecting-ip'],
-      'x-real-ip': req.headers['x-real-ip'],
-      'x-forwarded-for': req.headers['x-forwarded-for'],
-      remoteAddress: req.connection?.remoteAddress || req.socket?.remoteAddress
-    });
-    console.log('[GeoAPI] Resolved client IP:', ip);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[GeoAPI] Incoming /api/geo request');
+      console.log('[GeoAPI] Headers of interest:', {
+        'cf-connecting-ip': req.headers['cf-connecting-ip'],
+        'x-real-ip': req.headers['x-real-ip'],
+        'x-forwarded-for': req.headers['x-forwarded-for'],
+        remoteAddress: req.connection?.remoteAddress || req.socket?.remoteAddress
+      });
+      console.log('[GeoAPI] Resolved client IP:', ip);
+    }
     const geo = detectCountryFromIp(ip);
-    console.log('[GeoAPI] Result:', geo);
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[GeoAPI] Result:', geo);
+    }
     return res.json({
       success: true,
       countryCode: geo.countryCode,

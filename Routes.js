@@ -56,7 +56,8 @@ import {
   updateBookingAmount,
   bulkCreateLeads,
   handlePaidClientFromMicroservice,
-  getMeetingNotes
+  getMeetingNotes,
+  getLeadsAnalytics
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
 import { syncDiscordBdaReminders } from "./Controllers/SyncController.js";
@@ -373,6 +374,7 @@ export default function Routes(app) {
   
   app.get('/api/leads/paginated', requireCrmUser, requireCrmPermission('leads'), getLeadsPaginated);
   app.get('/api/leads/ids', requireCrmUser, requireCrmPermission('leads'), getLeadsIds);
+  app.get('/api/leads/analytics', requireCrmUser, requireCrmPermission('leads'), getLeadsAnalytics);
   app.get('/api/meeting-links', requireCrmUser, requireCrmPermission('meeting_links'), getMeetingLinks);
 
   app.get('/api/campaign-bookings/:bookingId/custom-workflows', requireCrmUser, getCustomWorkflowsForBooking);
