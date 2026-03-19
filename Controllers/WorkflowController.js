@@ -63,6 +63,35 @@ function filterByCountryCode(bookings, includeCountries) {
   });
 }
 
+/**
+ * Check if a client (by email or phone) has any booking with status 'paid'.
+ * Used to prevent workflows from being sent to paid clients.
+ * @param {string} clientEmail - Client email (optional)
+ * @param {string} clientPhone - Client phone (optional)
+ * @returns {Promise<boolean>} - True if client has any paid booking
+ */
+export async function clientHasPaidBooking(clientEmail, clientPhone) {
+  if (!clientEmail && !clientPhone) return false;
+
+  const conditions = [];
+  if (clientEmail) {
+    conditions.push({ clientEmail: String(clientEmail).trim().toLowerCase() });
+  }
+  if (clientPhone) {
+    const norm = normalizePhoneForMatching(clientPhone);
+    if (norm) {
+      conditions.push({ normalizedClientPhone: norm });
+    }
+  }
+  if (conditions.length === 0) return false;
+
+  const paid = await CampaignBookingModel.exists({
+    $or: conditions,
+    bookingStatus: 'paid'
+  });
+  return !!paid;
+}
+
 function deduplicateBookings(bookings) {
   const groupedMap = new Map();
   
@@ -698,6 +727,17 @@ export const triggerWorkflow = async (bookingId, action) => {
       return { success: false, message: 'Booking not found' };
     }
 
+    // STRICT: Never send workflows to paid clients
+    if (booking.bookingStatus === 'paid') {
+      Logger.info('Skipping workflow trigger: booking is already paid', { bookingId, clientEmail: booking.clientEmail });
+      return { success: true, triggered: false, message: 'Paid clients do not receive workflows' };
+    }
+    const hasPaid = await clientHasPaidBooking(booking.clientEmail, booking.clientPhone);
+    if (hasPaid) {
+      Logger.info('Skipping workflow trigger: client has paid booking elsewhere', { bookingId, clientEmail: booking.clientEmail });
+      return { success: true, triggered: false, message: 'Paid clients do not receive workflows' };
+    }
+
     const results = {
       triggered: true,
       workflowsTriggered: [],
@@ -762,6 +802,30 @@ export const triggerWorkflow = async (bookingId, action) => {
   }
 };
 
+
+/**
+ * Cancel all scheduled WorkflowLog entries for a booking (e.g. when status changes to paid).
+ * The cron processes WorkflowLog with status 'scheduled' - we must cancel those to prevent execution.
+ */
+export const cancelScheduledWorkflowLogsForBooking = async (bookingId, reason = 'Booking status changed to paid') => {
+  try {
+    const result = await WorkflowLogModel.updateMany(
+      { bookingId, status: 'scheduled' },
+      { $set: { status: 'cancelled', error: reason, executedAt: null } }
+    );
+    if (result.modifiedCount > 0) {
+      Logger.info('Cancelled scheduled workflow logs for paid booking', {
+        bookingId,
+        cancelledCount: result.modifiedCount,
+        reason
+      });
+    }
+    return { success: true, cancelled: result.modifiedCount };
+  } catch (error) {
+    Logger.error('Error cancelling scheduled workflow logs', { bookingId, error: error.message });
+    return { success: false, cancelled: 0, error: error.message };
+  }
+};
 
 export const cancelScheduledWorkflows = async (bookingId, newStatus, oldStatus = null) => {
   try {
@@ -1134,6 +1198,22 @@ export const processScheduledWorkflows = async () => {
         if (scheduledWorkflow.status === 'scheduled' && 
             new Date(scheduledWorkflow.scheduledFor) <= now) {
           try {
+            // STRICT: Skip paid clients - never execute workflows for them
+            if (booking.bookingStatus === 'paid') {
+              await CampaignBookingModel.updateOne(
+                { bookingId: booking.bookingId, 'scheduledWorkflows._id': scheduledWorkflow._id },
+                { $set: { 'scheduledWorkflows.$.status': 'cancelled', 'scheduledWorkflows.$.error': 'Skipped: Client is paid' } }
+              );
+              continue;
+            }
+            const hasPaid = await clientHasPaidBooking(booking.clientEmail, booking.clientPhone);
+            if (hasPaid) {
+              await CampaignBookingModel.updateOne(
+                { bookingId: booking.bookingId, 'scheduledWorkflows._id': scheduledWorkflow._id },
+                { $set: { 'scheduledWorkflows.$.status': 'cancelled', 'scheduledWorkflows.$.error': 'Skipped: Client has paid booking' } }
+              );
+              continue;
+            }
             // Get workflow details for logging
             const workflow = await WorkflowModel.findOne({ workflowId: scheduledWorkflow.workflowId }).lean();
             
@@ -1627,6 +1707,21 @@ export const triggerWorkflowsForAllByStatus = async (req, res) => {
     let uniqueBookings = Array.from(groupedMap.values()).map(item => item.booking);
     
     uniqueBookings = uniqueBookings.filter(booking => booking.bookingStatus === statusInfo.dbStatus);
+
+    // STRICT: Exclude clients who have any paid booking - never send workflows to paid clients
+    const bookingsToProcess = [];
+    for (const booking of uniqueBookings) {
+      const hasPaid = await clientHasPaidBooking(booking.clientEmail, booking.clientPhone);
+      if (hasPaid) {
+        Logger.info('Skipping bulk workflow trigger: client has paid booking', {
+          bookingId: booking.bookingId,
+          clientEmail: booking.clientEmail
+        });
+        continue;
+      }
+      bookingsToProcess.push(booking);
+    }
+    uniqueBookings = bookingsToProcess;
 
     if (uniqueBookings.length === 0) {
       return res.status(200).json({

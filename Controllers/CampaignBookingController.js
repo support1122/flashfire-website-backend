@@ -3,7 +3,7 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
 import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
-import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
+import { triggerWorkflow, cancelScheduledWorkflows, cancelScheduledWorkflowLogsForBooking } from './WorkflowController.js';
 import { cancelWhatsAppRemindersForClient } from '../Utils/WhatsAppReminderScheduler.js';
 import { cancelDiscordMeetRemindersForMeeting } from '../Utils/DiscordMeetReminderScheduler.js';
 import { cancelCall } from '../Utils/CallScheduler.js';
@@ -1028,7 +1028,20 @@ export const updateBookingStatus = async (req, res) => {
           }
         }
 
-        // Cancel scheduled workflows (email and WhatsApp workflows)
+        // Cancel scheduled WorkflowLog entries (cron processes these - must cancel to prevent execution)
+        try {
+          const logCancelResult = await cancelScheduledWorkflowLogsForBooking(bookingId, 'Cancelled: Booking status changed to paid');
+          if (logCancelResult.success && logCancelResult.cancelled > 0) {
+            cancellationResults.scheduledWorkflows.cancelled += logCancelResult.cancelled;
+          }
+        } catch (logCancelError) {
+          Logger.warn('Error cancelling scheduled workflow logs for paid booking', {
+            bookingId,
+            error: logCancelError.message
+          });
+        }
+
+        // Cancel scheduled workflows (email and WhatsApp workflows) in booking document
         if (existingBooking.scheduledWorkflows && existingBooking.scheduledWorkflows.length > 0) {
           const scheduledWorkflows = existingBooking.scheduledWorkflows.filter(
             sw => sw.status === 'scheduled'
@@ -1119,7 +1132,8 @@ export const updateBookingStatus = async (req, res) => {
     }
 
     // Trigger workflows for specific status changes
-    const workflowTriggerStatuses = ['not-scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'paid'];
+    // NOTE: 'paid' is excluded - paid clients must NEVER receive any workflows
+    const workflowTriggerStatuses = ['not-scheduled', 'completed', 'canceled', 'rescheduled', 'no-show'];
     if (workflowTriggerStatuses.includes(status)) {
       try {
         Logger.info('Triggering workflows for status change', {

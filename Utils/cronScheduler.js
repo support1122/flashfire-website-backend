@@ -11,6 +11,7 @@ import { scheduleEmailBatch, scheduleWhatsAppBatch } from './JobScheduler.js';
 import { buildTemplateParameters } from './TemplateParameterBuilder.js';
 import { safeErrorDetails } from './safeErrorDetails.js';
 import { sendgridCircuitBreaker } from './CircuitBreaker.js';
+import { clientHasPaidBooking } from '../Controllers/WorkflowController.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
@@ -103,6 +104,37 @@ export async function executeWorkflowLog(log) {
           }
         }
       );
+      return;
+    }
+
+    // STRICT: Never execute workflows for paid clients (safety check at execution time)
+    if (booking.bookingStatus === 'paid') {
+      await WorkflowLogModel.updateOne(
+        { logId: log.logId },
+        { 
+          $set: { 
+            status: 'cancelled',
+            error: 'Skipped: Client is marked as paid - workflows are not sent to paid clients',
+            executedAt: new Date()
+          }
+        }
+      );
+      console.log(`⏭️ Skipped workflow log ${log.logId}: booking ${log.bookingId} is paid`);
+      return;
+    }
+    const hasPaid = await clientHasPaidBooking(booking.clientEmail, booking.clientPhone);
+    if (hasPaid) {
+      await WorkflowLogModel.updateOne(
+        { logId: log.logId },
+        { 
+          $set: { 
+            status: 'cancelled',
+            error: 'Skipped: Client has paid booking - workflows are not sent to paid clients',
+            executedAt: new Date()
+          }
+        }
+      );
+      console.log(`⏭️ Skipped workflow log ${log.logId}: client has paid booking elsewhere`);
       return;
     }
 
