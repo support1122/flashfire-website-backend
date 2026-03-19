@@ -1970,6 +1970,39 @@ export const getLeadsPaginated = async (req, res) => {
       statusBreakdown[row._id] = row.count;
     }
 
+    // Monthly breakdown by status for bar chart (deduplicated by client)
+    const monthlyStatusPipeline = [
+      { $match: matchQuery },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' }, monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } } } },
+      {
+        $addFields: {
+          month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } }
+        }
+      },
+      { $group: { _id: { month: '$month', bookingStatus: '$bookingStatus' }, count: { $sum: 1 } } },
+      { $sort: { '_id.month': 1 } }
+    ];
+    const monthlyStatusResult = await CampaignBookingModel.aggregate(monthlyStatusPipeline);
+    const monthMap = new Map();
+    for (const row of monthlyStatusResult) {
+      const { month, bookingStatus } = row._id;
+      if (!monthMap.has(month)) {
+        monthMap.set(month, { month, 'not-scheduled': 0, scheduled: 0, completed: 0, canceled: 0, 'no-show': 0, rescheduled: 0, ignored: 0, paid: 0 });
+      }
+      const entry = monthMap.get(month);
+      if (entry.hasOwnProperty(bookingStatus)) {
+        entry[bookingStatus] = row.count;
+      }
+    }
+    const monthlyStatusBreakdown = Array.from(monthMap.values())
+      .sort((a, b) => a.month.localeCompare(b.month))
+      .map((entry) => ({
+        ...entry,
+        booked: (entry.scheduled || 0) + (entry.rescheduled || 0)
+      }));
+
     const statsPipeline = [
       { $match: matchQuery },
       {
@@ -2016,7 +2049,8 @@ export const getLeadsPaginated = async (req, res) => {
         mqlCount,
         sqlCount,
         convertedCount,
-        statusBreakdown
+        statusBreakdown,
+        monthlyStatusBreakdown
       }
     });
 
