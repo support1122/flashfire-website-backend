@@ -640,7 +640,7 @@ export async function warnAbsent(req, res) {
       `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
       `**Meet Code:** ${meetCode}\n` +
       `**Meet Link:** ${meetLink}\n` +
-      `_Meeting started 2 min ago — please join!_`;
+      `_Meeting started 1 min ago — please join!_`;
 
     await sendPresentDiscord(message);
 
