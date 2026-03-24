@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken';
 import { DateTime } from 'luxon';
 import { getCrmJwtSecret } from '../Middlewares/CrmAuth.js';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
+import { BdaAttendanceWarnDedupeModel } from '../Schema_Models/BdaAttendanceWarnDedupe.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { DiscordConnect } from '../Utils/DiscordConnect.js';
@@ -93,14 +94,35 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+const OTP_CACHE_PREFIX = 'bda_attendance:';
+
+function otpCacheKey(email) {
+  return `${OTP_CACHE_PREFIX}${normalizeEmail(email)}`;
+}
+
 function generateOtp() {
   return String(crypto.randomInt(100000, 1000000)); // 6 digits
 }
 
 function bdaOtpHash(email, otp) {
   const secret = process.env.CRM_OTP_HASH_SECRET || getCrmJwtSecret();
-  const value = `${normalizeEmail(email)}|${String(otp).trim()}|${secret}`;
+  const value = `${otpCacheKey(email)}|${String(otp).trim()}|${secret}`;
   return crypto.createHash('sha256').update(value).digest('hex');
+}
+
+/** CRM profile name, else email local-part, else email */
+function bdaDisplayNameFromUser(user) {
+  const email = normalizeEmail(user?.email);
+  const rawName = user?.name != null ? String(user.name).trim() : '';
+  if (rawName) return rawName;
+  if (!email) return '';
+  const local = email.split('@')[0];
+  return local || email;
+}
+
+function assertBookingClaimedBy(booking, bdaEmail) {
+  const claimed = booking?.claimedBy?.email;
+  return claimed && normalizeEmail(claimed) === normalizeEmail(bdaEmail);
 }
 
 // ==================== POST /api/bda-attendance/request-otp ====================
@@ -134,10 +156,10 @@ export async function requestBdaOtp(req, res) {
 
     const ttlSeconds = Number(process.env.CRM_OTP_TTL_SECONDS || 300);
     const expiresAtMs = Date.now() + ttlSeconds * 1000;
-    setOtp(email, { otpHash: bdaOtpHash(email, otp), expiresAtMs, attemptsLeft: 5 });
+    setOtp(otpCacheKey(email), { otpHash: bdaOtpHash(email, otp), expiresAtMs, attemptsLeft: 5 });
 
     // Send email via SendGrid
-    await sendBdaOtpEmail(email, otp, user.name);
+    await sendBdaOtpEmail(email, otp, bdaDisplayNameFromUser(user));
 
     return res.status(200).json({
       success: true,
@@ -164,7 +186,8 @@ export async function verifyBdaOtp(req, res) {
       return res.status(400).json({ success: false, error: 'Invalid OTP format. Enter 6 digits.' });
     }
 
-    const entry = getOtp(email);
+    const key = otpCacheKey(email);
+    const entry = getOtp(key);
     if (!entry) {
       return res.status(401).json({ success: false, error: 'OTP expired or not found. Request a new one.' });
     }
@@ -172,7 +195,7 @@ export async function verifyBdaOtp(req, res) {
     const incomingHash = bdaOtpHash(email, otp);
     const ok = crypto.timingSafeEqual(Buffer.from(incomingHash), Buffer.from(entry.otpHash));
     if (!ok) {
-      const remaining = decrementAttempts(email);
+      const remaining = decrementAttempts(key);
       const attemptsLeft = remaining?.attemptsLeft || 0;
       return res.status(401).json({
         success: false,
@@ -183,7 +206,7 @@ export async function verifyBdaOtp(req, res) {
     }
 
     // OTP valid - delete it
-    deleteOtp(email);
+    deleteOtp(key);
 
     // Verify user exists and is active
     const user = await CrmUserModel.findOne({ email }).lean();
@@ -191,12 +214,14 @@ export async function verifyBdaOtp(req, res) {
       return res.status(403).json({ success: false, error: 'User not authorized' });
     }
 
+    const displayName = bdaDisplayNameFromUser(user);
+
     // Issue 90-day JWT for BDA extension
     const token = jwt.sign(
       {
         role: 'bda_extension',
         email: user.email,
-        name: user.name,
+        name: displayName,
       },
       getCrmJwtSecret(),
       { expiresIn: '90d' }
@@ -206,7 +231,7 @@ export async function verifyBdaOtp(req, res) {
       success: true,
       token,
       expiresIn: '90d',
-      bda: { name: user.name, email: user.email },
+      bda: { name: displayName, email: user.email },
     });
   } catch (error) {
     console.error('[BdaAttendance] verifyBdaOtp error:', error?.message || error);
@@ -219,77 +244,68 @@ export async function verifyBdaOtp(req, res) {
 export async function getMyMeetings(req, res) {
   try {
     const { email } = req.bdaUser;
+    const emailNorm = normalizeEmail(email);
     const now = new Date();
+    const horizonPast = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    const horizonFuture = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
 
-    // Upcoming: next 3 scheduled meetings (visible to all BDAs), from now onwards
-    const upcoming = await CampaignBookingModel.find({
-      bookingStatus: { $in: ['scheduled'] },
-      scheduledEventStartTime: { $exists: true, $ne: null, $gte: now },
+    const bookings = await CampaignBookingModel.find({
+      'claimedBy.email': emailNorm,
+      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] },
+      scheduledEventStartTime: { $gte: horizonPast, $lte: horizonFuture },
     })
       .sort({ scheduledEventStartTime: 1 })
-      .limit(3)
       .select(
         'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy'
       )
       .lean();
 
-    // Previous/current: last 1 meeting that already started (current or most recent past)
-    const previous = await CampaignBookingModel.find({
-      bookingStatus: { $in: ['scheduled', 'completed', 'paid'] },
-      scheduledEventStartTime: { $exists: true, $ne: null, $lt: now },
-    })
-      .sort({ scheduledEventStartTime: -1 })
-      .limit(1)
-      .select(
-        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy'
-      )
-      .lean();
-
-    // Get attendance records for all these bookings
-    const allBookingIds = [
-      ...upcoming.map((b) => b.bookingId),
-      ...previous.map((b) => b.bookingId),
-    ];
-
+    const ids = bookings.map((b) => b.bookingId);
     const attendanceRecords = await BdaAttendanceModel.find({
-      bookingId: { $in: allBookingIds },
+      bookingId: { $in: ids },
+      bdaEmail: emailNorm,
     }).lean();
 
-    // Group attendance by bookingId (there may be multiple BDAs per booking)
-    const attendanceMap = {};
-    for (const att of attendanceRecords) {
-      // Prefer the record matching this BDA, otherwise use any
-      if (!attendanceMap[att.bookingId] || att.bdaEmail === email) {
-        attendanceMap[att.bookingId] = {
-          status: att.status,
-          source: att.source,
-          bdaName: att.bdaName,
-          bdaEmail: att.bdaEmail,
-          joinedAt: att.joinedAt,
-          leftAt: att.leftAt,
-          markedAt: att.markedAt,
-          meetLink: att.meetLink,
-        };
+    const attendanceByBooking = Object.fromEntries(
+      attendanceRecords.map((a) => [
+        a.bookingId,
+        {
+          status: a.status,
+          source: a.source,
+        },
+      ])
+    );
+
+    const upcoming = [];
+    const previous = [];
+
+    for (const b of bookings) {
+      const start = b.scheduledEventStartTime ? new Date(b.scheduledEventStartTime) : null;
+      const dto = {
+        bookingId: b.bookingId,
+        clientName: b.clientName,
+        clientEmail: b.clientEmail,
+        scheduledStart: b.scheduledEventStartTime,
+        scheduledEnd: b.scheduledEventEndTime,
+        googleMeetUrl: b.googleMeetUrl,
+        googleMeetCode: b.googleMeetCode,
+        calendlyMeetLink: b.calendlyMeetLink,
+        claimedBy: b.claimedBy ? { name: b.claimedBy.name, email: b.claimedBy.email } : null,
+        attendance: attendanceByBooking[b.bookingId] || null,
+      };
+      if (start && start >= now) {
+        upcoming.push(dto);
+      } else {
+        previous.push(dto);
       }
     }
 
-    const mapBooking = (b) => ({
-      bookingId: b.bookingId,
-      clientName: b.clientName,
-      clientEmail: b.clientEmail,
-      scheduledStart: b.scheduledEventStartTime,
-      scheduledEnd: b.scheduledEventEndTime,
-      googleMeetUrl: b.googleMeetUrl,
-      googleMeetCode: b.googleMeetCode,
-      calendlyMeetLink: b.calendlyMeetLink,
-      claimedBy: b.claimedBy ? { name: b.claimedBy.name, email: b.claimedBy.email } : null,
-      attendance: attendanceMap[b.bookingId] || null,
-    });
+    previous.sort((a, b) => new Date(b.scheduledStart) - new Date(a.scheduledStart));
 
     return res.status(200).json({
       success: true,
-      upcoming: upcoming.map(mapBooking),
-      previous: previous.map(mapBooking),
+      upcoming,
+      previous,
       serverTime: now.toISOString(),
     });
   } catch (error) {
@@ -303,75 +319,89 @@ export async function getMyMeetings(req, res) {
 export async function reportJoin(req, res) {
   try {
     const { email, name } = req.bdaUser;
+    const emailNorm = normalizeEmail(email);
     const { bookingId, meetLink, joinedAt } = req.body;
 
     if (!bookingId) {
       return res.status(400).json({ success: false, error: 'bookingId is required' });
     }
 
-    // Verify booking exists (any BDA can report for any meeting)
     const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
 
     if (!booking) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
-    // Validate meet link
+    if (!assertBookingClaimedBy(booking, emailNorm)) {
+      return res.status(403).json({ success: false, error: 'You can only report for leads you claimed' });
+    }
+
     if (meetLink && !meetLink.includes('meet.google.com')) {
       return res.status(400).json({ success: false, error: 'Invalid meet link' });
     }
 
-    // Upsert attendance record
-    const attendance = await BdaAttendanceModel.findOneAndUpdate(
-      { bookingId, bdaEmail: email },
-      {
-        $set: {
-          bdaName: name,
-          bdaEmail: email,
-          bookingId,
-          meetLink: meetLink || null,
-          joinedAt: joinedAt ? new Date(joinedAt) : new Date(),
-          status: 'present',
-          source: 'auto',
-          markedAt: new Date(),
-          meetingScheduledStart: booking.scheduledEventStartTime,
-          meetingScheduledEnd: booking.scheduledEventEndTime || null,
-        },
-        $setOnInsert: {
-          attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        },
-      },
-      { upsert: true, new: true }
-    );
+    const joinDate = joinedAt ? new Date(joinedAt) : new Date();
+    let doc = await BdaAttendanceModel.findOne({ bookingId, bdaEmail: emailNorm });
+    let notifyJoin = false;
 
-    // Send Discord notification
-    if (!attendance.discordNotified || attendance.source !== 'auto') {
+    if (!doc) {
+      notifyJoin = true;
+      doc = new BdaAttendanceModel({
+        attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        bdaName: name,
+        bdaEmail: emailNorm,
+        bookingId,
+        meetLink: meetLink || null,
+        joinedAt: joinDate,
+        leftAt: null,
+        status: 'present',
+        source: 'auto',
+        markedAt: new Date(),
+        meetingScheduledStart: booking.scheduledEventStartTime,
+        meetingScheduledEnd: booking.scheduledEventEndTime || null,
+      });
+    } else {
+      const openSession = Boolean(doc.joinedAt && !doc.leftAt);
+      if (!openSession) {
+        doc.joinedAt = joinDate;
+        doc.leftAt = null;
+        notifyJoin = true;
+      }
+      doc.bdaName = name;
+      doc.bdaEmail = emailNorm;
+      doc.meetLink = meetLink || doc.meetLink;
+      doc.status = 'present';
+      doc.source = 'auto';
+      doc.markedAt = new Date();
+      doc.meetingScheduledStart = booking.scheduledEventStartTime;
+      doc.meetingScheduledEnd = booking.scheduledEventEndTime || null;
+    }
+
+    await doc.save();
+
+    if (notifyJoin) {
       const message =
         `✅ **BDA Joined Meeting**\n` +
-        `**BDA:** ${name} (${email})\n` +
+        `**BDA:** ${name} (${emailNorm})\n` +
         `**Client:** ${booking.clientName}\n` +
         `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
         `**Meet Link:** ${meetLink || 'N/A'}\n` +
-        `**Joined At:** ${formatIST(joinedAt || new Date())}`;
+        `**Joined At:** ${formatIST(joinDate)}`;
 
       await sendPresentDiscord(message);
-      await BdaAttendanceModel.updateOne(
-        { _id: attendance._id },
-        { discordNotified: true }
-      );
+      await BdaAttendanceModel.updateOne({ _id: doc._id }, { discordNotified: true });
     }
 
-    // Notify SSE
-    notifyBdaSSE(email, 'attendance_update', {
+    notifyBdaSSE(emailNorm, 'attendance_update', {
       bookingId,
       status: 'present',
       source: 'auto',
-      joinedAt: attendance.joinedAt,
+      joinedAt: doc.joinedAt,
     });
 
     return res.status(200).json({
       success: true,
-      attendanceId: attendance.attendanceId,
+      attendanceId: doc.attendanceId,
     });
   } catch (error) {
     console.error('[BdaAttendance] reportJoin error:', error);
@@ -384,52 +414,64 @@ export async function reportJoin(req, res) {
 export async function reportLeave(req, res) {
   try {
     const { email, name } = req.bdaUser;
+    const emailNorm = normalizeEmail(email);
     const { bookingId, leftAt } = req.body;
 
     if (!bookingId) {
       return res.status(400).json({ success: false, error: 'bookingId is required' });
     }
 
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+    if (!booking) {
+      return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+    if (!assertBookingClaimedBy(booking, emailNorm)) {
+      return res.status(403).json({ success: false, error: 'You can only report for leads you claimed' });
+    }
+
     const attendance = await BdaAttendanceModel.findOne({
       bookingId,
-      bdaEmail: email,
+      bdaEmail: emailNorm,
     });
 
     if (!attendance) {
-      return res.status(404).json({ success: false, error: 'No attendance record found for this meeting' });
+      notifyBdaSSE(emailNorm, 'attendance_update', { bookingId });
+      return res.status(200).json({ success: true });
+    }
+
+    if (!attendance.joinedAt) {
+      notifyBdaSSE(emailNorm, 'attendance_update', { bookingId });
+      return res.status(200).json({ success: true });
     }
 
     const leaveTime = leftAt ? new Date(leftAt) : new Date();
+    const segmentMs = Math.max(0, leaveTime.getTime() - new Date(attendance.joinedAt).getTime());
+    attendance.cumulativeDurationMs = (attendance.cumulativeDurationMs || 0) + segmentMs;
+    attendance.durationMs = attendance.cumulativeDurationMs;
     attendance.leftAt = leaveTime;
+    attendance.joinedAt = null;
     await attendance.save();
 
-    // Calculate duration
-    let durationMin = 'N/A';
-    if (attendance.joinedAt) {
-      durationMin = Math.round((leaveTime - attendance.joinedAt) / 60000);
-    }
-
-    // Get booking for client name
-    const booking = await CampaignBookingModel.findOne({ bookingId }).select('clientName').lean();
+    const durationMin = Math.round(attendance.cumulativeDurationMs / 60000);
 
     const message =
       `🚪 **BDA Left Meeting**\n` +
-      `**BDA:** ${name} (${email})\n` +
-      `**Client:** ${booking?.clientName || 'Unknown'}\n` +
-      `**Duration:** ${durationMin} min\n` +
+      `**BDA:** ${name} (${emailNorm})\n` +
+      `**Client:** ${booking.clientName || 'Unknown'}\n` +
+      `**Duration (total):** ${durationMin} min\n` +
       `**Left At:** ${formatIST(leaveTime)}`;
 
     await sendPresentDiscord(message);
 
-    // Notify SSE
-    notifyBdaSSE(email, 'attendance_update', {
+    notifyBdaSSE(emailNorm, 'attendance_update', {
       bookingId,
-      status: 'present',
+      status: attendance.status,
       leftAt: leaveTime,
       durationMin,
+      durationMs: attendance.durationMs,
     });
 
-    return res.status(200).json({ success: true });
+    return res.status(200).json({ success: true, durationMs: attendance.durationMs });
   } catch (error) {
     console.error('[BdaAttendance] reportLeave error:', error);
     return res.status(500).json({ success: false, error: 'Internal server error' });
@@ -441,6 +483,7 @@ export async function reportLeave(req, res) {
 export async function manualMark(req, res) {
   try {
     const { email, name } = req.bdaUser;
+    const emailNorm = normalizeEmail(email);
     const { bookingId } = req.body;
 
     if (!bookingId) {
@@ -451,6 +494,10 @@ export async function manualMark(req, res) {
 
     if (!booking) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
+    }
+
+    if (!assertBookingClaimedBy(booking, emailNorm)) {
+      return res.status(403).json({ success: false, error: 'You can only report for leads you claimed' });
     }
 
     const now = new Date();
@@ -476,7 +523,7 @@ export async function manualMark(req, res) {
     // Check if already present via auto
     const existing = await BdaAttendanceModel.findOne({
       bookingId,
-      bdaEmail: email,
+      bdaEmail: emailNorm,
       status: 'present',
       source: 'auto',
     });
@@ -490,11 +537,11 @@ export async function manualMark(req, res) {
 
     // Upsert
     const attendance = await BdaAttendanceModel.findOneAndUpdate(
-      { bookingId, bdaEmail: email },
+      { bookingId, bdaEmail: emailNorm },
       {
         $set: {
           bdaName: name,
-          bdaEmail: email,
+          bdaEmail: emailNorm,
           bookingId,
           status: 'manual',
           source: 'manual',
@@ -512,7 +559,7 @@ export async function manualMark(req, res) {
     // Discord notification
     const message =
       `✋ **BDA Manual Attendance**\n` +
-      `**BDA:** ${name} (${email})\n` +
+      `**BDA:** ${name} (${emailNorm})\n` +
       `**Client:** ${booking.clientName}\n` +
       `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
       `_Note: Auto-detection did not trigger; BDA manually confirmed attendance._`;
@@ -524,7 +571,7 @@ export async function manualMark(req, res) {
     );
 
     // Notify SSE
-    notifyBdaSSE(email, 'attendance_update', {
+    notifyBdaSSE(emailNorm, 'attendance_update', {
       bookingId,
       status: 'manual',
       source: 'manual',
@@ -546,6 +593,7 @@ export async function manualMark(req, res) {
 export async function markAbsent(req, res) {
   try {
     const { email, name } = req.bdaUser;
+    const emailNorm = normalizeEmail(email);
     const { bookingId, reason } = req.body;
 
     if (!bookingId) {
@@ -558,10 +606,14 @@ export async function markAbsent(req, res) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
+    if (!assertBookingClaimedBy(booking, emailNorm)) {
+      return res.status(403).json({ success: false, error: 'You can only report for leads you claimed' });
+    }
+
     // Don't overwrite any existing attendance record (present, manual, or already absent)
     const existing = await BdaAttendanceModel.findOne({
       bookingId,
-      bdaEmail: email,
+      bdaEmail: emailNorm,
     });
 
     if (existing) {
@@ -575,7 +627,7 @@ export async function markAbsent(req, res) {
     const attendance = await BdaAttendanceModel.create({
       attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       bdaName: name,
-      bdaEmail: email,
+      bdaEmail: emailNorm,
       bookingId,
       status: 'absent',
       source: 'manual',
@@ -588,7 +640,7 @@ export async function markAbsent(req, res) {
 
     const message =
       `❌ **BDA Absent**\n` +
-      `**BDA:** ${name} (${email})\n` +
+      `**BDA:** ${name} (${emailNorm})\n` +
       `**Client:** ${booking.clientName}\n` +
       `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
       `_Reason: ${reason || 'No response after 5min popup'}_`;
@@ -604,9 +656,12 @@ export async function markAbsent(req, res) {
 
 // ==================== POST /api/bda-attendance/warn-absent ====================
 
+const WARN_DISCORD_LINE = '⚠️ BDA Not in Meeting';
+
 export async function warnAbsent(req, res) {
   try {
-    const { email, name } = req.bdaUser;
+    const { email } = req.bdaUser;
+    const emailNorm = normalizeEmail(email);
     const { bookingId } = req.body;
 
     if (!bookingId) {
@@ -619,30 +674,60 @@ export async function warnAbsent(req, res) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
-    // Check if already present - no need to warn
+    if (!assertBookingClaimedBy(booking, emailNorm)) {
+      return res.status(403).json({ success: false, error: 'You can only report for leads you claimed' });
+    }
+
     const existing = await BdaAttendanceModel.findOne({
       bookingId,
-      bdaEmail: email,
+      bdaEmail: emailNorm,
       status: { $in: ['present', 'manual'] },
     });
 
     if (existing) {
-      return res.status(200).json({ success: true, message: 'Already in meeting' });
+      return res.status(200).json({ success: true, skipped: true, message: 'Already in meeting' });
     }
 
-    const meetLink = booking.googleMeetUrl || booking.calendlyMeetLink || 'N/A';
-    const meetCode = booking.googleMeetCode || 'N/A';
+    const webhookUrl =
+      process.env.BDA_ATTENDANCE_WARN_WEBHOOK_URL ||
+      process.env.DISCORD_BDA_ATTENDANCE_WEBHOOK_URL ||
+      process.env.DISCORD_MEET_WEB_HOOK_URL;
 
-    const message =
-      `⚠️ **BDA Not in Meeting**\n` +
-      `**BDA:** ${name} (${email})\n` +
-      `**Client:** ${booking.clientName}\n` +
-      `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
-      `**Meet Code:** ${meetCode}\n` +
-      `**Meet Link:** ${meetLink}\n` +
-      `_Meeting started 1 min ago — please join!_`;
+    try {
+      await BdaAttendanceWarnDedupeModel.create({
+        bookingId,
+        bdaEmail: emailNorm,
+        sentAt: new Date(),
+      });
+    } catch (err) {
+      if (err.code === 11000) {
+        return res.status(200).json({ success: true, skipped: true, reason: 'already_warned' });
+      }
+      throw err;
+    }
 
-    await sendPresentDiscord(message);
+    if (!webhookUrl) {
+      console.warn('[BdaAttendance] warn-absent: no Discord webhook configured');
+      await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
+      return res.status(200).json({ success: true, skipped: true, reason: 'no_webhook' });
+    }
+
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: WARN_DISCORD_LINE }),
+      });
+      if (!response.ok) {
+        await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
+        return res.status(502).json({ success: false, error: 'Discord delivery failed' });
+      }
+    } catch (err) {
+      await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
+      return res.status(502).json({ success: false, error: 'Discord delivery failed' });
+    }
+
+    notifyBdaSSE(emailNorm, 'attendance_update', { bookingId });
 
     return res.status(200).json({ success: true });
   } catch (error) {

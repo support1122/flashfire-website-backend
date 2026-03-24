@@ -60,7 +60,7 @@ import {
   getLeadsAnalytics
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
-import { syncDiscordBdaReminders } from "./Controllers/SyncController.js";
+import { syncDiscordBdaReminders, processDiscordMeetRemindersHttp } from "./Controllers/SyncController.js";
 import TestCallStatus from "./test/TestCallStatus.js";
 import TestPayPalEmail from "./test/TestPayPalEmail.js";
 // Webhook Controllers
@@ -411,8 +411,10 @@ export default function Routes(app) {
   // }, handleFirefliesWebhook); // Handle Fireflies webhook events (Transcription completed)
 
   // ==================== SYNC ROUTES ====================
-  app.get('/sync/discordbdareminders', syncDiscordBdaReminders); // Backfill 5-min Discord BDA reminders for all upcoming meetings
+  app.get('/sync/discordbdareminders', syncDiscordBdaReminders); // Backfill Discord BDA reminders for all upcoming meetings
   app.post('/sync/discordbdareminders', syncDiscordBdaReminders);
+  app.get('/sync/process-discord-meet-reminders', processDiscordMeetRemindersHttp); // Cron tick (optional DISCORD_MEET_REMINDER_PROCESS_SECRET)
+  app.post('/sync/process-discord-meet-reminders', processDiscordMeetRemindersHttp);
 
   // ==================== TEST ROUTES ====================
   app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number
