@@ -78,6 +78,24 @@ const BdaAttendanceSchema = new mongoose.Schema(
       default: false,
     },
 
+    /** Last Discord warn "BDA Not in Meeting" for this row (if any) */
+    warnDiscordSentAt: {
+      type: Date,
+      default: null,
+    },
+
+    /** Sum of completed in-meet segments (ms) */
+    cumulativeDurationMs: {
+      type: Number,
+      default: 0,
+    },
+
+    /** Total duration after last completed segment */
+    durationMs: {
+      type: Number,
+      default: null,
+    },
+
     notes: {
       type: String,
       default: null,
