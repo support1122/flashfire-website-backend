@@ -800,6 +800,79 @@ export async function sseConnection(req, res) {
   }
 }
 
+// ==================== POST /api/bda-attendance/beacon-leave ====================
+// Fire-and-forget endpoint for navigator.sendBeacon (no auth header — token in body)
+
+export async function beaconLeave(req, res) {
+  try {
+    const { bookingId, leftAt, token: bodyToken, source } = req.body;
+
+    if (!bookingId || !bodyToken) {
+      return res.status(200).json({ success: false, error: 'Missing required fields' });
+    }
+
+    // Manually verify JWT (sendBeacon can't set Authorization header)
+    let payload;
+    try {
+      payload = jwt.verify(bodyToken, getCrmJwtSecret());
+    } catch {
+      return res.status(200).json({ success: false, error: 'Invalid token' });
+    }
+
+    if (payload?.role !== 'bda_extension') {
+      return res.status(200).json({ success: false, error: 'Forbidden' });
+    }
+
+    const emailNorm = normalizeEmail(payload.email);
+    const name = payload.name || emailNorm;
+
+    // Find attendance record with an open session
+    const attendance = await BdaAttendanceModel.findOne({
+      bookingId,
+      bdaEmail: emailNorm,
+    });
+
+    if (!attendance || !attendance.joinedAt) {
+      // No open session — already left or never joined (idempotent)
+      return res.status(200).json({ success: true, message: 'No open session' });
+    }
+
+    const leaveTime = leftAt ? new Date(leftAt) : new Date();
+    const segmentMs = Math.max(0, leaveTime.getTime() - new Date(attendance.joinedAt).getTime());
+    attendance.cumulativeDurationMs = (attendance.cumulativeDurationMs || 0) + segmentMs;
+    attendance.durationMs = attendance.cumulativeDurationMs;
+    attendance.leftAt = leaveTime;
+    attendance.joinedAt = null; // close session
+    await attendance.save();
+
+    // Discord notification
+    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
+    const durationMin = Math.round(attendance.cumulativeDurationMs / 60000);
+    const message =
+      `🚪 **BDA Left Meeting**\n` +
+      `**BDA:** ${name} (${emailNorm})\n` +
+      `**Client:** ${booking?.clientName || 'Unknown'}\n` +
+      `**Duration (total):** ${durationMin} min\n` +
+      `**Left At:** ${formatIST(leaveTime)}`;
+
+    await sendPresentDiscord(message);
+
+    notifyBdaSSE(emailNorm, 'attendance_update', {
+      bookingId,
+      status: attendance.status,
+      leftAt: leaveTime,
+      durationMin,
+      durationMs: attendance.durationMs,
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('[BdaAttendance] beaconLeave error:', error);
+    // Always return 200 for beacons (they ignore responses anyway)
+    return res.status(200).json({ success: true });
+  }
+}
+
 // ==================== GET /api/bda-attendance/by-booking/:bookingId ====================
 
 export async function getAttendanceByBooking(req, res) {

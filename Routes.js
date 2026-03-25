@@ -60,7 +60,11 @@ import {
   getLeadsAnalytics
 } from "./Controllers/CampaignBookingController.js";
 import ScheduleFollowUp from "./Controllers/ScheduleFollowUpController.js";
-import { syncDiscordBdaReminders, processDiscordMeetRemindersHttp } from "./Controllers/SyncController.js";
+import {
+  syncDiscordBdaReminders,
+  processDiscordMeetRemindersHttp,
+  processCriticalRemindersHttp,
+} from "./Controllers/SyncController.js";
 import TestCallStatus from "./test/TestCallStatus.js";
 import TestPayPalEmail from "./test/TestPayPalEmail.js";
 // Webhook Controllers
@@ -78,6 +82,7 @@ import {
   manualMark,
   markAbsent,
   warnAbsent,
+  beaconLeave,
   sseConnection,
   getAttendanceByBooking,
   getAttendanceBulk
@@ -286,6 +291,7 @@ export default function Routes(app) {
   app.post('/api/bda-attendance/manual-mark', requireBdaExtension, manualMark);
   app.post('/api/bda-attendance/mark-absent', requireBdaExtension, markAbsent);
   app.post('/api/bda-attendance/warn-absent', requireBdaExtension, warnAbsent);
+  app.post('/api/bda-attendance/beacon-leave', beaconLeave); // No middleware — token verified in body
   app.get('/api/bda-attendance/sse', sseConnection);
   app.get('/api/bda-attendance/by-booking/:bookingId', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceByBooking);
   app.get('/api/bda-attendance/bulk', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceBulk);
@@ -415,6 +421,8 @@ export default function Routes(app) {
   app.post('/sync/discordbdareminders', syncDiscordBdaReminders);
   app.get('/sync/process-discord-meet-reminders', processDiscordMeetRemindersHttp); // Cron tick (optional DISCORD_MEET_REMINDER_PROCESS_SECRET)
   app.post('/sync/process-discord-meet-reminders', processDiscordMeetRemindersHttp);
+  app.get('/sync/process-critical-reminders', processCriticalRemindersHttp); // Calls + WA + Discord (cron secret)
+  app.post('/sync/process-critical-reminders', processCriticalRemindersHttp);
 
   // ==================== TEST ROUTES ====================
   app.post('/test/callstatus', TestCallStatus); // Test call status with Indian number

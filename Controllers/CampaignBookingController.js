@@ -4,9 +4,16 @@ import { UserModel } from '../Schema_Models/User.js';
 import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
 import { triggerWorkflow, cancelScheduledWorkflows, cancelScheduledWorkflowLogsForBooking } from './WorkflowController.js';
-import { cancelWhatsAppRemindersForClient } from '../Utils/WhatsAppReminderScheduler.js';
-import { cancelDiscordMeetRemindersForMeeting } from '../Utils/DiscordMeetReminderScheduler.js';
-import { cancelCall } from '../Utils/CallScheduler.js';
+import {
+  cancelWhatsAppRemindersForClient,
+  cancelWhatsAppReminder,
+} from '../Utils/WhatsAppReminderScheduler.js';
+import {
+  cancelDiscordMeetRemindersForMeeting,
+  scheduleDiscordMeetReminder,
+} from '../Utils/DiscordMeetReminderScheduler.js';
+import { cancelCall, scheduleCall } from '../Utils/CallScheduler.js';
+import { normalizePhoneForReminders } from '../Utils/MeetingReminderUtils.js';
 import { Logger } from '../Utils/Logger.js';
 import { sendScheduleEvent } from '../Services/FacebookConversionAPI.js';
 import { sendScheduleEvent as sendGoogleAdsScheduleEvent } from '../Services/GoogleAdsConversionAPI.js';
@@ -1264,6 +1271,38 @@ export const rescheduleBooking = async (req, res) => {
       });
     }
 
+    const oldStartISO = booking.scheduledEventStartTime || null;
+    const normalizedPhone =
+      normalizePhoneForReminders(booking.clientPhone) || null;
+
+    if (oldStartISO && normalizedPhone) {
+      try {
+        await cancelCall({
+          phoneNumber: normalizedPhone,
+          meetingStartISO: oldStartISO,
+        });
+      } catch (e) {
+        console.warn('[rescheduleBooking] cancelCall:', e.message);
+      }
+      try {
+        await cancelWhatsAppReminder({
+          phoneNumber: normalizedPhone,
+          meetingStartISO: oldStartISO,
+        });
+      } catch (e) {
+        console.warn('[rescheduleBooking] cancelWhatsAppReminder:', e.message);
+      }
+      try {
+        await cancelDiscordMeetRemindersForMeeting({
+          meetingStartISO: oldStartISO,
+          clientEmail: booking.clientEmail,
+          clientName: booking.clientName,
+        });
+      } catch (e) {
+        console.warn('[rescheduleBooking] cancelDiscordMeetRemindersForMeeting:', e.message);
+      }
+    }
+
     // Remove existing reminder call job if present
     if (booking.reminderCallJobId) {
       try {
@@ -1284,56 +1323,57 @@ export const rescheduleBooking = async (req, res) => {
     booking.rescheduledCount = (booking.rescheduledCount || 0) + 1;
     booking.scheduledEventStartTime = parsedTime;
 
-    // Attempt to schedule new reminder call 10 minutes before meeting
-    const phone = booking.clientPhone?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
+    const phone = normalizedPhone;
     const delayMs = parsedTime.getTime() - Date.now() - 10 * 60 * 1000;
     if (phone && delayMs > 0) {
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
       if (phoneRegex.test(phone) && !phone.startsWith('+91')) {
         try {
-          // Validate required data before adding job
-          if (!phone || !booking.clientEmail || !parsedTime) {
-            console.error('Missing required data for call job in CampaignBookingController', {
-              phone,
-              email: booking.clientEmail,
-              meetingTime: parsedTime
-            });
-            return;
-          }
-
           const meetingStartUTC = DateTime.fromJSDate(parsedTime, { zone: 'utc' });
           const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
-          
-          if (!meetingTimeIndia) {
-            console.error('Failed to format meeting time', { parsedTime });
-            return;
+
+          const scheduleResult = await scheduleCall({
+            phoneNumber: phone,
+            meetingStartISO: parsedTime.toISOString(),
+            meetingTime: meetingTimeIndia,
+            inviteeName: booking.clientName,
+            inviteeEmail: booking.clientEmail,
+            source: 'manual',
+            meetingLink: booking.calendlyMeetLink || null,
+            rescheduleLink: booking.calendlyRescheduleLink || null,
+            metadata: {
+              bookingId: booking.bookingId,
+              inviteeTimezone: booking.inviteeTimezone || null,
+            },
+          });
+
+          if (scheduleResult.success && scheduleResult.callId) {
+            booking.reminderCallJobId = scheduleResult.callId;
+            console.log('✅ Mongo call + WA reminders scheduled from rescheduleBooking', {
+              callId: scheduleResult.callId,
+              phone,
+            });
           }
 
-          const job = await callQueue.add(
-            'callUser',
-            {
-              phone,
-              phoneNumber: phone, // Include both for compatibility with all workers
-              meetingTime: meetingTimeIndia,
-              role: 'client',
-              inviteeEmail: booking.clientEmail,
-              eventStartISO: parsedTime.toISOString(),
-            },
-            {
-              jobId: phone,
-              delay: delayMs,
-              removeOnComplete: true,
-              removeOnFail: 100,
-            }
-          );
-          booking.reminderCallJobId = job.id.toString();
-          console.log('✅ Call job scheduled from CampaignBookingController', {
-            jobId: job.id,
-            phone,
-            meetingTime: meetingTimeIndia
-          });
+          try {
+            await scheduleDiscordMeetReminder({
+              bookingId: booking.bookingId,
+              clientName: booking.clientName || 'Valued Client',
+              clientEmail: booking.clientEmail || null,
+              meetingStartISO: parsedTime.toISOString(),
+              meetingLink:
+                booking.calendlyMeetLink && booking.calendlyMeetLink !== 'Not Provided'
+                  ? booking.calendlyMeetLink
+                  : null,
+              inviteeTimezone: booking.inviteeTimezone || null,
+              source: 'manual',
+              metadata: { bookingId: booking.bookingId },
+            });
+          } catch (discordErr) {
+            console.warn('[rescheduleBooking] scheduleDiscordMeetReminder:', discordErr.message);
+          }
         } catch (error) {
-          console.error('Error scheduling new reminder job:', error);
+          console.error('Error scheduling Mongo reminder chain from rescheduleBooking:', error);
         }
       }
     }

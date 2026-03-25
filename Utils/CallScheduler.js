@@ -7,15 +7,26 @@ import { Logger } from './Logger.js';
 import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
 import { DateTime } from 'luxon';
 import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
+import {
+  parseMeetingStartToDate,
+  normalizePhoneForReminders,
+  buildCallId,
+  logReminderDrift,
+} from './MeetingReminderUtils.js';
 
 dotenv.config();
-
-
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const TWILIO_FROM = process.env.TWILIO_FROM;
-const POLL_INTERVAL_MS = 30000; // Check every 30 seconds
+const POLL_INTERVAL_MS = Math.max(
+  5000,
+  Number(process.env.CALL_SCHEDULER_POLL_MS) || 10000
+);
+const STUCK_CALL_PROCESSING_MS = Math.max(
+  120000,
+  Number(process.env.CALL_SCHEDULER_STUCK_PROCESSING_MS) || 8 * 60 * 1000
+);
 const DISCORD_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
 
 let twilioClient = null;
@@ -32,6 +43,7 @@ if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
 
 /**
  * Schedule a call 10 minutes before a meeting
+ * @param {boolean} [skipWhatsAppReminders=false] - If true, only schedule the call (e.g. when WA is scheduled separately; reschedule uses false so WA runs once via this path).
  */
 export async function scheduleCall({
   phoneNumber,
@@ -42,17 +54,23 @@ export async function scheduleCall({
   source = 'calendly',
   metadata = {},
   meetingLink = null,
-  rescheduleLink = null
+  rescheduleLink = null,
+  skipWhatsAppReminders = false,
 }) {
   try {
-    // Validate phone number
-    if (!phoneNumber || !/^\+?[1-9]\d{9,14}$/.test(phoneNumber)) {
+    const normalizedPhone = normalizePhoneForReminders(phoneNumber);
+    if (!normalizedPhone || !/^\+?[1-9]\d{9,14}$/.test(normalizedPhone)) {
       console.error('❌ [CallScheduler] Invalid phone number:', phoneNumber);
       return { success: false, error: 'Invalid phone number' };
     }
+    phoneNumber = normalizedPhone;
 
-    // Calculate call time (10 minutes before meeting)
-    const meetingStart = new Date(meetingStartISO);
+    const meetingStart = parseMeetingStartToDate(meetingStartISO);
+    if (!meetingStart) {
+      console.error('❌ [CallScheduler] Invalid meeting start:', meetingStartISO);
+      return { success: false, error: 'Invalid meeting start time' };
+    }
+
     const callTime = new Date(meetingStart.getTime() - 10 * 60 * 1000);
     
     // Don't schedule if call time is in the past
@@ -65,8 +83,7 @@ export async function scheduleCall({
       return { success: false, error: 'Call time is in the past' };
     }
 
-    // Create unique call ID
-    const callId = `call_${phoneNumber}_${meetingStart.getTime()}`;
+    const callId = buildCallId(phoneNumber, meetingStart.getTime());
 
     // Check if call already exists
     const existingCall = await ScheduledCallModel.findOne({ callId });
@@ -109,6 +126,15 @@ export async function scheduleCall({
         `⏳ In: ${delayMinutes} minutes\n` +
         `🔖 Source: ${source}`
       );
+    }
+
+    if (skipWhatsAppReminders) {
+      return {
+        success: true,
+        callId,
+        scheduledFor: callTime,
+        delayMinutes,
+      };
     }
 
     // Also schedule WhatsApp reminder 5 minutes before meeting
@@ -299,25 +325,55 @@ export async function scheduleCall({
  */
 export async function cancelCall({ phoneNumber, meetingStartISO }) {
   try {
-    const meetingStart = new Date(meetingStartISO);
-    const callId = `call_${phoneNumber}_${meetingStart.getTime()}`;
+    const normalized = normalizePhoneForReminders(phoneNumber);
+    if (!normalized) {
+      return { success: false, error: 'Invalid phone number' };
+    }
+    const meetingStart = parseMeetingStartToDate(meetingStartISO);
+    if (!meetingStart) {
+      return { success: false, error: 'Invalid meeting start time' };
+    }
+    const callId = buildCallId(normalized, meetingStart.getTime());
 
-    const result = await ScheduledCallModel.findOneAndUpdate(
-      { callId, status: 'pending' },
-      { status: 'cancelled' },
-      { new: true }
+    const updateResult = await ScheduledCallModel.updateMany(
+      { callId, status: { $in: ['pending', 'processing'] } },
+      {
+        $set: {
+          status: 'cancelled',
+          errorMessage: 'Cancelled: meeting rescheduled or canceled',
+        },
+      }
     );
 
-    if (result) {
-      console.log('✅ [CallScheduler] Call cancelled:', callId);
-      return { success: true, callId };
-    } else {
-      console.log('ℹ️ [CallScheduler] No pending call found to cancel:', callId);
-      return { success: false, error: 'Call not found or already processed' };
+    if (updateResult.modifiedCount > 0) {
+      console.log('✅ [CallScheduler] Call cancelled:', callId, 'modified:', updateResult.modifiedCount);
+      return { success: true, callId, cancelledCount: updateResult.modifiedCount };
     }
+    console.log('ℹ️ [CallScheduler] No pending/processing call found to cancel:', callId);
+    return { success: false, error: 'Call not found or already processed' };
   } catch (error) {
     console.error('❌ [CallScheduler] Error cancelling call:', error);
     return { success: false, error: error.message };
+  }
+}
+
+async function resetStuckCallProcessing() {
+  const cutoff = new Date(Date.now() - STUCK_CALL_PROCESSING_MS);
+  const result = await ScheduledCallModel.updateMany(
+    {
+      status: 'processing',
+      processedAt: { $lt: cutoff },
+      $or: [{ twilioCallSid: null }, { twilioCallSid: '' }],
+    },
+    {
+      $set: {
+        status: 'pending',
+        errorMessage: 'reset: stuck in processing (retry)',
+      },
+    }
+  );
+  if (result.modifiedCount > 0) {
+    console.warn('[CallScheduler] Reset stuck processing calls', { modifiedCount: result.modifiedCount });
   }
 }
 
@@ -384,14 +440,17 @@ async function makeCall(scheduledCall) {
  */
 export async function processDueCalls() {
   try {
+    await resetStuckCallProcessing();
+
     const now = new Date();
 
-    // Find all pending calls that are due
     const dueCalls = await ScheduledCallModel.find({
       status: 'pending',
       scheduledFor: { $lte: now },
-      attempts: { $lt: 3 } // Max 3 attempts
-    }).limit(10); // Process max 10 at a time
+      attempts: { $lt: 3 },
+    })
+      .sort({ scheduledFor: 1, _id: 1 })
+      .limit(10);
 
     if (dueCalls.length === 0) {
       return;
@@ -399,50 +458,96 @@ export async function processDueCalls() {
 
     console.log(`📞 [CallScheduler] Processing ${dueCalls.length} due call(s)...`);
 
-    for (const call of dueCalls) {
+    for (const candidate of dueCalls) {
+      let call = null;
       try {
-        // Mark as processing
-        await ScheduledCallModel.updateOne(
-          { _id: call._id },
-          { 
-            status: 'processing',
-            processedAt: new Date(),
-            $inc: { attempts: 1 }
-          }
-        );
+        call = await ScheduledCallModel.findOneAndUpdate(
+          {
+            _id: candidate._id,
+            status: 'pending',
+            scheduledFor: { $lte: now },
+            attempts: { $lt: 3 },
+          },
+          {
+            $set: { status: 'processing', processedAt: new Date() },
+            $inc: { attempts: 1 },
+          },
+          { new: true }
+        ).lean();
 
-        // Make the call
+        if (!call) {
+          continue;
+        }
+
+        // ── Booking guard: skip if meeting was canceled or rescheduled ──
+        let booking = null;
+        if (call.metadata?.bookingId) {
+          booking = await CampaignBookingModel.findOne({ bookingId: call.metadata.bookingId }).lean();
+        }
+        if (!booking && call.inviteeEmail) {
+          booking = await CampaignBookingModel.findOne({
+            clientEmail: call.inviteeEmail.toLowerCase().trim()
+          })
+            .sort({ bookingCreatedAt: -1 })
+            .limit(1)
+            .lean();
+        }
+        if (booking) {
+          if (booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') {
+            await ScheduledCallModel.updateOne(
+              { _id: call._id },
+              { status: 'cancelled', errorMessage: `Cancelled: booking status is ${booking.bookingStatus}` }
+            );
+            console.log(`🛡️ [CallScheduler] Blocked call for ${booking.bookingStatus} booking:`, call.callId);
+            continue;
+          }
+          const bookingMeetingTime = booking.scheduledEventStartTime
+            ? new Date(booking.scheduledEventStartTime).getTime()
+            : null;
+          const callMeetingTime = new Date(call.meetingStartISO).getTime();
+          if (bookingMeetingTime !== null && Math.abs(bookingMeetingTime - callMeetingTime) > 60000) {
+            await ScheduledCallModel.updateOne(
+              { _id: call._id },
+              { status: 'cancelled', errorMessage: 'Cancelled: meeting was rescheduled' }
+            );
+            console.log(`🛡️ [CallScheduler] Blocked call for rescheduled meeting:`, call.callId);
+            continue;
+          }
+        }
+
+        logReminderDrift('call', call.callId, call.scheduledFor);
+
         const result = await makeCall(call);
 
         if (result.success) {
-          // Update with Twilio call SID - status updates will come via webhook
+          const driftMs = Date.now() - new Date(call.scheduledFor).getTime();
           await ScheduledCallModel.updateOne(
-            { _id: call._id },
-            { 
-              twilioCallSid: result.twilioCallSid
+            { _id: call._id, status: 'processing' },
+            {
+              twilioCallSid: result.twilioCallSid,
+              deliveryDriftMs: driftMs,
             }
           );
 
           console.log('✅ [CallScheduler] Call initiated, waiting for Twilio status updates:', {
             callId: call.callId,
             twilioCallSid: result.twilioCallSid,
-            phoneNumber: call.phoneNumber
+            phoneNumber: call.phoneNumber,
+            deliveryDriftMs: driftMs,
           });
         } else {
-          // Check if we should retry
           const updatedCall = await ScheduledCallModel.findById(call._id);
-          
-          if (updatedCall.attempts >= updatedCall.maxAttempts) {
-            // Max attempts reached, mark as failed
+          const maxA = updatedCall?.maxAttempts ?? 3;
+
+          if (updatedCall.attempts >= maxA) {
             await ScheduledCallModel.updateOne(
               { _id: call._id },
-              { 
+              {
                 status: 'failed',
-                errorMessage: result.error
+                errorMessage: result.error,
               }
             );
 
-            // Send failure notification
             if (DISCORD_WEBHOOK) {
               await DiscordConnect(DISCORD_WEBHOOK,
                 `❌ **Call Failed (MongoDB Scheduler)**\n` +
@@ -451,35 +556,36 @@ export async function processDueCalls() {
                 `📧 Email: ${call.inviteeEmail || 'Unknown'}\n` +
                 `📆 Meeting: ${call.meetingTime}\n` +
                 `❗ Error: ${result.error}\n` +
-                `🔄 Attempts: ${updatedCall.attempts}/${updatedCall.maxAttempts}`
+                `🔄 Attempts: ${updatedCall.attempts}/${maxA}`
               );
             }
           } else {
-            // Reset to pending for retry
             await ScheduledCallModel.updateOne(
-              { _id: call._id },
-              { 
+              { _id: call._id, status: 'processing' },
+              {
                 status: 'pending',
-                errorMessage: result.error
+                errorMessage: result.error,
               }
             );
-            console.log(`🔄 [CallScheduler] Call will retry (attempt ${updatedCall.attempts}/${updatedCall.maxAttempts}):`, call.callId);
+            console.log(`🔄 [CallScheduler] Call will retry (attempt ${updatedCall.attempts}/${maxA}):`, call.callId);
           }
         }
       } catch (error) {
-        console.error('❌ [CallScheduler] Error processing call:', call.callId, error.message);
-        
-        // Reset to pending for retry
+        console.error('❌ [CallScheduler] Error processing call:', candidate.callId, error.message);
+
+        if (!call) {
+          continue;
+        }
+
         await ScheduledCallModel.updateOne(
-          { _id: call._id },
-          { 
+          { _id: call._id, status: 'processing' },
+          {
             status: 'pending',
-            errorMessage: error.message
+            errorMessage: error.message,
           }
         );
       }
     }
-
   } catch (error) {
     console.error('❌ [CallScheduler] Error in processDueCalls:', error.message);
   }
@@ -561,9 +667,10 @@ export async function getUpcomingCalls(limit = 20) {
 export default {
   scheduleCall,
   cancelCall,
+  processDueCalls,
   startScheduler,
   stopScheduler,
   getSchedulerStats,
-  getUpcomingCalls
+  getUpcomingCalls,
 };
 

@@ -80,6 +80,11 @@ const ScheduledDiscordMeetReminderSchema = new mongoose.Schema(
       default: null,
     },
 
+    deliveryDriftMs: {
+      type: Number,
+      default: null,
+    },
+
     source: {
       type: String,
       enum: ["calendly", "manual", "reschedule", "sync", "whatsapp_reminder"],

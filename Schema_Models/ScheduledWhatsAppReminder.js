@@ -94,6 +94,12 @@ const ScheduledWhatsAppReminderSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+
+  /** ms between scheduledFor and successful WATI send (ops / drift) */
+  deliveryDriftMs: {
+    type: Number,
+    default: null
+  },
   
   // Source of the booking
   source: {
