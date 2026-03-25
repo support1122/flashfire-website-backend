@@ -3,13 +3,16 @@ import { DateTime, IANAZone } from 'luxon';
 import { DiscordConnect } from './DiscordConnect.js';
 import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { parseMeetingStartToDate, logReminderDrift } from './MeetingReminderUtils.js';
 
 dotenv.config();
+
+export { parseMeetingStartToDate };
 
 /** Poll Mongo for due reminders. Shorter = less latency after cold start / wake. */
 const POLL_INTERVAL_MS = Math.max(
   5000,
-  Number(process.env.DISCORD_MEET_REMINDER_POLL_MS) || 15000
+  Number(process.env.DISCORD_MEET_REMINDER_POLL_MS) || 10000
 );
 
 const REMINDER_OFFSET_ENV = Number(process.env.DISCORD_MEET_REMINDER_OFFSET_MINUTES);
@@ -32,32 +35,6 @@ const DISCORD_MEET_2MIN_WEBHOOK_URL =
 
 let isRunning = false;
 let pollInterval = null;
-
-/**
- * Parse Calendly / API instants reliably (correct UTC instant).
- * ISO without offset is interpreted in UTC (avoids host TZ shifting the meeting).
- */
-export function parseMeetingStartToDate(meetingStartISO) {
-  if (meetingStartISO == null) return null;
-  if (meetingStartISO instanceof Date) {
-    return Number.isNaN(meetingStartISO.getTime()) ? null : meetingStartISO;
-  }
-  const s = String(meetingStartISO).trim();
-  if (!s) return null;
-
-  const withZone = DateTime.fromISO(s, { setZone: true });
-  if (withZone.isValid) {
-    return withZone.toUTC().toJSDate();
-  }
-
-  const asUtcWall = DateTime.fromISO(s, { zone: 'utc' });
-  if (asUtcWall.isValid) {
-    return asUtcWall.toJSDate();
-  }
-
-  const fallback = new Date(s);
-  return Number.isNaN(fallback.getTime()) ? null : fallback;
-}
 
 /** Same id shape as sync/backfill (`discord_meet_5min_*`) for idempotency. */
 export function buildDiscordMeetReminderId(baseId, meetingStartMs) {
@@ -280,11 +257,12 @@ export async function processDueDiscordMeetReminders() {
             .lean();
         }
         if (booking) {
-          if (booking.bookingStatus === 'canceled') {
+          if (booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') {
             await ScheduledDiscordMeetReminderModel.updateOne(
               { _id: reminder._id },
-              { status: 'cancelled', errorMessage: 'Cancelled: meeting canceled' }
+              { status: 'cancelled', errorMessage: `Cancelled: booking status is ${booking.bookingStatus}` }
             );
+            console.log(`🛡️ [DiscordMeetReminder] Blocked reminder for ${booking.bookingStatus} booking:`, reminder.reminderId);
             continue;
           }
           const bookingMeetingTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : null;
@@ -317,14 +295,18 @@ export async function processDueDiscordMeetReminders() {
 
         const content = messageLines.join('\n');
 
+        logReminderDrift('discord_bda', reminder.reminderId, reminder.scheduledFor);
+
         await DiscordConnect(DISCORD_MEET_2MIN_WEBHOOK_URL, content, false);
 
+        const driftMs = Date.now() - new Date(reminder.scheduledFor).getTime();
         await ScheduledDiscordMeetReminderModel.updateOne(
           { _id: reminder._id, status: 'processing' },
           {
             status: 'completed',
             completedAt: new Date(),
             errorMessage: null,
+            deliveryDriftMs: driftMs,
           }
         );
       } catch (error) {

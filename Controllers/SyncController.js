@@ -6,6 +6,32 @@ import {
   getDiscordMeetReminderOffsetMinutes,
   buildDiscordMeetReminderId,
 } from '../Utils/DiscordMeetReminderScheduler.js';
+import { processDueCalls } from '../Utils/CallScheduler.js';
+import { processDueWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler.js';
+
+function getCriticalRemindersCronSecret() {
+  return (
+    process.env.CRITICAL_REMINDERS_PROCESS_SECRET ||
+    process.env.DISCORD_MEET_REMINDER_PROCESS_SECRET ||
+    ''
+  );
+}
+
+function assertCriticalCronSecret(req, res) {
+  const secret = getCriticalRemindersCronSecret();
+  if (!secret) {
+    return true;
+  }
+  const provided =
+    req.query?.secret ||
+    req.headers['x-cron-secret'] ||
+    req.body?.secret;
+  if (provided !== secret) {
+    res.status(401).json({ success: false, error: 'Unauthorized' });
+    return false;
+  }
+  return true;
+}
 
 /**
  * Sync Discord BDA reminders: find all upcoming meetings that don't have a
@@ -89,15 +115,8 @@ export const syncDiscordBdaReminders = async (req, res) => {
  */
 export const processDiscordMeetRemindersHttp = async (req, res) => {
   try {
-    const secret = process.env.DISCORD_MEET_REMINDER_PROCESS_SECRET;
-    if (secret) {
-      const provided =
-        req.query?.secret ||
-        req.headers['x-cron-secret'] ||
-        req.body?.secret;
-      if (provided !== secret) {
-        return res.status(401).json({ success: false, error: 'Unauthorized' });
-      }
+    if (!assertCriticalCronSecret(req, res)) {
+      return;
     }
 
     await processDueDiscordMeetReminders();
@@ -110,6 +129,43 @@ export const processDiscordMeetRemindersHttp = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to process Discord meet reminders',
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Run due processors for Twilio calls, client WhatsApp reminders, and BDA Discord reminders.
+ * Same auth as Discord cron: CRITICAL_REMINDERS_PROCESS_SECRET or DISCORD_MEET_REMINDER_PROCESS_SECRET.
+ *
+ * GET or POST /sync/process-critical-reminders
+ */
+export const processCriticalRemindersHttp = async (req, res) => {
+  try {
+    if (!assertCriticalCronSecret(req, res)) {
+      return;
+    }
+
+    const results = await Promise.allSettled([
+      processDueCalls(),
+      processDueWhatsAppReminders(),
+      processDueDiscordMeetReminders(),
+    ]);
+
+    const failures = results
+      .filter(r => r.status === 'rejected')
+      .map(r => r.reason?.message || String(r.reason));
+
+    return res.status(200).json({
+      success: true,
+      message: 'Processed due call, WhatsApp, and Discord meet reminders (parallel)',
+      failures: failures.length > 0 ? failures : undefined,
+    });
+  } catch (error) {
+    console.error('[SyncController] processCriticalRemindersHttp error:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to process critical reminders',
       error: error.message,
     });
   }

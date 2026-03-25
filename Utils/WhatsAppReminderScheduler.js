@@ -1,14 +1,28 @@
 import dotenv from 'dotenv';
 import { ScheduledWhatsAppReminderModel } from '../Schema_Models/ScheduledWhatsAppReminder.js';
+import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
 import watiService from './WatiService.js';
 import { DateTime } from 'luxon';
 import { scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
+import {
+  parseMeetingStartToDate,
+  normalizePhoneForReminders,
+  buildWhatsAppReminderId,
+  logReminderDrift,
+} from './MeetingReminderUtils.js';
 
 dotenv.config();
 
-const POLL_INTERVAL_MS = 30000; // Check every 30 seconds
+const POLL_INTERVAL_MS = Math.max(
+  5000,
+  Number(process.env.WHATSAPP_REMINDER_POLL_MS) || 10000
+);
+const STUCK_WA_PROCESSING_MS = Math.max(
+  120000,
+  Number(process.env.WHATSAPP_REMINDER_STUCK_PROCESSING_MS) || 8 * 60 * 1000
+);
 const DISCORD_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
 const DEFAULT_RESCHEDULE_LINK = 'https://www.google.com/url?q=https%3A%2F%2Fcalendly.com%2Freschedulings%2F8e172654-1dfa-49ae-944e-e260067a0f1f&sa=D&source=calendar&usd=2&usg=AOvVaw0_ea9AmvIBNwPqLl0HSU0g'; // Default reschedule link
 
@@ -80,14 +94,17 @@ export async function scheduleWhatsAppReminder({
   reminderType = '5min' // Default reminder type label
 }) {
   try {
-    // Validate phone number
-    if (!phoneNumber || !/^\+?[1-9]\d{9,14}$/.test(phoneNumber)) {
+    const normalizedPhone = normalizePhoneForReminders(phoneNumber);
+    if (!normalizedPhone || !/^\+?[1-9]\d{9,14}$/.test(normalizedPhone)) {
       console.error('❌ [WhatsAppReminderScheduler] Invalid phone number:', phoneNumber);
       return { success: false, error: 'Invalid phone number' };
     }
+    phoneNumber = normalizedPhone;
 
-    // Calculate reminder time (offset minutes before meeting)
-    const meetingStart = new Date(meetingStartISO);
+    const meetingStart = parseMeetingStartToDate(meetingStartISO);
+    if (!meetingStart) {
+      return { success: false, error: 'Invalid meeting start time' };
+    }
     const reminderTime = new Date(meetingStart.getTime() - reminderOffsetMinutes * 60 * 1000);
     
     // Don't schedule if reminder time is in the past
@@ -101,8 +118,7 @@ export async function scheduleWhatsAppReminder({
       return { success: false, error: 'Reminder time is in the past', skipped: true };
     }
 
-    // Create unique reminder ID with reminder type
-    const reminderId = `whatsapp_reminder_${reminderType}_${phoneNumber}_${meetingStart.getTime()}`;
+    const reminderId = buildWhatsAppReminderId(reminderType, phoneNumber, meetingStart.getTime());
 
     // Check if reminder already exists
     const existingReminder = await ScheduledWhatsAppReminderModel.findOne({ reminderId });
@@ -208,13 +224,24 @@ export async function scheduleAllWhatsAppReminders({
     '5min': { success: false, skipped: false }
   };
 
-  const meetingStart = new Date(meetingStartISO);
+  const meetingStart = parseMeetingStartToDate(meetingStartISO);
+  if (!meetingStart) {
+    const e = { success: false, skipped: false, error: 'Invalid meeting start' };
+    return { immediate: e, '3h': e, '5min': e };
+  }
+  const normalizedPhone = normalizePhoneForReminders(phoneNumber);
+  if (!normalizedPhone || !/^\+?[1-9]\d{9,14}$/.test(normalizedPhone)) {
+    const e = { success: false, skipped: false, error: 'Invalid phone' };
+    return { immediate: e, '3h': e, '5min': e };
+  }
+  phoneNumber = normalizedPhone;
+
   const now = new Date();
   const hoursUntilMeeting = (meetingStart.getTime() - now.getTime()) / (1000 * 60 * 60);
   const minutesUntilMeeting = (meetingStart.getTime() - now.getTime()) / (1000 * 60);
 
   const immediateReminderTime = new Date(now.getTime() + 1 * 60 * 1000);
-  const immediateReminderId = `whatsapp_reminder_immediate_${phoneNumber}_${meetingStart.getTime()}`;
+  const immediateReminderId = buildWhatsAppReminderId('immediate', phoneNumber, meetingStart.getTime());
   
   try {
     const existingImmediate = await ScheduledWhatsAppReminderModel.findOne({ reminderId: immediateReminderId });
@@ -385,43 +412,58 @@ export async function scheduleAllWhatsAppReminders({
  */
 export async function cancelWhatsAppReminder({ phoneNumber, meetingStartISO }) {
   try {
-    const meetingStart = new Date(meetingStartISO);
-    
+    const normalized = normalizePhoneForReminders(phoneNumber);
+    if (!normalized) {
+      return { success: false, error: 'Invalid phone number' };
+    }
+    const meetingStart = parseMeetingStartToDate(meetingStartISO);
+    if (!meetingStart) {
+      return { success: false, error: 'Invalid meeting start time' };
+    }
+
     const reminderTypes = ['immediate', '3h', '5min'];
     const cancelledReminders = [];
-    
+
     for (const reminderType of reminderTypes) {
-      const reminderId = `whatsapp_reminder_${reminderType}_${phoneNumber}_${meetingStart.getTime()}`;
-      
-      const result = await ScheduledWhatsAppReminderModel.findOneAndUpdate(
-        { reminderId, status: 'pending' },
-        { status: 'cancelled' },
-        { new: true }
+      const reminderId = buildWhatsAppReminderId(reminderType, normalized, meetingStart.getTime());
+
+      const upd = await ScheduledWhatsAppReminderModel.updateMany(
+        { reminderId, status: { $in: ['pending', 'processing'] } },
+        {
+          $set: {
+            status: 'cancelled',
+            errorMessage: 'Cancelled: meeting rescheduled or canceled',
+          },
+        }
       );
 
-      if (result) {
-        cancelledReminders.push({ reminderType, reminderId });
+      if (upd.modifiedCount > 0) {
+        cancelledReminders.push({ reminderType, reminderId, count: upd.modifiedCount });
         console.log(`✅ [WhatsAppReminderScheduler] ${reminderType} reminder cancelled:`, reminderId);
       }
     }
 
+    const totalCancelled = cancelledReminders.reduce((n, r) => n + (r.count || 1), 0);
+
     if (cancelledReminders.length > 0) {
-      // Send Discord notification
       if (DISCORD_WEBHOOK) {
         await DiscordConnect(DISCORD_WEBHOOK,
           `🚫 **WhatsApp Reminders Cancelled**\n` +
-          `📞 Phone: ${phoneNumber}\n` +
+          `📞 Phone: ${normalized}\n` +
           `📅 Meeting: ${meetingStart.toISOString()}\n` +
-          `❌ Cancelled: ${cancelledReminders.length} reminder(s)\n` +
+          `❌ Cancelled: ${totalCancelled} row(s) / ${cancelledReminders.length} type(s)\n` +
           `📝 Types: ${cancelledReminders.map(r => r.reminderType).join(', ')}`
         );
       }
-      
-      return { success: true, cancelledCount: cancelledReminders.length, cancelledReminders };
-    } else {
-      console.log('ℹ️ [WhatsAppReminderScheduler] No pending reminders found to cancel');
-      return { success: false, error: 'No reminders found or already processed' };
+
+      return {
+        success: true,
+        cancelledCount: totalCancelled,
+        cancelledReminders,
+      };
     }
+    console.log('ℹ️ [WhatsAppReminderScheduler] No pending reminders found to cancel');
+    return { success: false, error: 'No reminders found or already processed' };
   } catch (error) {
     console.error('❌ [WhatsAppReminderScheduler] Error cancelling reminder:', error);
     return { success: false, error: error.message };
@@ -555,19 +597,43 @@ async function sendWhatsAppMessage(scheduledReminder) {
   }
 }
 
+async function resetStuckWhatsAppProcessing() {
+  const cutoff = new Date(Date.now() - STUCK_WA_PROCESSING_MS);
+  const result = await ScheduledWhatsAppReminderModel.updateMany(
+    {
+      status: 'processing',
+      processedAt: { $lt: cutoff },
+    },
+    {
+      $set: {
+        status: 'pending',
+        errorMessage: 'reset: stuck in processing (retry)',
+      },
+    }
+  );
+  if (result.modifiedCount > 0) {
+    console.warn('[WhatsAppReminderScheduler] Reset stuck processing reminders', {
+      modifiedCount: result.modifiedCount,
+    });
+  }
+}
+
 /**
  * Process due WhatsApp reminders - called by the polling mechanism
  */
 export async function processDueWhatsAppReminders() {
   try {
+    await resetStuckWhatsAppProcessing();
+
     const now = new Date();
 
-    // Find all pending reminders that are due
     const dueReminders = await ScheduledWhatsAppReminderModel.find({
       status: 'pending',
       scheduledFor: { $lte: now },
-      attempts: { $lt: 3 } // Max 3 attempts
-    }).limit(10); // Process max 10 at a time
+      attempts: { $lt: 3 },
+    })
+      .sort({ scheduledFor: 1, _id: 1 })
+      .limit(10);
 
     if (dueReminders.length === 0) {
       return;
@@ -575,33 +641,79 @@ export async function processDueWhatsAppReminders() {
 
     console.log(`📱 [WhatsAppReminderScheduler] Processing ${dueReminders.length} due reminder(s)...`);
 
-    for (const reminder of dueReminders) {
+    for (const candidate of dueReminders) {
+      let reminder = null;
       try {
-        // Mark as processing
-        await ScheduledWhatsAppReminderModel.updateOne(
-          { _id: reminder._id },
-          { 
-            status: 'processing',
-            processedAt: new Date(),
-            $inc: { attempts: 1 }
-          }
-        );
+        reminder = await ScheduledWhatsAppReminderModel.findOneAndUpdate(
+          {
+            _id: candidate._id,
+            status: 'pending',
+            scheduledFor: { $lte: now },
+            attempts: { $lt: 3 },
+          },
+          {
+            $set: { status: 'processing', processedAt: new Date() },
+            $inc: { attempts: 1 },
+          },
+          { new: true }
+        ).lean();
 
-        // Send the WhatsApp message
+        if (!reminder) {
+          continue;
+        }
+
+        // ── Booking guard: skip if meeting was canceled or rescheduled ──
+        let booking = null;
+        if (reminder.metadata?.bookingId) {
+          booking = await CampaignBookingModel.findOne({ bookingId: reminder.metadata.bookingId }).lean();
+        }
+        if (!booking && reminder.clientEmail) {
+          booking = await CampaignBookingModel.findOne({
+            clientEmail: reminder.clientEmail.toLowerCase().trim()
+          })
+            .sort({ bookingCreatedAt: -1 })
+            .limit(1)
+            .lean();
+        }
+        if (booking) {
+          if (booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') {
+            await ScheduledWhatsAppReminderModel.updateOne(
+              { _id: reminder._id },
+              { status: 'cancelled', errorMessage: `Cancelled: booking status is ${booking.bookingStatus}` }
+            );
+            console.log(`🛡️ [WhatsAppReminderScheduler] Blocked reminder for ${booking.bookingStatus} booking:`, reminder.reminderId);
+            continue;
+          }
+          const bookingMeetingTime = booking.scheduledEventStartTime
+            ? new Date(booking.scheduledEventStartTime).getTime()
+            : null;
+          const reminderMeetingTime = new Date(reminder.meetingStartISO).getTime();
+          if (bookingMeetingTime !== null && Math.abs(bookingMeetingTime - reminderMeetingTime) > 60000) {
+            await ScheduledWhatsAppReminderModel.updateOne(
+              { _id: reminder._id },
+              { status: 'cancelled', errorMessage: 'Cancelled: meeting was rescheduled' }
+            );
+            console.log(`🛡️ [WhatsAppReminderScheduler] Blocked reminder for rescheduled meeting:`, reminder.reminderId);
+            continue;
+          }
+        }
+
+        logReminderDrift('whatsapp', reminder.reminderId, reminder.scheduledFor);
+
         const result = await sendWhatsAppMessage(reminder);
 
         if (result.success) {
-          // Mark as completed
+          const driftMs = Date.now() - new Date(reminder.scheduledFor).getTime();
           await ScheduledWhatsAppReminderModel.updateOne(
-            { _id: reminder._id },
-            { 
+            { _id: reminder._id, status: 'processing' },
+            {
               status: 'completed',
               completedAt: new Date(),
-              watiResponse: result.watiResponse
+              watiResponse: result.watiResponse,
+              deliveryDriftMs: driftMs,
             }
           );
 
-          // Send success notification to Discord
           if (DISCORD_WEBHOOK) {
             const reminderType = reminder.metadata?.reminderType || '5min';
             await DiscordConnect(DISCORD_WEBHOOK,
@@ -610,24 +722,22 @@ export async function processDueWhatsAppReminders() {
               `📧 ${reminder.clientEmail || 'Unknown'}\n` +
               `🗓️ ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
               `🔗 join: ${reminder.meetingLink || 'n/a'} | resched: ${reminder.rescheduleLink || 'n/a'}\n` +
-              `⏰ ${new Date().toISOString()}`
+              `⏰ ${new Date().toISOString()} driftMs=${driftMs}`
             );
           }
         } else {
-          // Check if we should retry
           const updatedReminder = await ScheduledWhatsAppReminderModel.findById(reminder._id);
-          
-          if (updatedReminder.attempts >= updatedReminder.maxAttempts) {
-            // Max attempts reached, mark as failed
+          const maxA = updatedReminder?.maxAttempts ?? 3;
+
+          if (updatedReminder.attempts >= maxA) {
             await ScheduledWhatsAppReminderModel.updateOne(
               { _id: reminder._id },
-              { 
+              {
                 status: 'failed',
-                errorMessage: result.error
+                errorMessage: result.error,
               }
             );
 
-            // Send failure notification
             if (DISCORD_WEBHOOK) {
               const reminderType = reminder.metadata?.reminderType || '5min';
               await DiscordConnect(DISCORD_WEBHOOK,
@@ -636,35 +746,36 @@ export async function processDueWhatsAppReminders() {
                 `📧 ${reminder.clientEmail || 'Unknown'}\n` +
                 `🗓️ ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
                 `⚠️ ${result.error}\n` +
-                `🔄 ${updatedReminder.attempts}/${updatedReminder.maxAttempts}`
+                `🔄 ${updatedReminder.attempts}/${maxA}`
               );
             }
           } else {
-            // Reset to pending for retry
             await ScheduledWhatsAppReminderModel.updateOne(
-              { _id: reminder._id },
-              { 
+              { _id: reminder._id, status: 'processing' },
+              {
                 status: 'pending',
-                errorMessage: result.error
+                errorMessage: result.error,
               }
             );
-            console.log(`🔄 [WhatsAppReminderScheduler] Reminder will retry (attempt ${updatedReminder.attempts}/${updatedReminder.maxAttempts}):`, reminder.reminderId);
+            console.log(`🔄 [WhatsAppReminderScheduler] Reminder will retry (attempt ${updatedReminder.attempts}/${maxA}):`, reminder.reminderId);
           }
         }
       } catch (error) {
-        console.error('❌ [WhatsAppReminderScheduler] Error processing reminder:', reminder.reminderId, error.message);
-        
-        // Reset to pending for retry
+        console.error('❌ [WhatsAppReminderScheduler] Error processing reminder:', candidate.reminderId, error.message);
+
+        if (!reminder) {
+          continue;
+        }
+
         await ScheduledWhatsAppReminderModel.updateOne(
-          { _id: reminder._id },
-          { 
+          { _id: reminder._id, status: 'processing' },
+          {
             status: 'pending',
-            errorMessage: error.message
+            errorMessage: error.message,
           }
         );
       }
     }
-
   } catch (error) {
     console.error('❌ [WhatsAppReminderScheduler] Error in processDueWhatsAppReminders:', error.message);
   }
@@ -743,9 +854,10 @@ export default {
   scheduleAllWhatsAppReminders,
   cancelWhatsAppReminder,
   cancelWhatsAppRemindersForClient,
+  processDueWhatsAppReminders,
   startWhatsAppReminderScheduler,
   stopWhatsAppReminderScheduler,
   getWhatsAppReminderSchedulerStats,
-  getUpcomingWhatsAppReminders
+  getUpcomingWhatsAppReminders,
 };
 

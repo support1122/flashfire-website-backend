@@ -5,7 +5,13 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
 import { DiscordConnect, DiscordConnectForMeet } from '../Utils/DiscordConnect.js';
 import { cancelCall, scheduleCall } from '../Utils/CallScheduler.js';
-import { cancelWhatsAppReminder, scheduleAllWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler.js';
+import { cancelWhatsAppReminder } from '../Utils/WhatsAppReminderScheduler.js';
+import {
+  extractCalendlyPhoneFromPayload,
+  extractCalendlyPhoneFromInvitee,
+  normalizePhoneForReminders,
+  parseMeetingStartToDate,
+} from '../Utils/MeetingReminderUtils.js';
 import { cancelDiscordMeetRemindersForMeeting, scheduleDiscordMeetReminder } from '../Utils/DiscordMeetReminderScheduler.js';
 import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
@@ -117,17 +123,11 @@ async function handleCreatedEvent(req, res, payload) {
 
   const inviteeName = payload?.invitee?.name || payload?.name;
   const inviteeEmail = payload?.invitee?.email || payload?.email;
-  let inviteePhone = payload?.questions_and_answers?.find(q =>
-    q.question.trim().toLowerCase() === 'phone number'
-  )?.answer || null;
+  let inviteePhone = extractCalendlyPhoneFromPayload(payload);
 
-  if (inviteePhone) {
-    inviteePhone = inviteePhone.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '');
-  }
+  const meetingStart = parseMeetingStartToDate(payload?.scheduled_event?.start_time);
 
-  const meetingStart = new Date(payload?.scheduled_event?.start_time);
-
-  if (isNaN(meetingStart.getTime())) {
+  if (!meetingStart || isNaN(meetingStart.getTime())) {
     Logger.error('Invalid meeting start time received from Calendly', {
       startTime: payload?.scheduled_event?.start_time,
       inviteeEmail
@@ -925,21 +925,10 @@ async function handleRescheduledEvent(req, res, payload) {
 
     const clientEmail = invitee.email;
     const clientName = invitee.name || 'Valued Client';
-    const clientPhone = invitee.phone_number || null;
 
     const rescheduleUrl = payload?.reschedule_url || null;
 
     const meetLink = new_invitee?.scheduled_event?.location?.join_url || 'Not Provided';
-
-    Logger.info('Processing rescheduled meeting', {
-      clientEmail,
-      clientName,
-      clientPhone,
-      oldStartTime,
-      newStartTime,
-      hasRescheduleUrl: !!rescheduleUrl,
-      rescheduleUrl
-    });
 
     // Correct Booking Lookup
     let bookingRecord = null;
@@ -963,6 +952,21 @@ async function handleRescheduledEvent(req, res, payload) {
         clientEmail
       });
     }
+
+    const clientPhone =
+      extractCalendlyPhoneFromInvitee(invitee) ||
+      normalizePhoneForReminders(bookingRecord?.clientPhone) ||
+      null;
+
+    Logger.info('Processing rescheduled meeting', {
+      clientEmail,
+      clientName,
+      clientPhone,
+      oldStartTime,
+      newStartTime,
+      hasRescheduleUrl: !!rescheduleUrl,
+      rescheduleUrl,
+    });
 
     let oldCallCancelled = false;
     let oldWhatsAppCancelled = false;
@@ -999,9 +1003,9 @@ async function handleRescheduledEvent(req, res, payload) {
         if (cancelWhatsAppResult.success) {
           oldWhatsAppCancelled = true;
           Logger.info('Cancelled old WhatsApp reminder', {
-            reminderId: cancelWhatsAppResult.reminderId,
+            cancelledCount: cancelWhatsAppResult.cancelledCount,
             clientPhone,
-            oldStartTime
+            oldStartTime,
           });
         }
       } catch (whatsappError) {
@@ -1089,25 +1093,8 @@ async function handleRescheduledEvent(req, res, payload) {
           clientPhone
         });
       } else {
-        // Calculate new meeting time in different timezones
         const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
         const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
-
-        // Format meeting date and time for WhatsApp (America/New_York timezone)
-        const newMeetingDate = newMeetingStartUTC.setZone('America/New_York').toFormat('EEEE MMM d, yyyy');
-        const newMeetingEndUTC = newEndTime ? DateTime.fromISO(newEndTime, { zone: 'utc' }) : newMeetingStartUTC.plus({ minutes: 15 });
-
-        const startTimeET = newMeetingStartUTC.setZone('America/New_York');
-        const startTimeFormatted = startTimeET.minute === 0
-          ? startTimeET.toFormat('ha').toLowerCase()
-          : startTimeET.toFormat('h:mma').toLowerCase();
-
-        const endTimeET = newMeetingEndUTC.setZone('America/New_York');
-        const endTimeFormatted = endTimeET.minute === 0
-          ? endTimeET.toFormat('ha').toLowerCase()
-          : endTimeET.toFormat('h:mma').toLowerCase();
-
-        const newMeetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
         //Use reschedule URL from webhook with proper fallback chain
         const finalRescheduleLink = rescheduleUrl ||
@@ -1134,13 +1121,13 @@ async function handleRescheduledEvent(req, res, payload) {
 
           if (scheduleCallResult.success) {
             newCallScheduled = true;
-            Logger.info('Scheduled new call reminder for rescheduled meeting', {
+            newWhatsAppScheduled = true;
+            Logger.info('Scheduled new call + WhatsApp reminders for rescheduled meeting', {
               callId: scheduleCallResult.callId,
               clientPhone,
-              newStartTime
+              newStartTime,
             });
 
-            // Update booking record with new call job ID
             if (bookingRecord && scheduleCallResult.callId) {
               bookingRecord.reminderCallJobId = scheduleCallResult.callId;
               await bookingRecord.save();
@@ -1152,33 +1139,6 @@ async function handleRescheduledEvent(req, res, payload) {
             clientPhone,
             newStartTime
           });
-        }
-
-        try {
-          const whatsappResults = await scheduleAllWhatsAppReminders({
-            phoneNumber: clientPhone,
-            meetingStartISO: newStartTime,
-            meetingTime: newMeetingTimeFormatted,
-            meetingDate: newMeetingDate,
-            clientName: clientName,
-            clientEmail: clientEmail,
-            meetingLink: meetLink !== 'Not Provided' ? meetLink : null,
-            rescheduleLink: finalRescheduleLink,
-            source: 'reschedule',
-            metadata: {
-              bookingId: bookingRecord?.bookingId,
-              rescheduledFrom: oldStartTime,
-              rescheduledTo: newStartTime,
-              meetingEndISO: newEndTime
-            }
-          });
-
-          const scheduledCount = Object.values(whatsappResults).filter(r => r.success).length;
-          if (scheduledCount > 0) {
-            newWhatsAppScheduled = true;
-          }
-        } catch (whatsappScheduleError) {
-          // ...
         }
       }
     }
@@ -1193,6 +1153,7 @@ async function handleRescheduledEvent(req, res, payload) {
           clientEmail: clientEmail || null,
           meetingStartISO: newStartTime,
           meetingLink: meetLink && meetLink !== 'Not Provided' ? meetLink : null,
+          inviteeTimezone: new_invitee?.timezone || bookingRecord?.inviteeTimezone || null,
           source: 'reschedule',
           metadata: {
             campaignId: bookingRecord?.campaignId,
@@ -1259,18 +1220,9 @@ async function handleCanceledEvent(req, res, payload) {
     const clientEmail = payload?.email || payload?.invitee?.email || null;
     const clientName = payload?.name || payload?.invitee?.name || 'Valued Client';
 
-    const clientPhone = payload?.questions_and_answers?.find(q =>
-      q.question?.trim().toLowerCase() === 'phone number'
-    )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') ||
-      payload?.invitee?.phone_number ||
-      payload?.invitee?.questions_and_answers?.find(q =>
-        q.question?.trim().toLowerCase() === 'phone number'
-      )?.answer?.replace(/\s+/g, '').replace(/(?!^\+)\D/g, '') || null;
-
     const canceledBy = payload?.cancellation?.canceled_by || payload?.canceled_by || 'unknown';
     const cancelReason = payload?.cancellation?.reason || payload?.cancel_reason || 'No reason provided';
     const meetingStartTime = payload?.scheduled_event?.start_time || payload?.event?.start_time || null;
-    // Attempt to get unique URI 
     const calendlyEventUri = payload?.scheduled_event?.uri || null;
 
     if (!clientEmail) {
@@ -1281,16 +1233,6 @@ async function handleCanceledEvent(req, res, payload) {
       });
     }
 
-    Logger.info('Processing canceled meeting', {
-      clientEmail,
-      clientName,
-      clientPhone,
-      canceledBy,
-      cancelReason,
-      meetingStartTime
-    });
-
-    // Find the booking record CORRECTLY
     let bookingRecord = null;
     try {
       const query = { clientEmail: clientEmail };
@@ -1321,9 +1263,30 @@ async function handleCanceledEvent(req, res, payload) {
       });
     }
 
-    // Get meeting start time from booking record if not in payload
-    // use payload's start time as primary source of truth for cancellation
-    const meetingStartISO = meetingStartTime || bookingRecord?.scheduledEventStartTime || bookingRecord?.bookingCreatedAt;
+    const clientPhone =
+      extractCalendlyPhoneFromPayload(payload) ||
+      normalizePhoneForReminders(bookingRecord?.clientPhone) ||
+      null;
+
+    const meetingStartISO =
+      meetingStartTime || bookingRecord?.scheduledEventStartTime || null;
+
+    if (!meetingStartISO) {
+      Logger.warn('Cancel webhook: no meeting start time for reminder cancellation', {
+        clientEmail,
+        hasBooking: !!bookingRecord,
+      });
+    }
+
+    Logger.info('Processing canceled meeting', {
+      clientEmail,
+      clientName,
+      clientPhone,
+      canceledBy,
+      cancelReason,
+      meetingStartTime,
+      meetingStartISO: meetingStartISO || null,
+    });
 
     // Cancel scheduled reminders
     let callCancelled = false;
@@ -1361,9 +1324,9 @@ async function handleCanceledEvent(req, res, payload) {
         if (cancelWhatsAppResult.success) {
           whatsappCancelled = true;
           Logger.info('Cancelled WhatsApp reminder', {
-            reminderId: cancelWhatsAppResult.reminderId,
+            cancelledCount: cancelWhatsAppResult.cancelledCount,
             clientPhone,
-            meetingStartISO
+            meetingStartISO,
           });
         }
       } catch (whatsappError) {

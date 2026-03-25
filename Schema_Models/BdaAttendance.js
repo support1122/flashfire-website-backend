@@ -100,6 +100,22 @@ const BdaAttendanceSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+
+    /** Last explicit end action (from extension / beacon) */
+    lastEndSource: {
+      type: String,
+      default: null,
+    },
+
+    lastEndedAt: {
+      type: Date,
+      default: null,
+    },
+
+    lastEndMeetLink: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,

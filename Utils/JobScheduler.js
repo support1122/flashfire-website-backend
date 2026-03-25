@@ -1,5 +1,6 @@
-
 import { ScheduledJobModel } from '../Schema_Models/ScheduledJob.js';
+import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
+import { ScheduledWhatsAppReminderModel } from '../Schema_Models/ScheduledWhatsAppReminder.js';
 import { WhatsAppCampaignModel } from '../Schema_Models/WhatsAppCampaign.js';
 import sgMail from '@sendgrid/mail';
 import watiService from './WatiService.js';
@@ -23,8 +24,14 @@ const CONFIG = {
   // Polling interval
   POLL_INTERVAL_MS: 10000, // 10 seconds
   // Batch size for processing
-  BATCH_SIZE: 10
+  BATCH_SIZE: 10,
+  /** Campaign / bulk job priority (higher number = lower urgency vs transactional jobs using 3) */
+  CAMPAIGN_JOB_PRIORITY: Number(process.env.JOB_SCHEDULER_CAMPAIGN_PRIORITY) || 8,
+  TRANSACTIONAL_JOB_PRIORITY: Number(process.env.JOB_SCHEDULER_TRANSACTIONAL_PRIORITY) || 3,
 };
+
+const REMINDER_BACKLOG_DEFER_THRESHOLD =
+  Number(process.env.REMINDER_BACKLOG_DEFER_JOBS_THRESHOLD) || 3;
 
 // Scheduler state
 let isRunning = false;
@@ -102,7 +109,7 @@ export async function scheduleEmailBatch({
         jobType: 'email',
         status: 'scheduled',
         scheduledFor: spreadTimes[i],
-        priority: 5,
+        priority: CONFIG.CAMPAIGN_JOB_PRIORITY,
         batchId,
         batchIndex: i,
         totalInBatch: recipients.length,
@@ -203,7 +210,7 @@ export async function scheduleWhatsAppBatch({
         jobType: 'whatsapp',
         status: 'scheduled',
         scheduledFor: spreadTimes[i],
-        priority: 5,
+        priority: CONFIG.CAMPAIGN_JOB_PRIORITY,
         batchId,
         batchIndex: i,
         totalInBatch: mobileNumbers.length,
@@ -278,7 +285,7 @@ export async function scheduleSingleEmail({
       jobType: 'email',
       status: 'scheduled',
       scheduledFor,
-      priority: 5,
+      priority: CONFIG.TRANSACTIONAL_JOB_PRIORITY,
       emailData: {
         to: to.trim().toLowerCase(),
         from: finalSenderEmail,
@@ -329,7 +336,7 @@ export async function scheduleSingleWhatsApp({
       jobType: 'whatsapp',
       status: 'scheduled',
       scheduledFor,
-      priority: 5,
+      priority: CONFIG.TRANSACTIONAL_JOB_PRIORITY,
       whatsappData: {
         mobileNumber,
         templateName,
@@ -566,8 +573,27 @@ async function processWhatsAppJob(job) {
  */
 async function processDueJobs() {
   const now = new Date();
-  
+
   try {
+    const [dueCalls, dueWa] = await Promise.all([
+      ScheduledCallModel.countDocuments({
+        status: 'pending',
+        scheduledFor: { $lte: now },
+      }),
+      ScheduledWhatsAppReminderModel.countDocuments({
+        status: 'pending',
+        scheduledFor: { $lte: now },
+      }),
+    ]);
+    if (dueCalls + dueWa >= REMINDER_BACKLOG_DEFER_THRESHOLD) {
+      console.warn('[JobScheduler] Skipping campaign job batch: meeting reminder backlog', {
+        dueCalls,
+        dueWa,
+        threshold: REMINDER_BACKLOG_DEFER_THRESHOLD,
+      });
+      return;
+    }
+
     // ==================== PROCESS EMAILS ====================
     // Only process if we have capacity (less than 3 active)
     const availableSlots = CONFIG.EMAIL_CONCURRENCY - activeEmailJobs;

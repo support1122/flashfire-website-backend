@@ -88,6 +88,12 @@ const ScheduledCallSchema = new mongoose.Schema({
     type: Date,
     default: null
   },
+
+  /** ms between scheduledFor and first successful Twilio dial (ops / drift) */
+  deliveryDriftMs: {
+    type: Number,
+    default: null
+  },
   
   // Source of the booking
   source: {
