@@ -79,10 +79,14 @@ import {
   getMyMeetings,
   reportJoin,
   reportLeave,
+  reportEndEvent,
   manualMark,
   markAbsent,
   warnAbsent,
   beaconLeave,
+  beaconReportEndEvent,
+  updateBdaName,
+  createTestMeeting,
   sseConnection,
   getAttendanceByBooking,
   getAttendanceBulk
@@ -285,13 +289,17 @@ export default function Routes(app) {
   // ==================== BDA ATTENDANCE (Extension) ====================
   app.post('/api/bda-attendance/request-otp', requestBdaOtp);
   app.post('/api/bda-attendance/verify-otp', verifyBdaOtp);
+  app.post('/api/bda-attendance/update-name', requireBdaExtension, updateBdaName);
   app.get('/api/bda-attendance/my-meetings', requireBdaExtension, getMyMeetings);
   app.post('/api/bda-attendance/report-join', requireBdaExtension, reportJoin);
   app.post('/api/bda-attendance/report-leave', requireBdaExtension, reportLeave);
+  app.post('/api/bda-attendance/report-end-event', requireBdaExtension, reportEndEvent);
   app.post('/api/bda-attendance/manual-mark', requireBdaExtension, manualMark);
   app.post('/api/bda-attendance/mark-absent', requireBdaExtension, markAbsent);
   app.post('/api/bda-attendance/warn-absent', requireBdaExtension, warnAbsent);
   app.post('/api/bda-attendance/beacon-leave', beaconLeave); // No middleware — token verified in body
+  app.post('/api/bda-attendance/beacon-end-event', beaconReportEndEvent); // token in body; meet-link-only fallback
+  app.post('/api/bda-attendance/create-test-meeting', createTestMeeting); // No auth — for testing only
   app.get('/api/bda-attendance/sse', sseConnection);
   app.get('/api/bda-attendance/by-booking/:bookingId', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceByBooking);
   app.get('/api/bda-attendance/bulk', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceBulk);
