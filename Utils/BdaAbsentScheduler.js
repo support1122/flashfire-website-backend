@@ -66,7 +66,7 @@ async function closeStaleOpenSessions() {
   }
 }
 
-async function pollForAbsentBDAs() {
+export async function pollForAbsentBDAs() {
   if (isRunning) return;
   isRunning = true;
 

@@ -46,7 +46,7 @@ export function getDiscordMeetReminderOffsetMinutes() {
   return REMINDER_OFFSET_MINUTES;
 }
 
-function formatMeetingWallTime(meetingStart, inviteeTimezone) {
+export function formatMeetingWallTime(meetingStart, inviteeTimezone) {
   const instant = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
   const zone =
     inviteeTimezone && typeof inviteeTimezone === 'string' && IANAZone.isValidZone(inviteeTimezone.trim())
@@ -55,7 +55,7 @@ function formatMeetingWallTime(meetingStart, inviteeTimezone) {
   return instant.setZone(zone).toFormat('ff');
 }
 
-function headlineForSendTime(meetingStart) {
+export function headlineForSendTime(meetingStart) {
   const now = Date.now();
   const start = meetingStart.getTime();
   const minutesUntil = (start - now) / 60000;
@@ -147,6 +147,13 @@ export async function scheduleDiscordMeetReminder({
       source,
       metadata,
     });
+
+    // Register precision timer with UnifiedScheduler
+    try {
+      const { getScheduler } = await import('./UnifiedScheduler.js');
+      const scheduler = getScheduler();
+      if (scheduler) scheduler.scheduleTimer('discord', reminderId, reminderTime);
+    } catch {}
 
     const minutesUntilReminder = Math.round(
       (reminderTime.getTime() - now.getTime()) / 60000

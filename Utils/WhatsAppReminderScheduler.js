@@ -154,10 +154,17 @@ export async function scheduleWhatsAppReminder({
       }
     });
 
+    // Register precision timer with UnifiedScheduler
+    try {
+      const { getScheduler } = await import('./UnifiedScheduler.js');
+      const scheduler = getScheduler();
+      if (scheduler) scheduler.scheduleTimer('whatsapp', reminderId, reminderTime);
+    } catch {}
+
     const delayMinutes = Math.round((reminderTime - new Date()) / 60000);
     const delayHours = Math.round(delayMinutes / 60);
     const delayDays = Math.round(delayHours / 24);
-    
+
     // Format delay string for Discord
     let delayString = '';
     if (delayDays > 0) {
@@ -167,7 +174,7 @@ export async function scheduleWhatsAppReminder({
     } else {
       delayString = `${delayMinutes}m`;
     }
-    
+
     console.log(`✅ [WhatsAppReminderScheduler] ${reminderType} WhatsApp reminder scheduled:`, {
       reminderId,
       phoneNumber,
@@ -266,8 +273,15 @@ export async function scheduleAllWhatsAppReminders({
         }
       });
       
+      // Register precision timer with UnifiedScheduler
+      try {
+        const { getScheduler } = await import('./UnifiedScheduler.js');
+        const scheduler = getScheduler();
+        if (scheduler) scheduler.scheduleTimer('whatsapp', immediateReminderId, immediateReminderTime);
+      } catch {}
+
       const delayMinutes = Math.round((immediateReminderTime - now) / 60000);
-      
+
       console.log('✅ [WhatsAppReminderScheduler] Immediate WhatsApp reminder scheduled:', {
         reminderId: immediateReminderId,
         phoneNumber,
@@ -543,7 +557,7 @@ export async function cancelWhatsAppRemindersForClient({ clientEmail = null, pho
 /**
  * Send the actual WhatsApp message using WATI template
  */
-async function sendWhatsAppMessage(scheduledReminder) {
+export async function sendWhatsAppMessage(scheduledReminder) {
   const { phoneNumber, clientName, meetingDate, meetingTime, meetingLink, rescheduleLink, reminderId, timezone } = scheduledReminder;
 
   try {
