@@ -100,3 +100,5 @@ export class CircuitBreaker {
 // Shared instances for external services
 export const watiCircuitBreaker = new CircuitBreaker('WATI', { failureThreshold: 5, resetTimeoutMs: 60000 });
 export const sendgridCircuitBreaker = new CircuitBreaker('SendGrid', { failureThreshold: 5, resetTimeoutMs: 60000 });
+export const twilioCircuitBreaker = new CircuitBreaker('Twilio', { failureThreshold: 3, resetTimeoutMs: 30000 });
+export const discordCircuitBreaker = new CircuitBreaker('Discord', { failureThreshold: 5, resetTimeoutMs: 30000 });

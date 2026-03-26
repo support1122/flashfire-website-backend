@@ -571,7 +571,7 @@ async function processWhatsAppJob(job) {
  * Process due jobs - called by the polling mechanism
  * Rate limits: 3 concurrent emails, sequential WhatsApp
  */
-async function processDueJobs() {
+export async function processDueJobs() {
   const now = new Date();
 
   try {

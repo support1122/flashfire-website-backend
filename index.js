@@ -247,11 +247,9 @@ import { initGeoIp, getClientIp, detectCountryFromIp } from './Utils/GeoIP.js';
 // import './Utils/worker.js'; // Import worker to start it (handles callQueue jobs)
 // import { redisConnection } from './Utils/queue.js'; // Import shared ioredis connection
 
-import { startJobScheduler, getJobSchedulerStats } from './Utils/JobScheduler.js';
-import { scheduleCall, cancelCall, startScheduler, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js';
-import { startWhatsAppReminderScheduler } from './Utils/WhatsAppReminderScheduler.js';
-import { scheduleDiscordMeetReminder, startDiscordMeetReminderScheduler } from './Utils/DiscordMeetReminderScheduler.js';
-import { startBdaAbsentScheduler } from './Utils/BdaAbsentScheduler.js';
+import { getJobSchedulerStats } from './Utils/JobScheduler.js';
+import { scheduleCall, cancelCall, getSchedulerStats, getUpcomingCalls } from './Utils/CallScheduler.js';
+import { scheduleDiscordMeetReminder } from './Utils/DiscordMeetReminderScheduler.js';
 import { getRescheduleLinkForBooking } from './Utils/CalendlyAPIHelper.js';
 import watiService from './Utils/WatiService.js';
 
@@ -858,17 +856,12 @@ app.listen(PORT || 4001, async () => {
   const { startCronScheduler } = await import('./Utils/cronScheduler.js');
   startCronScheduler();
   
-  console.log('🚀 [Server] Starting MongoDB-based Call Scheduler...');
-  startScheduler();
-  startWhatsAppReminderScheduler(); // Start WhatsApp reminder scheduler
-  startDiscordMeetReminderScheduler(); // Start Discord 2-minute meeting reminder scheduler
-  startBdaAbsentScheduler(); // Start BDA absent detection scheduler (polls every 60s)
-  
-  // NEW: Start MongoDB-based Job Scheduler for email and WhatsApp campaigns
-  // This replaces Redis/BullMQ workers with time-spreading and rate limiting
-  console.log('🚀 [Server] Starting MongoDB-based Job Scheduler (replaces Redis workers)...');
-  startJobScheduler();
-  console.log('✅ [Server] Job Scheduler started - emails: 3 concurrent max, messages spread over 1 hour');
+  // Start UnifiedScheduler — replaces 5 separate polling loops with precision timers
+  console.log('🚀 [Server] Starting Unified Precision Scheduler...');
+  const { UnifiedScheduler, getScheduler } = await import('./Utils/UnifiedScheduler.js');
+  const scheduler = new UnifiedScheduler();
+  await scheduler.start();
+  console.log('✅ [Server] Unified Precision Scheduler started — precision timers active');
   
   try {
     await watiService.refreshTemplatesCache();
@@ -889,8 +882,55 @@ app.listen(PORT || 4001, async () => {
 // Initialize GeoIP after server startup
 initGeoIp();
 
+// -------------------- Graceful Shutdown --------------------
+const gracefulShutdown = async (signal) => {
+  console.log(`\n[Server] ${signal} received. Starting graceful shutdown...`);
+  try {
+    const { getScheduler } = await import('./Utils/UnifiedScheduler.js');
+    const scheduler = getScheduler();
+    if (scheduler) {
+      console.log('[Server] Stopping unified scheduler...');
+      await scheduler.stop();
+    }
+  } catch {}
+  try {
+    const mongoose = (await import('mongoose')).default;
+    await mongoose.connection.close();
+    console.log('[Server] MongoDB connection closed.');
+  } catch {}
+  process.exit(0);
+};
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
 // -------------------- Scheduler API Endpoints --------------------
-// Get scheduler stats
+// Unified scheduler health (new)
+app.get('/api/scheduler/health', async (req, res) => {
+  try {
+    const { getScheduler } = await import('./Utils/UnifiedScheduler.js');
+    const scheduler = getScheduler();
+    if (!scheduler) return res.status(503).json({ success: false, error: 'Scheduler not running' });
+    const health = scheduler.getHealth();
+    res.status(health.isHealthy ? 200 : 503).json({ success: true, ...health });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Unified scheduler full stats (new)
+app.get('/api/scheduler/unified-stats', async (req, res) => {
+  try {
+    const { getScheduler } = await import('./Utils/UnifiedScheduler.js');
+    const scheduler = getScheduler();
+    if (!scheduler) return res.status(503).json({ success: false, error: 'Scheduler not running' });
+    const stats = await scheduler.getStats();
+    res.json({ success: true, ...stats });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get scheduler stats (backward compatible)
 app.get('/api/scheduler/stats', async (req, res) => {
   try {
     const stats = await getSchedulerStats();

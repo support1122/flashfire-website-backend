@@ -105,8 +105,15 @@ export async function scheduleCall({
       metadata
     });
 
+    // Register precision timer with UnifiedScheduler
+    try {
+      const { getScheduler } = await import('./UnifiedScheduler.js');
+      const scheduler = getScheduler();
+      if (scheduler) scheduler.scheduleTimer('call', callId, callTime);
+    } catch {}
+
     const delayMinutes = Math.round((callTime - new Date()) / 60000);
-    
+
     console.log('✅ [CallScheduler] Call scheduled:', {
       callId,
       phoneNumber,
@@ -346,6 +353,13 @@ export async function cancelCall({ phoneNumber, meetingStartISO }) {
     );
 
     if (updateResult.modifiedCount > 0) {
+      // Cancel precision timer
+      try {
+        const { getScheduler } = await import('./UnifiedScheduler.js');
+        const scheduler = getScheduler();
+        if (scheduler) scheduler.cancelTimer(callId);
+      } catch {}
+
       console.log('✅ [CallScheduler] Call cancelled:', callId, 'modified:', updateResult.modifiedCount);
       return { success: true, callId, cancelledCount: updateResult.modifiedCount };
     }
@@ -380,7 +394,7 @@ async function resetStuckCallProcessing() {
 /**
  * Make the actual Twilio call
  */
-async function makeCall(scheduledCall) {
+export async function makeCall(scheduledCall) {
   const { phoneNumber, meetingTime, callId } = scheduledCall;
 
   try {
