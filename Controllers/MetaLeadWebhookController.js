@@ -131,7 +131,8 @@ function parseLeadFields(fieldData) {
 
   for (const field of fieldData) {
     const name = (field.name || '').toLowerCase().replace(/\s+/g, '_');
-    const value = field.values?.[0] || '';
+    const rawValue = field.values?.[0];
+    const value = rawValue != null ? String(rawValue).trim() : '';
 
     if (name.includes('email') || name === 'email') {
       parsed.email = value;
@@ -301,7 +302,10 @@ export const handleMetaLeadWebhook = async (req, res) => {
             metaCampaignId: leadValue.campaign_id || null,
             metaRawData: leadData || leadValue
           };
-          if (clientPhone) mergeSet.clientPhone = clientPhone;
+          if (clientPhone) {
+            mergeSet.clientPhone = clientPhone;
+            mergeSet.normalizedClientPhone = normalizedPhone || null;
+          }
           if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
           if (additionalNotes) {
             const prev = existingLead.anythingToKnow || '';
@@ -315,6 +319,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
             clientName: clientName.trim(),
             clientEmail: normalizedEmail,
             clientPhone: clientPhone || null,
+            normalizedClientPhone: normalizedPhone || null,
             utmSource: parsedFields.utmSource || 'meta_lead_ad',
             utmMedium: parsedFields.utmMedium || 'paid',
             utmCampaign: parsedFields.utmCampaign || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form'),
