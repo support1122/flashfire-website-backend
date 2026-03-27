@@ -18,6 +18,7 @@ import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 import { DateTime } from 'luxon';
 import crypto from 'crypto';
+import { logReminderError } from '../Schema_Models/ReminderError.js';
 
 // In-memory cache for Discord duplication check
 const discordMessageCache = new Map();
@@ -323,11 +324,164 @@ async function handleCreatedEvent(req, res, payload) {
       Logger.warn('Failed to update user booked status during meta sync', { error: userUpdateError.message });
     }
 
+    // ── Schedule reminders for meta-lead-synced bookings ──
+    // Previously this path returned early without scheduling any reminders.
+    // Now we schedule Discord meet reminders, calls, and WhatsApp reminders
+    // exactly like the normal booking path.
+
+    const metaPhone = inviteePhone || mergedBooking.clientPhone;
+    const startISO = payload?.scheduled_event?.start_time;
+    const metaMeetLink = meetLink && meetLink !== 'Not Provided' ? meetLink : null;
+    let metaReminderResults = { discord: null, call: null };
+
+    // 1. Schedule Discord "meeting in ~5 minutes" reminder (skip for India numbers)
+    const isIndiaNumberMeta = metaPhone && metaPhone.startsWith('+91');
+    if (isIndiaNumberMeta) {
+      Logger.info('Skipping Discord meet reminder for India number (meta-synced)', { phone: metaPhone, bookingId: mergedBooking.bookingId });
+      metaReminderResults.discord = 'skipped_india';
+    } else {
+      try {
+        if (startISO) {
+          await scheduleDiscordMeetReminder({
+            bookingId: mergedBooking.bookingId,
+            clientName: inviteeName || mergedBooking.clientName || 'Valued Client',
+            clientEmail: inviteeEmail || null,
+            meetingStartISO: startISO,
+            meetingLink: metaMeetLink,
+            inviteeTimezone,
+            source: 'calendly_meta_sync',
+            metadata: {
+              campaignId: mergedBooking.campaignId,
+              utmSource: mergedBooking.utmSource,
+            },
+          });
+          metaReminderResults.discord = 'scheduled';
+        }
+      } catch (discordReminderError) {
+        Logger.warn('Failed to schedule Discord meet reminder for meta-synced booking', {
+          error: discordReminderError.message,
+          bookingId: mergedBooking.bookingId,
+        });
+        logReminderError({
+          bookingId: mergedBooking.bookingId, clientEmail: inviteeEmail, clientPhone: metaPhone,
+          clientName: inviteeName, category: 'discord', severity: 'error',
+          message: 'Failed to schedule Discord meet reminder for meta-synced booking: ' + discordReminderError.message,
+          source: 'CalendlyWebhookController.handleCreatedEvent.metaSync'
+        });
+      }
+    }
+
+    // 2. Send Discord notification about the booking
+    const metaBookingDetails = {
+      "Booking ID": mergedBooking.bookingId,
+      "Campaign ID": mergedBooking.campaignId || 'N/A',
+      "Invitee Name": inviteeName,
+      "Invitee Email": inviteeEmail,
+      "Invitee Phone": metaPhone || 'Not Provided',
+      "Google Meet Link": meetLink,
+      "Reschedule Link": rescheduleLink || 'Not Provided',
+      "Meeting Time (Client US)": meetingTimeUS,
+      "Meeting Time (Team India)": meetingTimeIndia,
+      "Booked At": bookedAt,
+      "UTM Source": mergedBooking.utmSource || utmSource,
+      "Lead Source": 'meta_lead_ad (synced)',
+      "Database Status": "✅ META SYNCED → SCHEDULED"
+    };
+
+    if (!isDuplicateDiscord(metaBookingDetails)) {
+      try {
+        await DiscordConnectForMeet(JSON.stringify(metaBookingDetails, null, 2));
+      } catch (discordErr) {
+        Logger.warn('Failed to send Discord booking notification for meta-synced booking', { error: discordErr.message });
+      }
+    }
+
+    // 3. Schedule call + WhatsApp reminders (if valid phone and meeting is far enough)
+    const phoneRegex = /^\+?[1-9]\d{9,14}$/;
+    if (metaPhone && metaPhone.startsWith('+91')) {
+      Logger.info('Skipping India number for meta-synced booking', { phone: metaPhone });
+    } else if (metaPhone && phoneRegex.test(metaPhone) && delay > 0) {
+      try {
+        let rescheduleLinkForReminder = mergedBooking.calendlyRescheduleLink || rescheduleLink;
+        if (!rescheduleLinkForReminder && mergedBooking.calendlyInviteeUri) {
+          try {
+            const fetchedLink = await getRescheduleLinkForBooking(mergedBooking);
+            if (fetchedLink) rescheduleLinkForReminder = fetchedLink;
+          } catch (err) {
+            Logger.warn('Could not fetch reschedule link for meta-synced booking', { error: err.message });
+          }
+        }
+        if (!rescheduleLinkForReminder) {
+          rescheduleLinkForReminder = 'https://calendly.com/flashfirejobs';
+        }
+
+        const mongoResult = await scheduleCall({
+          phoneNumber: metaPhone,
+          meetingStartISO: startISO,
+          meetingTime: meetingTimeIndia,
+          inviteeName: inviteeName || mergedBooking.clientName,
+          inviteeEmail,
+          source: 'calendly_meta_sync',
+          meetingLink: metaMeetLink,
+          rescheduleLink: rescheduleLinkForReminder,
+          metadata: {
+            bookingId: mergedBooking.bookingId,
+            eventUri: payload?.scheduled_event?.uri,
+            inviteeTimezone: inviteeTimezone,
+            meetingEndISO: payload?.scheduled_event?.end_time || null,
+          }
+        });
+
+        if (mongoResult.success) {
+          Logger.info('✅ Call + WhatsApp reminders scheduled for meta-synced booking', {
+            callId: mongoResult.callId,
+            bookingId: mergedBooking.bookingId,
+          });
+          metaReminderResults.call = mongoResult.callId;
+
+          await CampaignBookingModel.findOneAndUpdate(
+            { bookingId: mergedBooking.bookingId },
+            { reminderCallJobId: mongoResult.callId }
+          );
+        } else {
+          Logger.warn('Failed to schedule call for meta-synced booking', { error: mongoResult.error });
+        }
+      } catch (callError) {
+        Logger.warn('Error scheduling call for meta-synced booking', { error: callError.message });
+        logReminderError({
+          bookingId: mergedBooking.bookingId, clientEmail: inviteeEmail, clientPhone: metaPhone,
+          clientName: inviteeName, category: 'call', severity: 'error',
+          message: 'Failed to schedule call for meta-synced booking: ' + callError.message,
+          source: 'CalendlyWebhookController.handleCreatedEvent.metaSync'
+        });
+      }
+    } else if (delay <= 0) {
+      Logger.warn('Meeting too soon to schedule call for meta-synced booking', {
+        bookingId: mergedBooking.bookingId,
+        delayMs: delay,
+      });
+      if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+        const minutesUntilMeeting = Math.round(-delay / 60000);
+        await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+          `⚠️ Meta-synced meeting too soon for reminder call: ${inviteeName || 'Unknown'} (${inviteeEmail || 'Unknown'}). Meeting in ${minutesUntilMeeting} minutes.`
+        );
+      }
+    }
+
+    // 4. Trigger workflows for the new 'scheduled' status
+    try {
+      await triggerWorkflow(mergedBooking.bookingId, 'scheduled');
+      Logger.info('✅ Workflows triggered for meta-synced booking', { bookingId: mergedBooking.bookingId });
+    } catch (workflowError) {
+      Logger.warn('Failed to trigger workflows for meta-synced booking', { error: workflowError.message });
+    }
+
     return res.status(200).json({
       success: true,
       message: 'Meta lead synced and upgraded to scheduled',
       bookingId: mergedBooking.bookingId,
-      metaSynced: true
+      metaSynced: true,
+      reminders: metaReminderResults
     });
   }
 
@@ -525,7 +679,16 @@ async function handleCreatedEvent(req, res, payload) {
     });
   }
 
-  // Schedule Discord "meeting in 2 minutes" reminder (independent of phone/WhatsApp logic)
+  // Skip ALL reminders (calls, WhatsApp, Discord BDA) for India numbers (+91)
+  if (inviteePhone && inviteePhone.startsWith("+91")) {
+    Logger.info('Skipping India number - no reminders scheduled', { phone: inviteePhone });
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `⏭️ Skipping all reminders for India number: ${inviteePhone} (${inviteeName || 'Unknown'})`);
+    }
+    return res.status(200).json({ message: 'Skipped India number - no reminders scheduled' });
+  }
+
+  // Schedule Discord "meeting in 2 minutes" reminder (only for non-India numbers)
   try {
     const startISO = payload?.scheduled_event?.start_time;
     if (startISO) {
@@ -555,14 +718,6 @@ async function handleCreatedEvent(req, res, payload) {
   // Validate phone numbers
   const phoneRegex = /^\+?[1-9]\d{9,14}$/;
   let scheduledJobs = [];
-
-  if (inviteePhone && inviteePhone.startsWith("+91")) {
-    Logger.info('Skipping India number', { phone: inviteePhone });
-    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `Skipping India number: ${inviteePhone}`);
-    }
-    return res.status(200).json({ message: 'Skipped India number' });
-  }
 
   // Schedule call if delay is positive
   if (inviteePhone && phoneRegex.test(inviteePhone) && delay > 0) {
@@ -629,13 +784,7 @@ async function handleCreatedEvent(req, res, payload) {
       await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
     }
 
-    // Schedule WhatsApp reminders
-    try {
-      // WhatsApps are often scheduled via scheduleCall integration or another mechanism in this codebase.
-      // We leave it to the system's call scheduler to handle WhatsApp or assume it's covered.
-    } catch (err) {
-      // ...
-    }
+    // WhatsApp reminders are scheduled internally by scheduleCall() above
 
     const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
     if (discordWebhookUrl) {
@@ -806,6 +955,9 @@ async function handleNoShowEvent(req, res, payload) {
   if (bookingRecord) {
     try {
       bookingRecord.bookingStatus = 'no-show';
+      bookingRecord.statusChangedAt = new Date();
+      bookingRecord.statusChangeSource = 'calendly';
+      bookingRecord.statusChangedBy = 'calendly_webhook';
       bookingRecord.noShowDate = new Date();
       bookingRecord.noShowProcessed = true;
       bookingRecord.whatsappReminderSent = whatsappSent;
@@ -1046,6 +1198,9 @@ async function handleRescheduledEvent(req, res, payload) {
     if (bookingRecord) {
       try {
         bookingRecord.bookingStatus = 'rescheduled';
+        bookingRecord.statusChangedAt = new Date();
+        bookingRecord.statusChangeSource = 'calendly';
+        bookingRecord.statusChangedBy = 'calendly_webhook';
         bookingRecord.rescheduledFrom = new Date(oldStartTime);
         bookingRecord.rescheduledTo = new Date(newStartTime);
         bookingRecord.rescheduledAt = new Date();
@@ -1115,7 +1270,8 @@ async function handleRescheduledEvent(req, res, payload) {
               bookingId: bookingRecord?.bookingId,
               rescheduledFrom: oldStartTime,
               rescheduledTo: newStartTime,
-              meetingEndISO: newEndTime
+              meetingEndISO: newEndTime,
+              inviteeTimezone: new_invitee?.timezone || bookingRecord?.inviteeTimezone || null
             }
           });
 
@@ -1143,30 +1299,34 @@ async function handleRescheduledEvent(req, res, payload) {
       }
     }
 
-    // Schedule Discord "meeting in 2 minutes" reminder for NEW time
-    // ✅ This ensures the new meeting gets a reminder
-    try {
-      if (newStartTime) {
-        await scheduleDiscordMeetReminder({
-          bookingId: bookingRecord?.bookingId,
-          clientName: clientName || 'Valued Client',
-          clientEmail: clientEmail || null,
-          meetingStartISO: newStartTime,
-          meetingLink: meetLink && meetLink !== 'Not Provided' ? meetLink : null,
-          inviteeTimezone: new_invitee?.timezone || bookingRecord?.inviteeTimezone || null,
-          source: 'reschedule',
-          metadata: {
-            campaignId: bookingRecord?.campaignId,
-            utmSource: bookingRecord?.utmSource,
-            rescheduledFrom: oldStartTime
-          },
+    // Schedule Discord "meeting in 2 minutes" reminder for NEW time (skip for India numbers)
+    const isIndiaReschedule = clientPhone && clientPhone.startsWith('+91');
+    if (isIndiaReschedule) {
+      Logger.info('Skipping Discord meet reminder for India number (reschedule)', { clientPhone, bookingId: bookingRecord?.bookingId });
+    } else {
+      try {
+        if (newStartTime) {
+          await scheduleDiscordMeetReminder({
+            bookingId: bookingRecord?.bookingId,
+            clientName: clientName || 'Valued Client',
+            clientEmail: clientEmail || null,
+            meetingStartISO: newStartTime,
+            meetingLink: meetLink && meetLink !== 'Not Provided' ? meetLink : null,
+            inviteeTimezone: new_invitee?.timezone || bookingRecord?.inviteeTimezone || null,
+            source: 'reschedule',
+            metadata: {
+              campaignId: bookingRecord?.campaignId,
+              utmSource: bookingRecord?.utmSource,
+              rescheduledFrom: oldStartTime
+            },
+          });
+          Logger.info('Scheduled new Discord meet reminder for rescheduled meeting');
+        }
+      } catch (discordReminderError) {
+        Logger.warn('Failed to schedule new Discord 2-minute meeting reminder', {
+          error: discordReminderError.message,
         });
-        Logger.info('Scheduled new Discord meet reminder for rescheduled meeting');
       }
-    } catch (discordReminderError) {
-      Logger.warn('Failed to schedule new Discord 2-minute meeting reminder', {
-        error: discordReminderError.message,
-      });
     }
 
     try {
@@ -1367,6 +1527,9 @@ async function handleCanceledEvent(req, res, payload) {
     if (bookingRecord) {
       try {
         bookingRecord.bookingStatus = 'canceled';
+        bookingRecord.statusChangedAt = new Date();
+        bookingRecord.statusChangeSource = 'calendly';
+        bookingRecord.statusChangedBy = 'calendly_webhook';
         bookingRecord.canceledAt = new Date();
         bookingRecord.canceledBy = canceledBy;
         bookingRecord.cancelReason = cancelReason;

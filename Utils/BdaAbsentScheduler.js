@@ -88,9 +88,11 @@ export async function pollForAbsentBDAs() {
         $lte: oneMinAgo,
         $gte: twoHoursAgo,
       },
+      // Skip India numbers - no reminders are scheduled for them
+      clientPhone: { $not: /^\+91/ },
     })
       .select(
-        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime claimedBy'
+        'bookingId clientName clientEmail clientPhone scheduledEventStartTime scheduledEventEndTime claimedBy'
       )
       .lean();
 
@@ -114,8 +116,9 @@ export async function pollForAbsentBDAs() {
       // Skip if any BDA has already reported attendance for this meeting
       if (attendedBookingIds.has(meeting.bookingId)) continue;
 
+      const isClaimed = !!(meeting.claimedBy?.email);
       const bdaEmail = meeting.claimedBy?.email || 'unassigned';
-      const bdaName = meeting.claimedBy?.name || 'Unassigned BDA';
+      const bdaName = meeting.claimedBy?.name || 'Unassigned';
 
       // No attendance record - mark absent
       try {
@@ -132,7 +135,9 @@ export async function pollForAbsentBDAs() {
               meetingScheduledStart: meeting.scheduledEventStartTime,
               meetingScheduledEnd: meeting.scheduledEventEndTime || null,
               discordNotified: true,
-              notes: 'Auto-detected absent by server scheduler (no response 60s after start)',
+              notes: isClaimed
+                ? 'Auto-detected absent by server scheduler (no response 60s after start)'
+                : 'Meeting not claimed by any BDA — no one joined',
             },
             $setOnInsert: {
               attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -141,12 +146,17 @@ export async function pollForAbsentBDAs() {
           { upsert: true, new: true }
         );
 
-        const message =
-          `❌ **BDA Absent (Auto-Detected)**\n` +
-          `**BDA:** ${bdaName} (${bdaEmail})\n` +
-          `**Client:** ${meeting.clientName}\n` +
-          `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
-          `_No response received (automatic or manual) after 60 seconds of meeting start._`;
+        const message = isClaimed
+          ? `❌ **BDA Absent (Auto-Detected)**\n` +
+            `**BDA:** ${bdaName} (${bdaEmail})\n` +
+            `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
+            `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
+            `_No response received (automatic or manual) after 60 seconds of meeting start._`
+          : `🚨 **NO BDA ASSIGNED — Meeting Started!**\n` +
+            `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
+            `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
+            `**Status:** No BDA has claimed this lead\n` +
+            `_Someone needs to join this meeting NOW!_`;
 
         await sendAbsentDiscord(message);
         absentCount++;

@@ -690,13 +690,19 @@ export async function processDueWhatsAppReminders() {
             .lean();
         }
         if (booking) {
-          if (booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') {
+          // Only cancel reminder if the status was changed by the CLIENT (via Calendly webhook).
+          // Admin/BDA manual status changes should NOT block WhatsApp reminders.
+          const isClientInitiated = booking.statusChangeSource === 'calendly';
+          if ((booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') && isClientInitiated) {
             await ScheduledWhatsAppReminderModel.updateOne(
               { _id: reminder._id },
-              { status: 'cancelled', errorMessage: `Cancelled: booking status is ${booking.bookingStatus}` }
+              { status: 'cancelled', errorMessage: `Cancelled: booking ${booking.bookingStatus} by client (Calendly)` }
             );
-            console.log(`🛡️ [WhatsAppReminderScheduler] Blocked reminder for ${booking.bookingStatus} booking:`, reminder.reminderId);
+            console.log(`🛡️ [WhatsAppReminderScheduler] Blocked reminder for client-${booking.bookingStatus} booking:`, reminder.reminderId);
             continue;
+          }
+          if ((booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') && !isClientInitiated) {
+            console.log(`ℹ️ [WhatsAppReminderScheduler] Status is ${booking.bookingStatus} but changed by ${booking.statusChangeSource || 'admin'} — sending reminder anyway:`, reminder.reminderId);
           }
           const bookingMeetingTime = booking.scheduledEventStartTime
             ? new Date(booking.scheduledEventStartTime).getTime()

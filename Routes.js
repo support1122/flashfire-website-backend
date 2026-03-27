@@ -1,6 +1,7 @@
 
 import VerifyInterestedClient from "./Middlewares/VerifyInterestedClient.js";
 import { getDashboardData, sendNow, renderDashboard } from "./Controllers/DashboardController.js";
+import { searchClientReminders, getRecentErrors, renderReminderDashboard } from "./Controllers/ReminderDashboardController.js";
 import Register_Sessions from "./Controllers/Register_Sessions.js";
 import Contact from "./Controllers/Contact.js";
 import Signup from "./Controllers/Signup.js";
@@ -480,6 +481,11 @@ export default function Routes(app) {
   app.get('/details', renderDashboard);
   app.get('/api/dashboard/data', getDashboardData);
   app.post('/api/dashboard/send-now', sendNow);
+
+  // ==================== REMINDER DASHBOARD ====================
+  app.get('/admin/reminders', renderReminderDashboard); // HTML dashboard
+  app.get('/api/admin/reminders/search', searchClientReminders); // Search API
+  app.get('/api/admin/reminders/errors', getRecentErrors); // Recent errors API
 
   // // Handle Gather result
   // app.post("/twilio/response", (req, res) => {
