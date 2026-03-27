@@ -5,11 +5,13 @@ import { triggerWorkflow } from './WorkflowController.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
 const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
+const META_GRAPH_VERSION = 'v21.0';
+const LEAD_FETCH_FIELDS = 'id,created_time,field_data,ad_id,form_id,form_name,campaign_id,platform';
 
-/**
- * Meta Lead Ads Webhook Verification (GET)
- * Facebook sends a GET request to verify the webhook URL during setup.
- */
+// ---------------------------------------------------------------------------
+// GET — Meta webhook verification
+// ---------------------------------------------------------------------------
+
 export const verifyMetaWebhook = (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -24,35 +26,104 @@ export const verifyMetaWebhook = (req, res) => {
   return res.status(403).json({ error: 'Verification failed' });
 };
 
-/**
- * Fetch lead data from Meta Graph API using the leadgen_id
- */
+// ---------------------------------------------------------------------------
+// Graph API — fetch lead by leadgen_id (with retries for race condition)
+// ---------------------------------------------------------------------------
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchLeadDataFromMeta(leadgenId) {
   if (!FB_PAGE_ACCESS_TOKEN) {
-    console.warn('FB_PAGE_ACCESS_TOKEN not configured, cannot fetch lead data from Meta');
+    Logger.error('FB_PAGE_ACCESS_TOKEN not configured — cannot fetch lead data from Meta');
     return null;
   }
 
-  try {
-    const url = `https://graph.facebook.com/v21.0/${leadgenId}?access_token=${FB_PAGE_ACCESS_TOKEN}`;
-    const response = await fetch(url);
-    const data = await response.json();
+  const base = `https://graph.facebook.com/${META_GRAPH_VERSION}/${encodeURIComponent(leadgenId)}`;
+  const delaysMs = [0, 1500, 3500];
 
-    if (data.error) {
-      console.error('Meta Graph API error fetching lead:', data.error);
-      return null;
+  for (let attempt = 0; attempt < delaysMs.length; attempt++) {
+    if (delaysMs[attempt] > 0) await sleep(delaysMs[attempt]);
+
+    try {
+      const url = new URL(base);
+      url.searchParams.set('fields', LEAD_FETCH_FIELDS);
+      url.searchParams.set('access_token', FB_PAGE_ACCESS_TOKEN);
+
+      const response = await fetch(url.toString());
+      const data = await response.json();
+
+      if (data.error) {
+        Logger.warn('Meta Graph API error fetching lead', {
+          leadgenId,
+          attempt: attempt + 1,
+          message: data.error.message,
+          code: data.error.code,
+          type: data.error.type
+        });
+        if (attempt === delaysMs.length - 1) return null;
+        continue;
+      }
+
+      const hasFields = Array.isArray(data.field_data) && data.field_data.length > 0;
+
+      if (hasFields || attempt === delaysMs.length - 1) return data;
+
+      Logger.warn('Meta lead fetch returned empty field_data; retrying', {
+        leadgenId,
+        attempt: attempt + 1
+      });
+    } catch (error) {
+      Logger.error('Failed to fetch lead data from Meta', { leadgenId, error: error.message });
+      if (attempt === delaysMs.length - 1) return null;
     }
-
-    return data;
-  } catch (error) {
-    console.error('Failed to fetch lead data from Meta:', error.message);
-    return null;
   }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// field_data parsing helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Get value from Meta field_data by exact name first, then normalized name.
+ * Tries each candidate in order.
+ */
+function getFieldValue(fieldData, ...candidates) {
+  if (!Array.isArray(fieldData)) return '';
+
+  const val = (f) => {
+    if (!f?.values?.length) return '';
+    return f.values[0] == null ? '' : String(f.values[0]).trim();
+  };
+
+  for (const c of candidates) {
+    if (!c) continue;
+    const hit = fieldData.find((f) => f.name === c);
+    const v = val(hit);
+    if (v) return v;
+  }
+
+  const norm = (s) => (s || '').toLowerCase().replace(/\s+/g, '_');
+  const map = new Map();
+  for (const f of fieldData) {
+    const key = norm(f.name);
+    const v = val(f);
+    if (!map.has(key) && v) map.set(key, v);
+  }
+  for (const c of candidates) {
+    if (!c) continue;
+    const v = map.get(norm(c));
+    if (v) return v;
+  }
+
+  return '';
 }
 
 /**
- * Parse Meta Lead form field_data into a structured object
- * Meta sends fields as: [{ name: "email", values: ["user@example.com"] }, ...]
+ * Broad field_data parser — maps common field names to a structured object.
  */
 function parseLeadFields(fieldData) {
   const parsed = {};
@@ -70,27 +141,30 @@ function parseLeadFields(fieldData) {
       parsed.firstName = value;
     } else if (name.includes('last_name') || name === 'last_name') {
       parsed.lastName = value;
-    } else if (name.includes('phone') || name === 'phone_number') {
-      parsed.phone = value;
+    } else if (
+      name === 'whatsapp_number' ||
+      name === 'whatsapp' ||
+      name.startsWith('whatsapp_') ||
+      name.includes('phone') ||
+      name === 'phone_number' ||
+      name === 'mobile' ||
+      name === 'mobile_number'
+    ) {
+      parsed.phone = parsed.phone || value;
     } else if (name.includes('job') || name.includes('role') || name.includes('position')) {
       parsed.jobTitle = value;
-    } else if (name.includes('utm_source') || name === 'utm_source' || name === 'utmsource') {
-      // Extract UTM source from form field
+    } else if (name.includes('utm_source') || name === 'utmsource') {
       parsed.utmSource = value;
-    } else if (name.includes('utm_medium') || name === 'utm_medium' || name === 'utmmedium') {
-      // Extract UTM medium from form field
+    } else if (name.includes('utm_medium') || name === 'utmmedium') {
       parsed.utmMedium = value;
-    } else if (name.includes('utm_campaign') || name === 'utm_campaign' || name === 'utmcampaign') {
-      // Extract UTM campaign from form field
+    } else if (name.includes('utm_campaign') || name === 'utmcampaign') {
       parsed.utmCampaign = value;
     } else {
-      // Store any other custom fields
       if (!parsed.customFields) parsed.customFields = {};
       parsed.customFields[name] = value;
     }
   }
 
-  // Build full name from parts if not already set
   if (!parsed.fullName && (parsed.firstName || parsed.lastName)) {
     parsed.fullName = [parsed.firstName, parsed.lastName].filter(Boolean).join(' ');
   }
@@ -99,31 +173,50 @@ function parseLeadFields(fieldData) {
 }
 
 /**
- * Meta Lead Ads Webhook Handler (POST)
- * Receives lead data when someone submits a Meta Lead Ad form.
- *
- * Meta webhook payload structure:
- * {
- *   "object": "page",
- *   "entry": [{
- *     "id": "page_id",
- *     "time": 1234567890,
- *     "changes": [{
- *       "field": "leadgen",
- *       "value": {
- *         "leadgen_id": "123456789",
- *         "page_id": "987654321",
- *         "form_id": "111222333",
- *         "ad_id": "444555666",
- *         "adgroup_id": "777888999",
- *         "created_time": 1234567890
- *       }
- *     }]
- *   }]
- * }
+ * Extract CRM-ready fields from Graph API lead data.
  */
+function extractLeadFields(leadData) {
+  const fd = leadData?.field_data;
+  const parsed = parseLeadFields(fd);
+
+  const email =
+    getFieldValue(fd, 'email', 'work_email', 'business_email') ||
+    parsed.email ||
+    '';
+
+  const fullName =
+    getFieldValue(fd, 'full_name') ||
+    parsed.fullName ||
+    [
+      getFieldValue(fd, 'first_name') || parsed.firstName,
+      getFieldValue(fd, 'last_name') || parsed.lastName
+    ].filter(Boolean).join(' ') ||
+    '';
+
+  const phone =
+    getFieldValue(fd, 'whatsapp_number', 'WhatsApp number', 'whatsapp', 'phone_number', 'phone', 'mobile', 'mobile_number') ||
+    parsed.phone ||
+    '';
+
+  const jobType =
+    getFieldValue(fd, 'which_type_of_job_looking?', 'which_type_of_job_looking') ||
+    parsed.jobTitle ||
+    '';
+
+  return {
+    email: email.trim().toLowerCase(),
+    fullName: fullName.trim(),
+    phone: phone.trim(),
+    jobType: jobType.trim(),
+    parsedFields: parsed
+  };
+}
+
+// ---------------------------------------------------------------------------
+// POST — Meta lead webhook handler
+// ---------------------------------------------------------------------------
+
 export const handleMetaLeadWebhook = async (req, res) => {
-  // Respond immediately to Meta (they require 200 within 20 seconds)
   res.status(200).json({ status: 'received' });
 
   try {
@@ -134,119 +227,94 @@ export const handleMetaLeadWebhook = async (req, res) => {
       return;
     }
 
-    const entries = body.entry || [];
-
-    for (const entry of entries) {
+    for (const entry of body.entry || []) {
       const pageId = entry.id;
-      const changes = entry.changes || [];
 
-      for (const change of changes) {
+      for (const change of entry.changes || []) {
         if (change.field !== 'leadgen') continue;
 
         const leadValue = change.value || {};
-        const {
-          leadgen_id,
-          form_id,
-          ad_id,
-          adgroup_id,
-          created_time
-        } = leadValue;
+        const { leadgen_id, form_id, ad_id, adgroup_id, created_time } = leadValue;
 
         if (!leadgen_id) {
           console.warn('Meta webhook: Missing leadgen_id, skipping');
           continue;
         }
 
-        // Check for duplicate by Meta lead ID (same Meta lead submitted twice)
         const existingByMetaId = await CampaignBookingModel.findOne({ metaLeadId: leadgen_id });
         if (existingByMetaId) {
-          console.log(`Meta lead ${leadgen_id} already exists as booking ${existingByMetaId.bookingId}, skipping`);
+          console.log(`Meta lead ${leadgen_id} already exists (${existingByMetaId.bookingId}), skipping`);
           continue;
         }
 
-        // Fetch the actual lead data from Meta Graph API
         const leadData = await fetchLeadDataFromMeta(leadgen_id);
+        const extracted = extractLeadFields(leadData);
 
-        let clientName = 'Meta Lead';
-        let clientEmail = '';
-        let clientPhone = '';
-        let formName = '';
-        let additionalNotes = '';
-        let parsedFields = {};
-
-        if (leadData) {
-          parsedFields = parseLeadFields(leadData.field_data);
-
-          clientName = parsedFields.fullName || 'Meta Lead';
-          clientEmail = parsedFields.email || '';
-          clientPhone = parsedFields.phone || '';
-          formName = leadData.form_name || '';
-
-          // Build additional notes from custom fields (excluding UTM fields)
-          const noteParts = [];
-          if (parsedFields.jobTitle) noteParts.push(`Job/Role: ${parsedFields.jobTitle}`);
-          if (parsedFields.customFields) {
-            for (const [key, val] of Object.entries(parsedFields.customFields)) {
-              // Skip UTM fields from notes (they're stored separately)
-              if (!key.includes('utm')) {
-                noteParts.push(`${key}: ${val}`);
-              }
-            }
-          }
-          if (noteParts.length > 0) {
-            additionalNotes = noteParts.join('\n');
-          }
+        if (!extracted.email) {
+          Logger.error('Meta lead skipped — no email returned from Graph API', {
+            leadgen_id,
+            graphReturnedData: !!leadData,
+            hint: 'Renew FB_PAGE_ACCESS_TOKEN; ensure leads_retrieval permission; check Leads Access Manager'
+          });
+          continue;
         }
 
-        // If we couldn't fetch data from Meta API, use minimal info
-        if (!clientEmail) {
-          clientEmail = `meta_lead_${leadgen_id}@meta.placeholder`;
-          console.warn(`Could not fetch email for lead ${leadgen_id}, using placeholder`);
+        const clientName = extracted.fullName || 'New lead';
+        const clientEmail = extracted.email;
+        const clientPhone = extracted.phone || '';
+        const formName = leadData?.form_name || '';
+        const parsedFields = extracted.parsedFields || {};
+
+        let additionalNotes = '';
+        if (extracted.jobType) {
+          additionalNotes = `Job type: ${extracted.jobType}`;
+        }
+        if (parsedFields.customFields) {
+          for (const [key, val] of Object.entries(parsedFields.customFields)) {
+            if (key.includes('utm')) continue;
+            if (key.includes('which_type') && extracted.jobType) continue;
+            additionalNotes = additionalNotes ? `${additionalNotes}\n${key}: ${val}` : `${key}: ${val}`;
+          }
         }
 
         const normalizedEmail = clientEmail.trim().toLowerCase();
         const normalizedPhone = normalizePhoneForMatching(clientPhone);
 
-        // Sync: find existing lead by Email or Phone (without country code) to merge with current status
         const orConditions = [{ clientEmail: normalizedEmail }];
         if (normalizedPhone) {
           orConditions.push({ normalizedClientPhone: normalizedPhone });
-          // Fallback for docs that don't have normalizedClientPhone yet (legacy)
           orConditions.push({ clientPhone: { $regex: normalizedPhone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' } });
         }
         const existingLead = await CampaignBookingModel.findOne({ $or: orConditions }).sort({ bookingCreatedAt: -1 });
 
         if (existingLead) {
-          // Merge: attach Meta lead data to existing lead; keep existing status and lead source
-          await CampaignBookingModel.findOneAndUpdate(
-            { bookingId: existingLead.bookingId },
-            {
-              $set: {
-                metaLeadId: leadgen_id,
-                metaFormId: form_id || null,
-                metaAdId: ad_id || null,
-                metaAdsetId: adgroup_id || null,
-                metaPageId: pageId || null,
-                metaFormName: formName || null,
-                metaCampaignId: leadValue.campaign_id || null,
-                metaRawData: leadData || leadValue
-              }
-            }
-          );
-          console.log(`Meta lead merged with existing: ${existingLead.bookingId} | ${existingLead.clientEmail} | status: ${existingLead.bookingStatus} | Form: ${formName}`);
-        } else {
-          // No existing lead: create new CampaignBooking
-          const dynamicUtmSource = parsedFields.utmSource || 'meta_lead_ad';
-          const dynamicUtmMedium = parsedFields.utmMedium || 'paid';
-          const dynamicUtmCampaign = parsedFields.utmCampaign || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form');
+          const mergeSet = {
+            metaLeadId: leadgen_id,
+            metaFormId: form_id || null,
+            metaAdId: ad_id || null,
+            metaAdsetId: adgroup_id || null,
+            metaPageId: pageId || null,
+            metaFormName: formName || null,
+            metaCampaignId: leadValue.campaign_id || null,
+            metaRawData: leadData || leadValue
+          };
+          if (clientPhone) mergeSet.clientPhone = clientPhone;
+          if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
+          if (additionalNotes) {
+            const prev = existingLead.anythingToKnow || '';
+            mergeSet.anythingToKnow = prev ? `${prev}\n\n${additionalNotes}` : additionalNotes;
+          }
 
+          await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
+          console.log(`Meta lead merged: ${existingLead.bookingId} | ${existingLead.clientEmail} | ${existingLead.bookingStatus} | Form: ${formName}`);
+        } else {
           const newBooking = new CampaignBookingModel({
             clientName: clientName.trim(),
             clientEmail: normalizedEmail,
             clientPhone: clientPhone || null,
-            utmSource: dynamicUtmSource,
-            utmMedium: dynamicUtmMedium,
-            utmCampaign: dynamicUtmCampaign,
+            utmSource: parsedFields.utmSource || 'meta_lead_ad',
+            utmMedium: parsedFields.utmMedium || 'paid',
+            utmCampaign: parsedFields.utmCampaign || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form'),
             bookingStatus: 'not-scheduled',
             leadSource: 'meta_lead_ad',
             metaLeadId: leadgen_id,
@@ -262,20 +330,18 @@ export const handleMetaLeadWebhook = async (req, res) => {
           });
 
           await newBooking.save();
-          console.log(`Meta lead saved: ${newBooking.bookingId} | ${clientName} | ${clientEmail} | Form: ${formName}`);
+          console.log(`Meta lead saved: ${newBooking.bookingId} | ${clientName} | ${clientEmail} | ${clientPhone} | Form: ${formName}`);
 
-          // Auto-trigger 'not-scheduled' workflows for new meta leads
           try {
-            const workflowResult = await triggerWorkflow(newBooking.bookingId, 'not-scheduled');
-            if (workflowResult.success && workflowResult.triggered) {
-              console.log(`✅ Not-scheduled workflows triggered for meta lead ${newBooking.bookingId}`);
+            const wfResult = await triggerWorkflow(newBooking.bookingId, 'not-scheduled');
+            if (wfResult.success && wfResult.triggered) {
+              console.log(`Not-scheduled workflows triggered for meta lead ${newBooking.bookingId}`);
             }
           } catch (wfError) {
-            console.error(`Failed to trigger not-scheduled workflows for meta lead ${newBooking.bookingId}:`, wfError.message);
+            console.error(`Failed to trigger workflows for meta lead ${newBooking.bookingId}:`, wfError.message);
           }
         }
 
-        // Discord notification: use the lead we merged with or the newly created one
         const targetBooking = existingLead || await CampaignBookingModel.findOne({ metaLeadId: leadgen_id });
         if (targetBooking) {
           try {
@@ -285,6 +351,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
               clientEmail: clientEmail || targetBooking.clientEmail,
               clientPhone: clientPhone || targetBooking.clientPhone || '',
               formName,
+              jobType: extracted.jobType || '',
               leadgenId: leadgen_id,
               adId: ad_id
             });
@@ -299,25 +366,27 @@ export const handleMetaLeadWebhook = async (req, res) => {
   }
 };
 
-/**
- * Send Discord notification for new Meta Lead
- */
+// ---------------------------------------------------------------------------
+// Discord notification
+// ---------------------------------------------------------------------------
+
 async function sendMetaLeadDiscordNotification(leadInfo) {
   const webhookUrl = process.env.DISCORD_WEB_HOOK_URL;
   if (!webhookUrl) return;
 
   const embed = {
     title: 'New Meta Lead Ad Submission',
-    color: 0x1877F2, // Facebook blue
+    color: 0x1877F2,
     fields: [
       { name: 'Name', value: leadInfo.clientName || 'N/A', inline: true },
       { name: 'Email', value: leadInfo.clientEmail || 'N/A', inline: true },
       { name: 'Phone', value: leadInfo.clientPhone || 'N/A', inline: true },
+      ...(leadInfo.jobType ? [{ name: 'Job Type', value: leadInfo.jobType, inline: true }] : []),
       { name: 'Form', value: leadInfo.formName || 'N/A', inline: true },
       { name: 'Booking ID', value: leadInfo.bookingId, inline: true },
     ],
     timestamp: new Date().toISOString(),
-    footer: { text: 'Meta Lead Ads -> Flashfire CRM' }
+    footer: { text: 'Meta Lead Ads → Flashfire CRM' }
   };
 
   await fetch(webhookUrl, {
@@ -327,19 +396,16 @@ async function sendMetaLeadDiscordNotification(leadInfo) {
   });
 }
 
-/**
- * Manual endpoint to test Meta lead creation (for debugging).
- * Uses same merge-by-email-or-phone logic as webhook: existing lead is updated with Meta fields.
- */
+// ---------------------------------------------------------------------------
+// Manual test endpoint
+// ---------------------------------------------------------------------------
+
 export const createMetaLeadManually = async (req, res) => {
   try {
     const { clientName, clientEmail, clientPhone, formName, adId } = req.body;
 
     if (!clientName || !clientEmail) {
-      return res.status(400).json({
-        success: false,
-        message: 'clientName and clientEmail are required'
-      });
+      return res.status(400).json({ success: false, message: 'clientName and clientEmail are required' });
     }
 
     const normalizedEmail = clientEmail.trim().toLowerCase();
@@ -355,12 +421,7 @@ export const createMetaLeadManually = async (req, res) => {
     if (existingLead) {
       await CampaignBookingModel.findOneAndUpdate(
         { bookingId: existingLead.bookingId },
-        {
-          $set: {
-            metaFormName: formName || null,
-            metaAdId: adId || null
-          }
-        }
+        { $set: { metaFormName: formName || null, metaAdId: adId || null } }
       );
       return res.status(200).json({
         success: true,
@@ -392,14 +453,13 @@ export const createMetaLeadManually = async (req, res) => {
 
     await newBooking.save();
 
-    // Auto-trigger 'not-scheduled' workflows for new meta leads
     try {
-      const workflowResult = await triggerWorkflow(newBooking.bookingId, 'not-scheduled');
-      if (workflowResult.success && workflowResult.triggered) {
-        console.log(`✅ Not-scheduled workflows triggered for manual meta lead ${newBooking.bookingId}`);
+      const wfResult = await triggerWorkflow(newBooking.bookingId, 'not-scheduled');
+      if (wfResult.success && wfResult.triggered) {
+        console.log(`Not-scheduled workflows triggered for manual meta lead ${newBooking.bookingId}`);
       }
     } catch (wfError) {
-      console.error(`Failed to trigger not-scheduled workflows for manual meta lead ${newBooking.bookingId}:`, wfError.message);
+      console.error(`Failed to trigger workflows for manual meta lead ${newBooking.bookingId}:`, wfError.message);
     }
 
     return res.status(201).json({
@@ -414,10 +474,6 @@ export const createMetaLeadManually = async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating Meta lead manually:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create Meta lead',
-      error: error.message
-    });
+    return res.status(500).json({ success: false, message: 'Failed to create Meta lead', error: error.message });
   }
 };
