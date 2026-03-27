@@ -2,6 +2,17 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import crypto from 'crypto';
 
+function buildCampaignGeneratedUrl(baseUrl, utmSource, utmMedium, utmCampaign, utmContent, utmTerm) {
+  const urlParams = new URLSearchParams();
+  urlParams.set('utm_source', utmSource);
+  urlParams.set('utm_medium', utmMedium || 'campaign');
+  if (utmCampaign) urlParams.append('utm_campaign', utmCampaign);
+  if (utmContent) urlParams.append('utm_content', utmContent);
+  if (utmTerm) urlParams.append('utm_term', utmTerm);
+  const path = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
+  return `${path}/?${urlParams.toString()}`;
+}
+
 // ==================== CREATE CAMPAIGN ====================
 export const createCampaign = async (req, res) => {
   try {
@@ -15,12 +26,13 @@ export const createCampaign = async (req, res) => {
     }
 
     const baseUrl = 'https://www.flashfirejobs.com';
+    const resolvedMedium = utmMedium || 'campaign';
     let utmSource;
-    let generatedUrl;
+    let displayName;
 
     if (explicitUtmSource && typeof explicitUtmSource === 'string' && /^[a-z0-9_-]+$/i.test(explicitUtmSource.trim())) {
       utmSource = explicitUtmSource.trim().toLowerCase();
-      generatedUrl = `${baseUrl}/?utm_source=${encodeURIComponent(utmSource)}`;
+      displayName = (campaignName && campaignName.trim()) || utmSource;
     } else {
       const name = (campaignName || '').trim();
       if (!name) {
@@ -34,29 +46,62 @@ export const createCampaign = async (req, res) => {
         .replace(/[^a-z0-9]+/g, '_')
         .replace(/^_+|_+$/g, '');
       utmSource = `${baseUtmSource}_${Date.now().toString().slice(-6)}`;
-      const urlParams = new URLSearchParams();
-      urlParams.append('utm_source', utmSource);
-      if (utmMedium) urlParams.append('utm_medium', utmMedium);
-      if (utmCampaign) urlParams.append('utm_campaign', utmCampaign);
-      if (utmContent) urlParams.append('utm_content', utmContent);
-      if (utmTerm) urlParams.append('utm_term', utmTerm);
-      generatedUrl = `${baseUrl}?${urlParams.toString()}`;
+      displayName = name;
     }
 
-    const displayName = (campaignName && campaignName.trim()) || utmSource;
+    const baseUtmForSuffix = utmSource;
+    const baseDisplayForSuffix = displayName;
+    let finalUtmSource = utmSource;
+    let finalDisplayName = displayName;
+    let n = 0;
 
-    const campaign = new CampaignModel({
-      campaignName: displayName,
-      utmSource,
-      utmMedium: utmMedium || 'campaign',
-      utmCampaign,
-      utmContent,
-      utmTerm,
-      generatedUrl,
-      baseUrl
-    });
+    let campaign;
+    let saved = false;
+    for (let saveAttempt = 0; saveAttempt < 30; saveAttempt++) {
+      while (await CampaignModel.exists({ utmSource: finalUtmSource })) {
+        n += 1;
+        finalUtmSource = `${baseUtmForSuffix}-${n}`;
+        finalDisplayName = `${baseDisplayForSuffix}-${n}`;
+      }
 
-    await campaign.save();
+      const generatedUrl = buildCampaignGeneratedUrl(
+        baseUrl,
+        finalUtmSource,
+        resolvedMedium,
+        utmCampaign,
+        utmContent,
+        utmTerm
+      );
+
+      campaign = new CampaignModel({
+        campaignName: finalDisplayName,
+        utmSource: finalUtmSource,
+        utmMedium: resolvedMedium,
+        utmCampaign,
+        utmContent,
+        utmTerm,
+        generatedUrl,
+        baseUrl
+      });
+
+      try {
+        await campaign.save();
+        saved = true;
+        break;
+      } catch (saveErr) {
+        if (saveErr.code !== 11000) throw saveErr;
+        n += 1;
+        finalUtmSource = `${baseUtmForSuffix}-${n}`;
+        finalDisplayName = `${baseDisplayForSuffix}-${n}`;
+      }
+    }
+
+    if (!saved || !campaign) {
+      return res.status(409).json({
+        success: false,
+        message: 'Campaign could not be created with a unique link. Please try again.'
+      });
+    }
 
     return res.status(201).json({
       success: true,
@@ -72,12 +117,11 @@ export const createCampaign = async (req, res) => {
 
   } catch (error) {
     console.error('Error creating campaign:', error);
-    
-    // Handle duplicate utm_source error
+
     if (error.code === 11000) {
       return res.status(409).json({
         success: false,
-        message: 'Campaign with similar name already exists. Please try a different name.'
+        message: 'Campaign could not be created with a unique link. Please try again.'
       });
     }
 
@@ -429,14 +473,14 @@ export const updateCampaign = async (req, res) => {
     if (isActive !== undefined) campaign.isActive = isActive;
     if (utmMedium !== undefined) {
       campaign.utmMedium = utmMedium;
-      // Regenerate URL
-      const urlParams = new URLSearchParams();
-      urlParams.append('utm_source', campaign.utmSource);
-      urlParams.append('utm_medium', utmMedium);
-      if (campaign.utmCampaign) urlParams.append('utm_campaign', campaign.utmCampaign);
-      if (campaign.utmContent) urlParams.append('utm_content', campaign.utmContent);
-      if (campaign.utmTerm) urlParams.append('utm_term', campaign.utmTerm);
-      campaign.generatedUrl = `${campaign.baseUrl}?${urlParams.toString()}`;
+      campaign.generatedUrl = buildCampaignGeneratedUrl(
+        campaign.baseUrl || 'https://www.flashfirejobs.com',
+        campaign.utmSource,
+        utmMedium,
+        campaign.utmCampaign,
+        campaign.utmContent,
+        campaign.utmTerm
+      );
     }
     if (utmCampaign !== undefined) campaign.utmCampaign = utmCampaign;
     if (utmContent !== undefined) campaign.utmContent = utmContent;
