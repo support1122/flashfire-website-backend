@@ -9,3 +9,4 @@ google-service-key.json
 .env.cleaned
 env
 .env.o
+/.omc
