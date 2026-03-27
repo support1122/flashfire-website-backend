@@ -196,6 +196,9 @@ function extractLeadFields(leadData) {
   const phone =
     getFieldValue(fd, 'whatsapp_number', 'WhatsApp number', 'whatsapp', 'phone_number', 'phone', 'mobile', 'mobile_number') ||
     parsed.phone ||
+    parsed.customFields?.whatsapp_number ||
+    parsed.customFields?.phone ||
+    parsed.customFields?.mobile ||
     '';
 
   const jobType =
