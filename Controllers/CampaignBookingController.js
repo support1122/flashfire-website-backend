@@ -20,6 +20,108 @@ import { sendScheduleEvent as sendGoogleAdsScheduleEvent } from '../Services/Goo
 import { sendScheduleEvent as sendLinkedInScheduleEvent } from '../Services/LinkedInConversionAPI.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 
+import { logReminderError } from '../Schema_Models/ReminderError.js';
+
+const PHONE_REGEX = /^\+?[1-9]\d{9,14}$/;
+
+/**
+ * Schedule all reminders (call, WhatsApp, Discord BDA) for a booking.
+ * Skips India numbers (+91). Skips if meeting is too soon (<10 min).
+ * Call internally schedules WhatsApp reminders.
+ */
+async function scheduleRemindersForBooking(booking, { source = 'manual' } = {}) {
+  const phone = booking.clientPhone;
+  const meetingStartISO = booking.scheduledEventStartTime?.toISOString?.() || booking.scheduledEventStartTime;
+  const results = { call: false, whatsapp: false, discord: false, skipped: null };
+
+  if (!meetingStartISO) {
+    results.skipped = 'no meeting time';
+    return results;
+  }
+
+  const meetingStart = new Date(meetingStartISO);
+  const delay = meetingStart.getTime() - Date.now() - (10 * 60 * 1000);
+
+  // Skip India numbers entirely
+  if (phone && phone.startsWith('+91')) {
+    results.skipped = 'india_number';
+    console.log(`⏭️ [scheduleRemindersForBooking] Skipping India number ${phone} for ${booking.bookingId}`);
+    return results;
+  }
+
+  // Schedule Discord BDA reminder (doesn't need phone)
+  try {
+    await scheduleDiscordMeetReminder({
+      bookingId: booking.bookingId,
+      clientName: booking.clientName || 'Valued Client',
+      clientEmail: booking.clientEmail || null,
+      meetingStartISO,
+      meetingLink: booking.calendlyMeetLink || booking.googleMeetUrl || null,
+      inviteeTimezone: booking.inviteeTimezone || null,
+      source,
+      metadata: { campaignId: booking.campaignId, utmSource: booking.utmSource },
+    });
+    results.discord = true;
+  } catch (err) {
+    console.warn(`⚠️ [scheduleRemindersForBooking] Discord reminder failed for ${booking.bookingId}:`, err.message);
+    logReminderError({
+      bookingId: booking.bookingId, clientEmail: booking.clientEmail, clientPhone: phone,
+      clientName: booking.clientName, category: 'discord', severity: 'error',
+      message: 'Failed to schedule Discord meet reminder: ' + err.message,
+      source: `CampaignBookingController.scheduleRemindersForBooking.${source}`
+    });
+  }
+
+  // Schedule call + WhatsApp (needs valid non-India phone and enough time)
+  if (phone && PHONE_REGEX.test(phone) && delay > 0) {
+    try {
+      const meetingStartUTC = DateTime.fromISO(meetingStartISO, { zone: 'utc' });
+      const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+
+      const callResult = await scheduleCall({
+        phoneNumber: phone,
+        meetingStartISO,
+        meetingTime: meetingTimeIndia,
+        inviteeName: booking.clientName,
+        inviteeEmail: booking.clientEmail,
+        source,
+        meetingLink: booking.calendlyMeetLink || booking.googleMeetUrl || null,
+        rescheduleLink: booking.calendlyRescheduleLink || 'https://calendly.com/flashfirejobs',
+        metadata: {
+          bookingId: booking.bookingId,
+          inviteeTimezone: booking.inviteeTimezone || null,
+        }
+      });
+
+      if (callResult.success) {
+        results.call = true;
+        results.whatsapp = true; // WhatsApp is scheduled inside scheduleCall
+        // Update booking with call ID
+        await CampaignBookingModel.findOneAndUpdate(
+          { bookingId: booking.bookingId },
+          { reminderCallJobId: callResult.callId }
+        );
+      }
+    } catch (err) {
+      console.warn(`⚠️ [scheduleRemindersForBooking] Call/WhatsApp failed for ${booking.bookingId}:`, err.message);
+      logReminderError({
+        bookingId: booking.bookingId, clientEmail: booking.clientEmail, clientPhone: phone,
+        clientName: booking.clientName, category: 'call', severity: 'error',
+        message: 'Failed to schedule call+WhatsApp: ' + err.message,
+        source: `CampaignBookingController.scheduleRemindersForBooking.${source}`
+      });
+    }
+  } else if (delay <= 0) {
+    results.skipped = 'meeting_too_soon';
+    console.log(`⏭️ [scheduleRemindersForBooking] Meeting too soon for call/WA: ${booking.bookingId}`);
+  } else {
+    results.skipped = 'invalid_or_missing_phone';
+  }
+
+  console.log(`📋 [scheduleRemindersForBooking] ${booking.bookingId}: call=${results.call}, wa=${results.whatsapp}, discord=${results.discord}, skipped=${results.skipped || 'none'}`);
+  return results;
+}
+
 const PLAN_CATALOG = {
   PRIME: { price: 99, currency: 'USD', displayPrice: '$99' },
   IGNITE: { price: 199, currency: 'USD', displayPrice: '$199' },
@@ -241,6 +343,13 @@ export const saveCalendlyBooking = async (bookingData) => {
         console.warn('Failed to update user booked status during meta sync:', userUpdateError.message);
       }
 
+      // Schedule reminders for meta-synced booking (frontend_direct path)
+      try {
+        await scheduleRemindersForBooking(mergedBooking, { source: 'frontend_meta_sync' });
+      } catch (reminderError) {
+        console.warn('⚠️ [saveCalendlyBooking] Reminder scheduling failed for meta-synced booking:', reminderError.message);
+      }
+
       return {
         success: true,
         data: mergedBooking,
@@ -313,6 +422,14 @@ export const saveCalendlyBooking = async (bookingData) => {
         scheduledEventStartTime: booking.scheduledEventStartTime,
         bookingCreatedAt: booking.bookingCreatedAt
       }, null, 2));
+    }
+
+    // Schedule reminders for this booking (call, WhatsApp, Discord BDA)
+    // This covers the frontend_direct path where Calendly webhook may not fire
+    try {
+      await scheduleRemindersForBooking(booking, { source: 'frontend_direct' });
+    } catch (reminderError) {
+      console.warn('⚠️ [saveCalendlyBooking] Reminder scheduling failed (booking saved):', reminderError.message);
     }
 
     // Send Facebook Conversion API event (non-blocking)
@@ -874,7 +991,10 @@ export const updateBookingStatus = async (req, res) => {
     }
 
     const updatePayload = {
-      bookingStatus: status
+      bookingStatus: status,
+      statusChangedAt: new Date(),
+      statusChangeSource: req.body.source || 'admin',
+      statusChangedBy: req.body.changedBy || req.headers['x-user-email'] || 'admin',
     };
 
     if (paymentPlanUpdate) {
@@ -1652,10 +1772,19 @@ export const createBookingManually = async (req, res) => {
 
     console.log('✅ Booking created manually:', newBooking.bookingId);
 
+    // Schedule all reminders (call, WhatsApp, Discord BDA) for the new booking
+    let reminderResults = null;
+    try {
+      reminderResults = await scheduleRemindersForBooking(newBooking, { source: 'manual' });
+    } catch (reminderError) {
+      console.warn('⚠️ Reminder scheduling failed for manual booking (booking saved):', reminderError.message);
+    }
+
     return res.status(201).json({
       success: true,
       message: 'Booking created successfully',
-      booking: newBooking
+      booking: newBooking,
+      reminders: reminderResults
     });
   } catch (error) {
     console.error('❌ Error creating booking manually:', error);

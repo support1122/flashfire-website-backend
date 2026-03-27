@@ -507,13 +507,19 @@ export async function processDueCalls() {
             .lean();
         }
         if (booking) {
-          if (booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') {
+          // Only cancel call if the status was changed by the CLIENT (via Calendly webhook).
+          // Admin/BDA manual status changes should NOT block calls — the meeting still needs coverage.
+          const isClientInitiated = booking.statusChangeSource === 'calendly';
+          if ((booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') && isClientInitiated) {
             await ScheduledCallModel.updateOne(
               { _id: call._id },
-              { status: 'cancelled', errorMessage: `Cancelled: booking status is ${booking.bookingStatus}` }
+              { status: 'cancelled', errorMessage: `Cancelled: booking ${booking.bookingStatus} by client (Calendly)` }
             );
-            console.log(`🛡️ [CallScheduler] Blocked call for ${booking.bookingStatus} booking:`, call.callId);
+            console.log(`🛡️ [CallScheduler] Blocked call for client-${booking.bookingStatus} booking:`, call.callId);
             continue;
+          }
+          if ((booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') && !isClientInitiated) {
+            console.log(`ℹ️ [CallScheduler] Status is ${booking.bookingStatus} but changed by ${booking.statusChangeSource || 'admin'} — making call anyway:`, call.callId);
           }
           const bookingMeetingTime = booking.scheduledEventStartTime
             ? new Date(booking.scheduledEventStartTime).getTime()

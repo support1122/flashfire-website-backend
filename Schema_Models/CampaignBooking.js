@@ -175,6 +175,20 @@ export const CampaignBookingSchema = new mongoose.Schema({
     enum: ['not-scheduled', 'scheduled', 'completed', 'canceled', 'rescheduled', 'no-show', 'ignored', 'paid'],
     default: 'scheduled'
   },
+  // Who/what changed the status last, and when
+  statusChangedAt: {
+    type: Date,
+    default: null
+  },
+  statusChangeSource: {
+    type: String,
+    enum: ['admin', 'calendly', 'system', 'bda', 'microservice'],
+    default: null
+  },
+  statusChangedBy: {
+    type: String, // email or identifier of who changed it
+    default: null
+  },
   paymentPlan: {
     name: {
       type: String,

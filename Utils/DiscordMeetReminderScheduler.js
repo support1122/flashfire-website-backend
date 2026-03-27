@@ -264,13 +264,19 @@ export async function processDueDiscordMeetReminders() {
             .lean();
         }
         if (booking) {
-          if (booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') {
+          // Only cancel reminders if the status was changed by the CLIENT (via Calendly webhook).
+          // Admin/BDA manual status changes should NOT block reminders — the meeting still needs coverage.
+          const isClientInitiated = booking.statusChangeSource === 'calendly';
+          if ((booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') && isClientInitiated) {
             await ScheduledDiscordMeetReminderModel.updateOne(
               { _id: reminder._id },
-              { status: 'cancelled', errorMessage: `Cancelled: booking status is ${booking.bookingStatus}` }
+              { status: 'cancelled', errorMessage: `Cancelled: booking ${booking.bookingStatus} by client (Calendly)` }
             );
-            console.log(`🛡️ [DiscordMeetReminder] Blocked reminder for ${booking.bookingStatus} booking:`, reminder.reminderId);
+            console.log(`🛡️ [DiscordMeetReminder] Blocked reminder for client-${booking.bookingStatus} booking:`, reminder.reminderId);
             continue;
+          }
+          if ((booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') && !isClientInitiated) {
+            console.log(`ℹ️ [DiscordMeetReminder] Status is ${booking.bookingStatus} but changed by ${booking.statusChangeSource || 'admin'} — sending reminder anyway:`, reminder.reminderId);
           }
           const bookingMeetingTime = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : null;
           const reminderMeetingTime = new Date(reminder.meetingStartISO).getTime();
@@ -290,12 +296,17 @@ export async function processDueDiscordMeetReminders() {
         );
 
         const headline = headlineForSendTime(meetingStart);
+        const claimedBda = booking?.claimedBy?.name || booking?.claimedBy?.email || null;
+        const claimLine = claimedBda
+          ? `Assigned BDA: ${claimedBda}`
+          : `⚠️ **NOT CLAIMED** — No BDA assigned, someone needs to join!`;
         const messageLines = [
           headline,
           '',
           `Client: ${reminder.clientName}`,
           `Time: ${meetingTimeWall}`,
           `Link: ${reminder.meetingLink || 'Not provided'}`,
+          claimLine,
           '',
           "BDA team, confirm attendance by typing **\"I'm in.\"** Let's close this.",
         ];
