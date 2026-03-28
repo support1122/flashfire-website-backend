@@ -485,3 +485,123 @@ export const createMetaLeadManually = async (req, res) => {
     return res.status(500).json({ success: false, message: 'Failed to create Meta lead', error: error.message });
   }
 };
+
+// ---------------------------------------------------------------------------
+// POST — Google Apps Script / Sheets → upsert by metaLeadId
+// ---------------------------------------------------------------------------
+
+function parseSheetCreatedTime(value) {
+  if (value == null || value === '') return new Date();
+  if (typeof value === 'number') {
+    if (value < 1e12) return new Date(value * 1000);
+    return new Date(value);
+  }
+  const d = new Date(value);
+  if (!Number.isNaN(d.getTime())) return d;
+  console.warn('meta-leads-from-sheet: invalid created_time, using now', { value });
+  return new Date();
+}
+
+/** Last 10 digits, numbers only (per sheet sync spec). */
+function normalizedPhoneLast10(phone) {
+  if (phone == null || phone === '') return null;
+  const digits = String(phone).replace(/\D/g, '');
+  return digits.length >= 10 ? digits.slice(-10) : null;
+}
+
+function generateBookingId() {
+  return `booking_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+export const upsertMetaLeadFromSheet = async (req, res) => {
+  try {
+    const body = req.body || {};
+    const {
+      id,
+      created_time,
+      ad_id,
+      form_id,
+      campaign_id,
+      adset_id,
+      form_name,
+      job_type,
+      email,
+      full_name,
+      phone
+    } = body;
+
+    const metaLeadId = id != null && id !== '' ? String(id).trim() : '';
+    if (!metaLeadId) {
+      console.warn('meta-leads-from-sheet: missing id');
+      return res.status(400).json({ success: false, message: 'id is required' });
+    }
+
+    const clientEmail = email != null ? String(email).trim().toLowerCase() : '';
+    if (!clientEmail) {
+      console.warn('meta-leads-from-sheet: missing email', { metaLeadId });
+      return res.status(400).json({ success: false, message: 'email is required' });
+    }
+
+    const now = new Date();
+    const bookingCreatedAt = parseSheetCreatedTime(created_time);
+    const clientName = (full_name != null ? String(full_name).trim() : '') || 'New lead';
+    const clientPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
+    const normalizedClientPhone = normalizedPhoneLast10(clientPhone);
+
+    const utmCampaign = ad_id != null && String(ad_id).trim() !== '' ? `meta_ad_${String(ad_id).trim()}` : 'meta_lead_form';
+
+    const anythingToKnow = `Job type: ${job_type != null ? String(job_type) : ''}`;
+
+    const filter = { metaLeadId };
+
+    const $set = {
+      utmSource: 'meta_lead_ad',
+      utmMedium: 'paid',
+      utmCampaign,
+      clientName,
+      clientEmail,
+      clientPhone,
+      normalizedClientPhone,
+      bookingCreatedAt,
+      leadSource: 'meta_lead_ad',
+      metaLeadId,
+      metaFormId: form_id != null ? String(form_id) : null,
+      metaAdId: ad_id != null ? String(ad_id) : null,
+      metaCampaignId: campaign_id != null ? String(campaign_id) : null,
+      metaAdsetId: adset_id != null ? String(adset_id) : null,
+      metaFormName: form_name != null ? String(form_name) : null,
+      anythingToKnow,
+      metaRawData: body,
+      bookingStatus: 'not-scheduled',
+      updatedAt: now
+    };
+
+    const result = await CampaignBookingModel.updateOne(
+      filter,
+      {
+        $set,
+        $setOnInsert: {
+          bookingId: generateBookingId(),
+          createdAt: now
+        }
+      },
+      { upsert: true, runValidators: true }
+    );
+
+    console.log('meta-leads-from-sheet: upsert ok', {
+      metaLeadId,
+      matched: result.matchedCount,
+      modified: result.modifiedCount,
+      upserted: result.upsertedCount
+    });
+
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    console.error('meta-leads-from-sheet:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to upsert Meta lead from sheet',
+      error: error.message
+    });
+  }
+};
