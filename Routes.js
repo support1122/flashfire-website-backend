@@ -99,7 +99,8 @@ import { sendScheduleEventManual, sendCustomEvent } from "./Controllers/Facebook
 import {
   verifyMetaWebhook,
   handleMetaLeadWebhook,
-  createMetaLeadManually
+  createMetaLeadManually,
+  upsertMetaLeadFromSheet
 } from "./Controllers/MetaLeadWebhookController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
@@ -418,6 +419,7 @@ export default function Routes(app) {
   app.get('/api/webhooks/meta-leads', verifyMetaWebhook); // Meta webhook verification (GET)
   app.post('/api/webhooks/meta-leads', handleMetaLeadWebhook); // Receive Meta Lead Ad submissions (POST)
   app.post('/api/meta-leads/manual', createMetaLeadManually); // Manually create Meta lead (for testing)
+  app.post('/meta-leads-from-sheet', upsertMetaLeadFromSheet); // Google Apps Script / Sheets → MongoDB upsert by metaLeadId
   // Fireflies Webhooks (DISABLED - Fireflies integration removed)
   // app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
   //   try {
