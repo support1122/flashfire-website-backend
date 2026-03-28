@@ -139,6 +139,39 @@ const builders = {
     ];
   },
 
+  meta_2: async ({ booking, step }) => {
+    const schedulingLink = step?.templateConfig?.schedulingLink
+      || booking.calendlyRescheduleLink
+      || DEFAULT_SCHEDULING_LINK;
+
+    return [
+      booking.clientName || 'Valued Client',
+      schedulingLink
+    ];
+  },
+
+  meta_31: async ({ booking, step }) => {
+    const schedulingLink = step?.templateConfig?.schedulingLink
+      || booking.calendlyRescheduleLink
+      || DEFAULT_SCHEDULING_LINK;
+
+    return [
+      booking.clientName || 'Valued Client',
+      schedulingLink
+    ];
+  },
+
+  meta_41: async ({ booking, step }) => {
+    const schedulingLink = step?.templateConfig?.schedulingLink
+      || booking.calendlyRescheduleLink
+      || DEFAULT_SCHEDULING_LINK;
+
+    return [
+      booking.clientName || 'Valued Client',
+      schedulingLink
+    ];
+  },
+
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
       throw new Error('Meeting date/time not available for cancelled1 template');

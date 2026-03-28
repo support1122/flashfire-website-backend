@@ -190,9 +190,20 @@ export async function executeWorkflowLog(log) {
         return;
       }
 
-      // Build template parameters from booking data (was previously sending empty [])
-      const templateName = log.step.templateName || log.step.templateId;
-      const parameters = await buildTemplateParameters(templateName, {
+      // Resolve the actual WATI template name from ID if templateName is missing
+      // This ensures buildTemplateParameters gets the real name (e.g., "meta_2") not the ID
+      let resolvedTemplateName = log.step.templateName;
+      if (!resolvedTemplateName && log.step.templateId) {
+        try {
+          resolvedTemplateName = await watiService.resolveTemplateName(null, log.step.templateId);
+          console.log(`[cronScheduler] Resolved template ID ${log.step.templateId} → name: ${resolvedTemplateName}`);
+        } catch (resolveErr) {
+          console.warn(`[cronScheduler] Could not resolve template ID ${log.step.templateId}:`, resolveErr.message);
+          resolvedTemplateName = log.step.templateId; // fallback
+        }
+      }
+
+      const parameters = await buildTemplateParameters(resolvedTemplateName || log.step.templateId, {
         booking,
         step: log.step,
         executedAt: new Date()
@@ -201,7 +212,7 @@ export async function executeWorkflowLog(log) {
       const result = await watiService.sendTemplateMessage({
         mobileNumber: booking.clientPhone,
         templateId: log.step.templateId,
-        templateName: log.step.templateName,
+        templateName: resolvedTemplateName,
         parameters,
         campaignId: `workflow_${log.workflowId}_${Date.now()}`
       });

@@ -334,41 +334,35 @@ async function handleCreatedEvent(req, res, payload) {
     const metaMeetLink = meetLink && meetLink !== 'Not Provided' ? meetLink : null;
     let metaReminderResults = { discord: null, call: null };
 
-    // 1. Schedule Discord "meeting in ~5 minutes" reminder (skip for India numbers)
-    const isIndiaNumberMeta = metaPhone && metaPhone.startsWith('+91');
-    if (isIndiaNumberMeta) {
-      Logger.info('Skipping Discord meet reminder for India number (meta-synced)', { phone: metaPhone, bookingId: mergedBooking.bookingId });
-      metaReminderResults.discord = 'skipped_india';
-    } else {
-      try {
-        if (startISO) {
-          await scheduleDiscordMeetReminder({
-            bookingId: mergedBooking.bookingId,
-            clientName: inviteeName || mergedBooking.clientName || 'Valued Client',
-            clientEmail: inviteeEmail || null,
-            meetingStartISO: startISO,
-            meetingLink: metaMeetLink,
-            inviteeTimezone,
-            source: 'calendly_meta_sync',
-            metadata: {
-              campaignId: mergedBooking.campaignId,
-              utmSource: mergedBooking.utmSource,
-            },
-          });
-          metaReminderResults.discord = 'scheduled';
-        }
-      } catch (discordReminderError) {
-        Logger.warn('Failed to schedule Discord meet reminder for meta-synced booking', {
-          error: discordReminderError.message,
+    // 1. Schedule Discord "meeting in ~5 minutes" reminder
+    try {
+      if (startISO) {
+        await scheduleDiscordMeetReminder({
           bookingId: mergedBooking.bookingId,
+          clientName: inviteeName || mergedBooking.clientName || 'Valued Client',
+          clientEmail: inviteeEmail || null,
+          meetingStartISO: startISO,
+          meetingLink: metaMeetLink,
+          inviteeTimezone,
+          source: 'calendly_meta_sync',
+          metadata: {
+            campaignId: mergedBooking.campaignId,
+            utmSource: mergedBooking.utmSource,
+          },
         });
-        logReminderError({
-          bookingId: mergedBooking.bookingId, clientEmail: inviteeEmail, clientPhone: metaPhone,
-          clientName: inviteeName, category: 'discord', severity: 'error',
-          message: 'Failed to schedule Discord meet reminder for meta-synced booking: ' + discordReminderError.message,
-          source: 'CalendlyWebhookController.handleCreatedEvent.metaSync'
-        });
+        metaReminderResults.discord = 'scheduled';
       }
+    } catch (discordReminderError) {
+      Logger.warn('Failed to schedule Discord meet reminder for meta-synced booking', {
+        error: discordReminderError.message,
+        bookingId: mergedBooking.bookingId,
+      });
+      logReminderError({
+        bookingId: mergedBooking.bookingId, clientEmail: inviteeEmail, clientPhone: metaPhone,
+        clientName: inviteeName, category: 'discord', severity: 'error',
+        message: 'Failed to schedule Discord meet reminder for meta-synced booking: ' + discordReminderError.message,
+        source: 'CalendlyWebhookController.handleCreatedEvent.metaSync'
+      });
     }
 
     // 2. Send Discord notification about the booking
@@ -398,9 +392,7 @@ async function handleCreatedEvent(req, res, payload) {
 
     // 3. Schedule call + WhatsApp reminders (if valid phone and meeting is far enough)
     const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-    if (metaPhone && metaPhone.startsWith('+91')) {
-      Logger.info('Skipping India number for meta-synced booking', { phone: metaPhone });
-    } else if (metaPhone && phoneRegex.test(metaPhone) && delay > 0) {
+    if (metaPhone && phoneRegex.test(metaPhone) && delay > 0) {
       try {
         let rescheduleLinkForReminder = mergedBooking.calendlyRescheduleLink || rescheduleLink;
         if (!rescheduleLinkForReminder && mergedBooking.calendlyInviteeUri) {
@@ -679,16 +671,7 @@ async function handleCreatedEvent(req, res, payload) {
     });
   }
 
-  // Skip ALL reminders (calls, WhatsApp, Discord BDA) for India numbers (+91)
-  if (inviteePhone && inviteePhone.startsWith("+91")) {
-    Logger.info('Skipping India number - no reminders scheduled', { phone: inviteePhone });
-    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, `⏭️ Skipping all reminders for India number: ${inviteePhone} (${inviteeName || 'Unknown'})`);
-    }
-    return res.status(200).json({ message: 'Skipped India number - no reminders scheduled' });
-  }
-
-  // Schedule Discord "meeting in 2 minutes" reminder (only for non-India numbers)
+  // Schedule Discord "meeting in 2 minutes" reminder
   try {
     const startISO = payload?.scheduled_event?.start_time;
     if (startISO) {
@@ -1243,10 +1226,6 @@ async function handleRescheduledEvent(req, res, payload) {
         Logger.warn('Invalid phone number format, skipping reminder scheduling', {
           clientPhone
         });
-      } else if (clientPhone.startsWith('+91')) {
-        Logger.info('Skipping India number for rescheduled meeting', {
-          clientPhone
-        });
       } else {
         const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
         const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
@@ -1299,11 +1278,8 @@ async function handleRescheduledEvent(req, res, payload) {
       }
     }
 
-    // Schedule Discord "meeting in 2 minutes" reminder for NEW time (skip for India numbers)
-    const isIndiaReschedule = clientPhone && clientPhone.startsWith('+91');
-    if (isIndiaReschedule) {
-      Logger.info('Skipping Discord meet reminder for India number (reschedule)', { clientPhone, bookingId: bookingRecord?.bookingId });
-    } else {
+    // Schedule Discord "meeting in 2 minutes" reminder for NEW time
+    {
       try {
         if (newStartTime) {
           await scheduleDiscordMeetReminder({
