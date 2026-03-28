@@ -91,6 +91,12 @@ export const CampaignSchema = new mongoose.Schema({
     type: String,
     default: 'https://www.flashfirejobs.com'
   },
+  /** Optional path after flashfirejobs.com for an extra tracked link (e.g. blog/promo). Same utm_source applies. */
+  customPath: {
+    type: String,
+    default: null,
+    trim: true
+  },
   // Tracking metrics
   totalClicks: {
     type: Number,

@@ -13,10 +13,23 @@ function buildCampaignGeneratedUrl(baseUrl, utmSource, utmMedium, utmCampaign, u
   return `${path}/?${urlParams.toString()}`;
 }
 
+/** Safe path segment(s) for https://www.flashfirejobs.com/{path}?utm_… — no .., no protocol. */
+function normalizeCustomPath(raw) {
+  if (raw == null || raw === '') return null;
+  let p = String(raw).trim();
+  if (!p) return null;
+  p = p.replace(/^\/+/, '').replace(/\/+$/, '');
+  if (!p) return null;
+  if (p.includes('..') || p.includes('//')) return null;
+  if (!/^[a-zA-Z0-9/_-]+$/.test(p)) return null;
+  if (p.length > 200) return null;
+  return p;
+}
+
 // ==================== CREATE CAMPAIGN ====================
 export const createCampaign = async (req, res) => {
   try {
-    const { campaignName, utmSource: explicitUtmSource, utmMedium, utmCampaign, utmContent, utmTerm } = req.body;
+    const { campaignName, utmSource: explicitUtmSource, utmMedium, utmCampaign, utmContent, utmTerm, customPath: rawCustomPath } = req.body;
 
     if (!campaignName && !explicitUtmSource) {
       return res.status(400).json({
@@ -27,6 +40,17 @@ export const createCampaign = async (req, res) => {
 
     const baseUrl = 'https://www.flashfirejobs.com';
     const resolvedMedium = utmMedium || 'campaign';
+
+    let customPath = null;
+    if (rawCustomPath !== undefined && rawCustomPath !== null && String(rawCustomPath).trim() !== '') {
+      customPath = normalizeCustomPath(rawCustomPath);
+      if (!customPath) {
+        return res.status(400).json({
+          success: false,
+          message: 'Invalid custom path. Use letters, numbers, hyphens, underscores, and / only (no .. or //). Max 200 characters.'
+        });
+      }
+    }
     let utmSource;
     let displayName;
 
@@ -81,7 +105,8 @@ export const createCampaign = async (req, res) => {
         utmContent,
         utmTerm,
         generatedUrl,
-        baseUrl
+        baseUrl,
+        customPath
       });
 
       try {
@@ -189,6 +214,7 @@ export const getAllCampaigns = async (req, res) => {
             utmTerm: 1,
             generatedUrl: 1,
             baseUrl: 1,
+            customPath: 1,
             totalClicks: 1,
             totalButtonClicks: 1,
             uniqueVisitors: 1,
@@ -457,7 +483,7 @@ export const trackButtonClick = async (req, res) => {
 export const updateCampaign = async (req, res) => {
   try {
     const { campaignId } = req.params;
-    const { campaignName, isActive, utmMedium, utmCampaign, utmContent, utmTerm } = req.body;
+    const { campaignName, isActive, utmMedium, utmCampaign, utmContent, utmTerm, customPath: rawCustomPath } = req.body;
 
     const campaign = await CampaignModel.findOne({ campaignId });
 
@@ -471,20 +497,40 @@ export const updateCampaign = async (req, res) => {
     // Update allowed fields
     if (campaignName !== undefined) campaign.campaignName = campaignName;
     if (isActive !== undefined) campaign.isActive = isActive;
+    const baseForUrl = campaign.baseUrl || 'https://www.flashfirejobs.com';
+
     if (utmMedium !== undefined) {
       campaign.utmMedium = utmMedium;
+    }
+    if (utmCampaign !== undefined) campaign.utmCampaign = utmCampaign;
+    if (utmContent !== undefined) campaign.utmContent = utmContent;
+    if (utmTerm !== undefined) campaign.utmTerm = utmTerm;
+
+    if (rawCustomPath !== undefined) {
+      if (rawCustomPath === null || String(rawCustomPath).trim() === '') {
+        campaign.customPath = null;
+      } else {
+        const normalized = normalizeCustomPath(rawCustomPath);
+        if (!normalized) {
+          return res.status(400).json({
+            success: false,
+            message: 'Invalid custom path. Use letters, numbers, hyphens, underscores, and / only (no .. or //).'
+          });
+        }
+        campaign.customPath = normalized;
+      }
+    }
+
+    if (utmMedium !== undefined || utmCampaign !== undefined || utmContent !== undefined || utmTerm !== undefined) {
       campaign.generatedUrl = buildCampaignGeneratedUrl(
-        campaign.baseUrl || 'https://www.flashfirejobs.com',
+        baseForUrl,
         campaign.utmSource,
-        utmMedium,
+        campaign.utmMedium || 'campaign',
         campaign.utmCampaign,
         campaign.utmContent,
         campaign.utmTerm
       );
     }
-    if (utmCampaign !== undefined) campaign.utmCampaign = utmCampaign;
-    if (utmContent !== undefined) campaign.utmContent = utmContent;
-    if (utmTerm !== undefined) campaign.utmTerm = utmTerm;
 
     campaign.updatedAt = new Date();
     await campaign.save();
