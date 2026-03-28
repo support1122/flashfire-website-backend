@@ -49,8 +49,6 @@ export const syncDiscordBdaReminders = async (req, res) => {
     const bookings = await CampaignBookingModel.find({
       scheduledEventStartTime: { $gte: minMeetingStart },
       bookingStatus: { $in: ['scheduled', 'completed'] },
-      // Skip India numbers - no reminders for them
-      clientPhone: { $not: /^\+91/ },
     })
       .select('bookingId clientName clientEmail clientPhone scheduledEventStartTime calendlyMeetLink inviteeTimezone')
       .lean();

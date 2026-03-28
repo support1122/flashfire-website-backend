@@ -993,11 +993,21 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
         throw new Error('Client phone number not available');
       }
 
-      // Build template parameters using shared builder (single source of truth)
-      const templateName = step.templateName || step.templateId;
-      const parameters = await buildTemplateParameters(templateName, { booking, step, executedAt });
+      // Resolve the actual WATI template name from ID if templateName is missing
+      let resolvedTemplateName = step.templateName;
+      if (!resolvedTemplateName && step.templateId) {
+        try {
+          resolvedTemplateName = await watiService.resolveTemplateName(null, step.templateId);
+          console.log(`[WorkflowController] Resolved template ID ${step.templateId} → name: ${resolvedTemplateName}`);
+        } catch (resolveErr) {
+          console.warn(`[WorkflowController] Could not resolve template ID:`, resolveErr.message);
+          resolvedTemplateName = step.templateId;
+        }
+      }
 
-      const watiTemplateName = step.templateName;
+      const parameters = await buildTemplateParameters(resolvedTemplateName || step.templateId, { booking, step, executedAt });
+
+      const watiTemplateName = resolvedTemplateName;
       const watiTemplateId = step.templateId;
       
       const result = await watiService.sendTemplateMessage({

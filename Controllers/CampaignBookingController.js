@@ -26,7 +26,7 @@ const PHONE_REGEX = /^\+?[1-9]\d{9,14}$/;
 
 /**
  * Schedule all reminders (call, WhatsApp, Discord BDA) for a booking.
- * Skips India numbers (+91). Skips if meeting is too soon (<10 min).
+ * Skips if meeting is too soon (<10 min).
  * Call internally schedules WhatsApp reminders.
  */
 async function scheduleRemindersForBooking(booking, { source = 'manual' } = {}) {
@@ -41,13 +41,6 @@ async function scheduleRemindersForBooking(booking, { source = 'manual' } = {}) 
 
   const meetingStart = new Date(meetingStartISO);
   const delay = meetingStart.getTime() - Date.now() - (10 * 60 * 1000);
-
-  // Skip India numbers entirely
-  if (phone && phone.startsWith('+91')) {
-    results.skipped = 'india_number';
-    console.log(`⏭️ [scheduleRemindersForBooking] Skipping India number ${phone} for ${booking.bookingId}`);
-    return results;
-  }
 
   // Schedule Discord BDA reminder (doesn't need phone)
   try {
@@ -1447,7 +1440,7 @@ export const rescheduleBooking = async (req, res) => {
     const delayMs = parsedTime.getTime() - Date.now() - 10 * 60 * 1000;
     if (phone && delayMs > 0) {
       const phoneRegex = /^\+?[1-9]\d{9,14}$/;
-      if (phoneRegex.test(phone) && !phone.startsWith('+91')) {
+      if (phoneRegex.test(phone)) {
         try {
           const meetingStartUTC = DateTime.fromJSDate(parsedTime, { zone: 'utc' });
           const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');

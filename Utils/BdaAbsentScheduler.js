@@ -88,8 +88,6 @@ export async function pollForAbsentBDAs() {
         $lte: oneMinAgo,
         $gte: twoHoursAgo,
       },
-      // Skip India numbers - no reminders are scheduled for them
-      clientPhone: { $not: /^\+91/ },
     })
       .select(
         'bookingId clientName clientEmail clientPhone scheduledEventStartTime scheduledEventEndTime claimedBy'
