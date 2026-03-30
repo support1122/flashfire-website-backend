@@ -572,7 +572,6 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       metaFormName: form_name != null ? String(form_name) : null,
       anythingToKnow,
       metaRawData: body,
-      bookingStatus: 'not-scheduled',
       updatedAt: now
     };
 
@@ -582,11 +581,14 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
         $set,
         $setOnInsert: {
           bookingId: generateBookingId(),
+          bookingStatus: 'not-scheduled',
           createdAt: now
         }
       },
       { upsert: true, runValidators: true }
     );
+
+    const isNewLead = result.upsertedCount > 0;
 
     console.log('meta-leads-from-sheet: upsert ok', {
       metaLeadId,
@@ -595,7 +597,30 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       upserted: result.upsertedCount
     });
 
-    return res.status(200).json({ success: true });
+    // Trigger not-scheduled workflows for NEW leads only
+    let workflowResult = null;
+    if (isNewLead) {
+      try {
+        const inserted = await CampaignBookingModel.findOne({ metaLeadId }).lean();
+        if (inserted && inserted.bookingId) {
+          workflowResult = await triggerWorkflow(inserted.bookingId, 'not-scheduled');
+          if (workflowResult.success && workflowResult.triggered) {
+            console.log(`meta-leads-from-sheet: workflows triggered for ${inserted.bookingId}`);
+          } else {
+            console.log(`meta-leads-from-sheet: no workflows triggered for ${inserted.bookingId}`, workflowResult.message || '');
+          }
+        }
+      } catch (wfError) {
+        console.error(`meta-leads-from-sheet: workflow trigger failed for metaLeadId=${metaLeadId}:`, wfError.message);
+        // Don't fail the response — lead is already saved
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      isNewLead,
+      workflowTriggered: workflowResult?.triggered || false
+    });
   } catch (error) {
     console.error('meta-leads-from-sheet:', error);
     return res.status(500).json({
