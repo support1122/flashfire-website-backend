@@ -482,14 +482,19 @@ async function processScheduledItems() {
     const currentHour = nowIST.hour;
     const currentMinute = nowIST.minute;
 
-    // Check for WhatsApp workflow window (11 PM IST)
-    const isWhatsAppWorkflowWindow = currentHour === WHATSAPP_WORKFLOW_HOUR && currentMinute >= WHATSAPP_WORKFLOW_MINUTE && currentMinute < WHATSAPP_WORKFLOW_MINUTE + 15;
-    
-    // Check for Email workflow window (8-10 PM IST)
-    const isEmailWorkflowWindow = currentHour >= EMAIL_WORKFLOW_START_HOUR && currentHour < EMAIL_WORKFLOW_END_HOUR;
-    
     // Legacy send window for campaigns (7:30 PM IST)
     const isSendWindow = currentHour === SEND_HOUR && currentMinute >= SEND_MINUTE && currentMinute < SEND_MINUTE + 15;
+
+    // Recover workflow logs left in "processing" (crash / timeout after claim)
+    const stuckMs = Math.max(60000, Number(process.env.WORKFLOW_LOG_STUCK_MS) || 15 * 60 * 1000);
+    const stuckBefore = new Date(Date.now() - stuckMs);
+    const stuckReset = await WorkflowLogModel.updateMany(
+      { status: 'processing', claimedAt: { $ne: null, $lte: stuckBefore } },
+      { $set: { status: 'scheduled', claimedAt: null, scheduledFor: now } }
+    );
+    if (stuckReset.modifiedCount > 0) {
+      console.log(`[cronScheduler] Reset ${stuckReset.modifiedCount} stuck workflow log(s) from processing → scheduled`);
+    }
 
     // Atomic claim pattern: use findOneAndUpdate to claim one log at a time.
     // This prevents duplicate execution when multiple cron ticks or server instances overlap.
@@ -520,39 +525,25 @@ async function processScheduledItems() {
       }
     }
 
-    // 1. Hour-based workflows execute immediately (no window restriction)
+    // 1. Hour-based workflows: run as soon as scheduledFor <= now (every cron tick).
     await claimAndExecute(
       { 'step.hoursAfter': { $gt: 0 } },
       'Hour-based (immediate)'
     );
 
-    // 2. Day-based email workflows — only during email window (8-10 PM IST)
-    if (isEmailWorkflowWindow) {
-      await claimAndExecute(
-        { 'step.channel': 'email', $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }] },
-        'Email workflows (8-10 PM IST)'
-      );
-    }
+    // 2–3. Day-based email & WhatsApp: run whenever due.
+    // calculateScheduledDate() already sets channel-specific wall time (8–10 PM IST email, 11 PM IST WhatsApp).
+    // Do NOT gate on a second "send window" here — cron runs every :00/:15/:30/:45, so a 15-minute window
+    // (e.g. 23:00–23:14) missed the next tick at 23:15 and left jobs stuck until the next day.
+    await claimAndExecute(
+      { 'step.channel': 'email', $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }] },
+      'Day-based email workflows'
+    );
 
-    // 3. Day-based WhatsApp workflows — only during WhatsApp window (11 PM IST)
-    if (isWhatsAppWorkflowWindow) {
-      await claimAndExecute(
-        { 'step.channel': 'whatsapp', $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }] },
-        'WhatsApp workflows (11 PM IST)'
-      );
-    }
-
-    // Log waiting workflows outside their windows (for monitoring)
-    if (!isEmailWorkflowWindow || !isWhatsAppWorkflowWindow) {
-      const waitingCount = await WorkflowLogModel.countDocuments({
-        status: 'scheduled',
-        scheduledFor: { $lte: now },
-        $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }]
-      });
-      if (waitingCount > 0) {
-        console.log(`[cronScheduler] ${waitingCount} day-based workflows waiting for their send windows`);
-      }
-    }
+    await claimAndExecute(
+      { 'step.channel': 'whatsapp', $or: [{ 'step.hoursAfter': { $exists: false } }, { 'step.hoursAfter': 0 }] },
+      'Day-based WhatsApp workflows'
+    );
 
     if (isSendWindow) {
       const scheduledCampaigns = await ScheduledEmailCampaignModel.find({
