@@ -21,6 +21,15 @@ import crypto from 'crypto';
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { CalendlyWebhookDedupeModel } from '../Schema_Models/CalendlyWebhookDedupe.js';
 
+/** Compare stored Date / ISO string to Calendly start_time (same instant within 2 min). */
+function sameScheduledInstant(stored, isoFromPayload) {
+  if (stored == null || isoFromPayload == null) return false;
+  const a = stored instanceof Date ? stored.getTime() : new Date(stored).getTime();
+  const b = new Date(isoFromPayload).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
+  return Math.abs(a - b) < 120000;
+}
+
 // In-memory cache for Discord duplication check
 const discordMessageCache = new Map();
 
@@ -242,7 +251,33 @@ async function handleCreatedEvent(req, res, payload) {
   };
   const existingBooking = await CampaignBookingModel.findOne(duplicateQuery);
 
-  if (existingBooking) {
+  // Same invitee URI already stored = Calendly retry or duplicate delivery
+  if (inviteeUri) {
+    const uriAlready = await CampaignBookingModel.findOne({ calendlyInviteeUri: inviteeUri }).lean();
+    if (uriAlready) {
+      Logger.warn('Duplicate invitee.created — calendlyInviteeUri already in DB', { inviteeUri });
+      return res.status(200).json({
+        success: true,
+        duplicate: true,
+        message: 'Duplicate webhook (invitee uri already processed)',
+      });
+    }
+  }
+
+  const emailsMatch =
+    inviteeEmail &&
+    existingBooking &&
+    String(inviteeEmail).trim().toLowerCase() === String(existingBooking.clientEmail || '').trim().toLowerCase();
+
+  /** Frontend capture often saves first without calendlyInviteeUri; merge webhook instead of skipping Discord. */
+  const mergedFromFrontendCapture =
+    !!existingBooking &&
+    !!inviteeUri &&
+    !existingBooking.calendlyInviteeUri &&
+    !!emailsMatch &&
+    sameScheduledInstant(existingBooking.scheduledEventStartTime, scheduledStartISO);
+
+  if (existingBooking && !mergedFromFrontendCapture) {
     Logger.warn('🔄 Duplicate booking detected - already exists in database', {
       email: inviteeEmail,
       phone: inviteePhone,
@@ -275,7 +310,46 @@ async function handleCreatedEvent(req, res, payload) {
     }
   }
 
+  let newBooking = null;
+  if (mergedFromFrontendCapture) {
+    newBooking = await CampaignBookingModel.findOneAndUpdate(
+      { bookingId: existingBooking.bookingId },
+      {
+        $set: {
+          calendlyEventUri: payload?.scheduled_event?.uri || null,
+          calendlyInviteeUri: inviteeUri,
+          calendlyMeetLink: meetLink,
+          calendlyRescheduleLink: rescheduleLink || null,
+          scheduledEventStartTime: payload?.scheduled_event?.start_time ?? existingBooking.scheduledEventStartTime,
+          scheduledEventEndTime: payload?.scheduled_event?.end_time ?? null,
+          inviteeTimezone: inviteeTimezone || null,
+          anythingToKnow: anythingToKnow ?? existingBooking.anythingToKnow,
+          questionsAndAnswers: payload?.questions_and_answers ?? existingBooking.questionsAndAnswers,
+          userAgent: req.headers['user-agent'],
+          ipAddress: req.ip || req.connection.remoteAddress,
+          clientPhone: inviteePhone || existingBooking.clientPhone,
+          clientName: inviteeName || existingBooking.clientName,
+          utmSource: utmSource || existingBooking.utmSource,
+          utmMedium: utmMedium ?? existingBooking.utmMedium,
+          utmCampaign: utmCampaign ?? existingBooking.utmCampaign,
+          utmContent: utmContent ?? existingBooking.utmContent,
+          utmTerm: utmTerm ?? existingBooking.utmTerm,
+          bookingStatus: 'scheduled',
+        }
+      },
+      { new: true }
+    );
+    Logger.info('✅ Merged Calendly invitee.created into existing booking (frontend capture)', {
+      bookingId: newBooking?.bookingId,
+      inviteeUri,
+    });
+    if (!newBooking) {
+      return res.status(500).json({ success: false, error: 'Failed to merge Calendly data into booking' });
+    }
+  }
+
   try {
+  if (!mergedFromFrontendCapture) {
   // META LEAD SYNC: Check if there's an existing meta lead with 'not-scheduled' status
   // matching by email or phone (without country code). If found, upgrade it to 'scheduled'
   // and merge Calendly booking data into it instead of creating a new booking.
@@ -500,9 +574,11 @@ async function handleCreatedEvent(req, res, payload) {
       reminders: metaReminderResults
     });
   }
+  } // end if (!mergedFromFrontendCapture) — meta lead sync
 
   // Find campaign by UTM source
   let campaignId = null;
+  if (!mergedFromFrontendCapture) {
   let campaign = await CampaignModel.findOne({ utmSource });
 
   if (campaign) {
@@ -539,7 +615,7 @@ async function handleCreatedEvent(req, res, payload) {
   }
 
   // Create booking object
-  const newBooking = new CampaignBookingModel({
+  newBooking = new CampaignBookingModel({
     campaignId,
     utmSource: utmSource || 'direct',
     utmMedium,
@@ -565,6 +641,7 @@ async function handleCreatedEvent(req, res, payload) {
   });
 
   await newBooking.save();
+  } // end if (!mergedFromFrontendCapture) — campaign + new booking
 
   // Mark user as booked
   try {
@@ -1380,8 +1457,8 @@ async function handleRescheduledEvent(req, res, payload) {
 
 async function handleCanceledEvent(req, res, payload) {
   try {
-    const clientEmail = payload?.email || payload?.invitee?.email || null;
-    const clientName = payload?.name || payload?.invitee?.name || 'Valued Client';
+    const clientEmail = payload?.invitee?.email || payload?.email || null;
+    const clientName = payload?.invitee?.name || payload?.name || 'Valued Client';
 
     const canceledBy = payload?.cancellation?.canceled_by || payload?.canceled_by || 'unknown';
     const cancelReason = payload?.cancellation?.reason || payload?.cancel_reason || 'No reason provided';
