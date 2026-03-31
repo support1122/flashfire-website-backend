@@ -5,8 +5,8 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test test/*.test.mjs",
-    "start": "node index.js",
-    "worker": "node Utils/worker.js",
+    "start": "node --max-old-space-size=${MAX_OLD_SPACE_SIZE_MB:-1400} index.js",
+    "worker": "node --max-old-space-size=${MAX_OLD_SPACE_SIZE_MB:-768} Utils/worker.js",
     "dev": "nodemon index.js"
   },
   "keywords": [],
