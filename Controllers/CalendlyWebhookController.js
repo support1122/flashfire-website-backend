@@ -19,6 +19,7 @@ import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js
 import { DateTime } from 'luxon';
 import crypto from 'crypto';
 import { logReminderError } from '../Schema_Models/ReminderError.js';
+import { CalendlyWebhookDedupeModel } from '../Schema_Models/CalendlyWebhookDedupe.js';
 
 // In-memory cache for Discord duplication check
 const discordMessageCache = new Map();
@@ -226,14 +227,18 @@ async function handleCreatedEvent(req, res, payload) {
 
   const scheduledStartISO = payload?.scheduled_event?.start_time;
 
-  // DUPLICATE CHECK
+  // DUPLICATE CHECK (include Calendly invitee URI — unique per scheduled invite)
+  const inviteeUri = payload?.invitee?.uri || null;
+  const duplicateOr = [
+    inviteeUri ? { calendlyInviteeUri: inviteeUri } : null,
+    { clientEmail: inviteeEmail },
+    inviteePhone ? { clientPhone: inviteePhone } : null,
+    meetLink && meetLink !== 'Not Provided' ? { calendlyMeetLink: meetLink } : null,
+  ].filter(Boolean);
+
   const duplicateQuery = {
     scheduledEventStartTime: scheduledStartISO,
-    $or: [
-      { clientEmail: inviteeEmail },
-      inviteePhone ? { clientPhone: inviteePhone } : null,
-      meetLink && meetLink !== 'Not Provided' ? { calendlyMeetLink: meetLink } : null,
-    ].filter(Boolean)
+    $or: duplicateOr,
   };
   const existingBooking = await CampaignBookingModel.findOne(duplicateQuery);
 
@@ -252,6 +257,25 @@ async function handleCreatedEvent(req, res, payload) {
     });
   }
 
+  let calendlyDedupeKey = null;
+  if (inviteeUri) {
+    calendlyDedupeKey = `invitee.created:${inviteeUri}`;
+    try {
+      await CalendlyWebhookDedupeModel.create({ key: calendlyDedupeKey });
+    } catch (e) {
+      if (e.code === 11000) {
+        Logger.warn('Calendly invitee.created duplicate delivery suppressed', { inviteeUri });
+        return res.status(200).json({
+          success: true,
+          duplicate: true,
+          message: 'Duplicate webhook delivery suppressed (invitee uri)',
+        });
+      }
+      throw e;
+    }
+  }
+
+  try {
   // META LEAD SYNC: Check if there's an existing meta lead with 'not-scheduled' status
   // matching by email or phone (without country code). If found, upgrade it to 'scheduled'
   // and merge Calendly booking data into it instead of creating a new booking.
@@ -761,20 +785,17 @@ async function handleCreatedEvent(req, res, payload) {
       console.warn('⚠️ [MongoDB Scheduler] Failed to schedule:', mongoResult.error);
     }
 
-    // Log success message to Discord
-    const scheduledMessage = `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reschedule Link: ${rescheduleLinkForReminder}\n• Reminder: 10 minutes before meeting`;
-    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
-      await DiscordConnect(process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL, scheduledMessage);
-    }
-
-    // WhatsApp reminders are scheduled internally by scheduleCall() above
-
-    const discordWebhookUrl = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
-    if (discordWebhookUrl) {
-      await DiscordConnect(discordWebhookUrl, `✅ Scheduled calls: ${scheduledJobs.join(', ')}`);
+    // Single Discord post for reminder-call success (was two back-to-back posts to the same webhook)
+    const reminderWebhook = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+    if (reminderWebhook) {
+      const scheduledMessage =
+        `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reschedule Link: ${rescheduleLinkForReminder}\n• Reminder: 10 minutes before meeting\n• Scheduled: ${scheduledJobs.join(', ')}`;
+      await DiscordConnect(reminderWebhook, scheduledMessage);
     } else {
       Logger.warn('Discord webhook URL not configured');
     }
+
+    // WhatsApp reminders are scheduled internally by scheduleCall() above
 
     return res.status(200).json({
       message: 'Webhook received & calls scheduled',
@@ -797,6 +818,12 @@ async function handleCreatedEvent(req, res, payload) {
       );
     }
     return res.status(200).json({ message: 'No valid phone, booking saved.' });
+  }
+  } catch (err) {
+    if (calendlyDedupeKey) {
+      await CalendlyWebhookDedupeModel.deleteOne({ key: calendlyDedupeKey }).catch(() => {});
+    }
+    throw err;
   }
 }
 
