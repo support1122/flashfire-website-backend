@@ -42,11 +42,32 @@ function getTimezoneAbbreviation(timezone, meetingStart) {
  * Used by cancelled1 and flashfire_appointment_reminder templates.
  */
 function buildMeetingTimeParams(booking) {
-  const meetingStart = new Date(booking.scheduledEventStartTime);
+  const rawStart = booking.scheduledEventStartTime;
+  if (rawStart == null || rawStart === '') {
+    throw new Error('scheduledEventStartTime is missing for template');
+  }
+  const meetingStart = rawStart instanceof Date ? rawStart : new Date(rawStart);
+  if (Number.isNaN(meetingStart.getTime())) {
+    throw new Error('scheduledEventStartTime is not a valid date');
+  }
   const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
-  const meetingEndUTC = booking.scheduledEventEndTime
-    ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime), { zone: 'utc' })
-    : meetingStartUTC.plus({ minutes: 15 });
+  if (!meetingStartUTC.isValid) {
+    throw new Error('Could not parse scheduledEventStartTime for template');
+  }
+  let meetingEndUTC;
+  if (booking.scheduledEventEndTime) {
+    const rawEnd = booking.scheduledEventEndTime instanceof Date
+      ? booking.scheduledEventEndTime
+      : new Date(booking.scheduledEventEndTime);
+    meetingEndUTC = Number.isNaN(rawEnd.getTime())
+      ? meetingStartUTC.plus({ minutes: 15 })
+      : DateTime.fromJSDate(rawEnd, { zone: 'utc' });
+    if (!meetingEndUTC.isValid) {
+      meetingEndUTC = meetingStartUTC.plus({ minutes: 15 });
+    }
+  } else {
+    meetingEndUTC = meetingStartUTC.plus({ minutes: 15 });
+  }
 
   const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('MMM d');
 
