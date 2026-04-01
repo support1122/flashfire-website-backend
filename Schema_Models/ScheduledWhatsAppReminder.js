@@ -104,7 +104,7 @@ const ScheduledWhatsAppReminderSchema = new mongoose.Schema({
   // Source of the booking
   source: {
     type: String,
-    enum: ['calendly', 'manual', 'campaign', 'reschedule', 'debug', 'crm_followup'],
+    enum: ['calendly', 'calendly_meta_sync', 'manual', 'campaign', 'reschedule', 'debug', 'crm_followup'],
     default: 'calendly'
   },
   
