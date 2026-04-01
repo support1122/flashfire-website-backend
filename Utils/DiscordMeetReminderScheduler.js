@@ -47,7 +47,11 @@ export function getDiscordMeetReminderOffsetMinutes() {
 }
 
 export function formatMeetingWallTime(meetingStart, inviteeTimezone) {
-  const instant = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
+  if (!meetingStart) return 'Unknown';
+  const instant = meetingStart instanceof Date
+    ? DateTime.fromJSDate(meetingStart, { zone: 'utc' })
+    : DateTime.fromISO(String(meetingStart), { zone: 'utc' });
+  if (!instant.isValid) return 'Unknown';
   const zone =
     inviteeTimezone && typeof inviteeTimezone === 'string' && IANAZone.isValidZone(inviteeTimezone.trim())
       ? inviteeTimezone.trim()
@@ -315,7 +319,10 @@ export async function processDueDiscordMeetReminders() {
 
         logReminderDrift('discord_bda', reminder.reminderId, reminder.scheduledFor);
 
-        await DiscordConnect(DISCORD_MEET_2MIN_WEBHOOK_URL, content, false);
+        const sendResult = await DiscordConnect(DISCORD_MEET_2MIN_WEBHOOK_URL, content, false);
+        if (!sendResult.ok) {
+          throw new Error(`Discord send failed: ${sendResult.error || 'unknown'}`);
+        }
 
         const driftMs = Date.now() - new Date(reminder.scheduledFor).getTime();
         await ScheduledDiscordMeetReminderModel.updateOne(
