@@ -31,44 +31,40 @@ let pollInterval = null;
 
 
 /**
- * Determine timezone abbreviation (ET/PST) from meeting time
- * Checks the UTC offset to determine if meeting is in ET or PST timezone
- * ET: UTC-5 (EST) or UTC-4 (EDT) 
- * PST: UTC-8 (PST) or UTC-7 (PDT)
+ * Determine timezone abbreviation from IANA timezone name or meeting time.
+ * Prefers the actual IANA timezone from Calendly (e.g. 'America/Chicago' → 'CDT').
+ * Falls back to offset-based detection for backward compatibility.
+ *
+ * @param {string} meetingStartISO - ISO date string
+ * @param {string} [ianaTimezone]  - IANA timezone from Calendly invitee.timezone
  */
-function getTimezoneAbbreviation(meetingStartISO) {
+function getTimezoneAbbreviation(meetingStartISO, ianaTimezone) {
   try {
     const meetingStart = new Date(meetingStartISO);
     const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
-    
-    // Check PST timezone first (more specific offset)
+    if (!meetingStartUTC.isValid) return 'ET';
+
+    // If we have the actual IANA timezone from Calendly, use Luxon to get abbreviation
+    if (ianaTimezone && typeof ianaTimezone === 'string') {
+      const inZone = meetingStartUTC.setZone(ianaTimezone);
+      if (inZone.isValid) {
+        return inZone.toFormat('ZZZZ'); // e.g. "CDT", "PDT", "EST", "IST"
+      }
+    }
+
+    // Fallback: detect from UTC offset (legacy behavior)
     const meetingPST = meetingStartUTC.setZone('America/Los_Angeles');
-    const pstOffset = meetingPST.offset / 60; // Offset in hours from UTC
-    
-    // PST is UTC-8 (PST) or UTC-7 (PDT)
-    if (pstOffset === -8 || pstOffset === -7) {
-      return 'PST';
-    }
-    
-    // Check ET timezone
+    const pstOffset = meetingPST.offset / 60;
+    if (pstOffset === -8 || pstOffset === -7) return pstOffset === -8 ? 'PST' : 'PDT';
+
     const meetingET = meetingStartUTC.setZone('America/New_York');
-    const etOffset = meetingET.offset / 60; // Offset in hours from UTC
-    
-    // ET is UTC-5 (EST) or UTC-4 (EDT)
-    if (etOffset === -5 || etOffset === -4) {
-      return 'ET';
-    }
-    
-    // Default to ET if we can't determine (most common timezone for bookings)
-    console.warn('⚠️ [WhatsAppReminderScheduler] Could not determine timezone from offset, defaulting to ET', {
-      pstOffset,
-      etOffset,
-      meetingStartISO
-    });
+    const etOffset = meetingET.offset / 60;
+    if (etOffset === -5 || etOffset === -4) return etOffset === -5 ? 'EST' : 'EDT';
+
     return 'ET';
   } catch (error) {
-    console.warn('⚠️ [WhatsAppReminderScheduler] Error determining timezone, defaulting to ET:', error.message);
-    return 'ET'; // Default to ET
+    console.warn('[WhatsAppReminderScheduler] Error determining timezone, defaulting to ET:', error.message);
+    return 'ET';
   }
 }
 
@@ -130,8 +126,8 @@ export async function scheduleWhatsAppReminder({
     // Use default reschedule link if not provided
     const finalRescheduleLink = rescheduleLink || DEFAULT_RESCHEDULE_LINK;
 
-    // Determine timezone if not provided
-    const meetingTimezone = timezone || getTimezoneAbbreviation(meetingStartISO);
+    // Determine timezone if not provided — use IANA timezone from metadata for accurate abbreviation
+    const meetingTimezone = timezone || getTimezoneAbbreviation(meetingStartISO, metadata?.inviteeTimezone);
 
     // Create scheduled reminder
     const scheduledReminder = await ScheduledWhatsAppReminderModel.create({
@@ -264,7 +260,7 @@ export async function scheduleAllWhatsAppReminders({
         clientEmail,
         meetingLink: meetingLink || 'Not Provided',
         rescheduleLink: rescheduleLink || DEFAULT_RESCHEDULE_LINK,
-        timezone: timezone || getTimezoneAbbreviation(meetingStartISO),
+        timezone: timezone || getTimezoneAbbreviation(meetingStartISO, metadata?.inviteeTimezone),
         source,
         metadata: {
           ...metadata,
@@ -394,12 +390,20 @@ export async function scheduleAllWhatsAppReminders({
   // Ensure Discord BDA meeting reminder exists at 5 min before (same time as client WhatsApp)
   // Idempotent: no duplicate if already in DB. Covers previously booked meetings that get WA reminders but weren't in Calendly webhook flow.
   try {
-    const inviteeTimezone =
-      timezone === 'ET'
-        ? 'America/New_York'
-        : timezone === 'PST'
-          ? 'America/Los_Angeles'
-          : null;
+    const inviteeTimezone = metadata?.inviteeTimezone || (
+      timezone === 'ET'  ? 'America/New_York'  :
+      timezone === 'EST' ? 'America/New_York'  :
+      timezone === 'EDT' ? 'America/New_York'  :
+      timezone === 'PST' ? 'America/Los_Angeles' :
+      timezone === 'PDT' ? 'America/Los_Angeles' :
+      timezone === 'CST' ? 'America/Chicago'   :
+      timezone === 'CDT' ? 'America/Chicago'   :
+      timezone === 'MST' ? 'America/Denver'    :
+      timezone === 'MDT' ? 'America/Denver'    :
+      timezone === 'IST' ? 'Asia/Kolkata'      :
+      timezone === 'GST' ? 'Asia/Dubai'        :
+      null
+    );
     await scheduleDiscordMeetReminder({
       bookingId: metadata?.bookingId ?? null,
       clientName,
@@ -516,9 +520,11 @@ export async function cancelWhatsAppRemindersForClient({ clientEmail = null, pho
     // Cancel all matching reminders
     const updateResult = await ScheduledWhatsAppReminderModel.updateMany(
       query,
-      { 
-        status: 'cancelled',
-        errorMessage: 'Cancelled: Booking status changed to paid'
+      {
+        $set: {
+          status: 'cancelled',
+          errorMessage: 'Cancelled: Booking status changed to paid'
+        }
       }
     );
 
@@ -746,10 +752,10 @@ export async function processDueWhatsAppReminders() {
             );
           }
         } else {
-          const updatedReminder = await ScheduledWhatsAppReminderModel.findById(reminder._id);
-          const maxA = updatedReminder?.maxAttempts ?? 3;
+          // Use reminder object directly (already has incremented attempts from findOneAndUpdate)
+          const maxA = reminder.maxAttempts ?? 3;
 
-          if (updatedReminder.attempts >= maxA) {
+          if (reminder.attempts >= maxA) {
             await ScheduledWhatsAppReminderModel.updateOne(
               { _id: reminder._id },
               {
@@ -766,7 +772,7 @@ export async function processDueWhatsAppReminders() {
                 `📧 ${reminder.clientEmail || 'Unknown'}\n` +
                 `🗓️ ${reminder.meetingDate} @ ${reminder.meetingTime}\n` +
                 `⚠️ ${result.error}\n` +
-                `🔄 ${updatedReminder.attempts}/${maxA}`
+                `🔄 ${reminder.attempts}/${maxA}`
               );
             }
           } else {
@@ -777,7 +783,7 @@ export async function processDueWhatsAppReminders() {
                 errorMessage: result.error,
               }
             );
-            console.log(`🔄 [WhatsAppReminderScheduler] Reminder will retry (attempt ${updatedReminder.attempts}/${maxA}):`, reminder.reminderId);
+            console.log(`🔄 [WhatsAppReminderScheduler] Reminder will retry (attempt ${reminder.attempts}/${maxA}):`, reminder.reminderId);
           }
         }
       } catch (error) {

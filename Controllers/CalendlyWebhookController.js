@@ -183,7 +183,8 @@ async function handleCreatedEvent(req, res, payload) {
     }
   }
 
-  const meetingStartUTC = DateTime.fromISO(payload?.scheduled_event?.start_time, { zone: 'utc' });
+  const rawStartTime = payload?.scheduled_event?.start_time;
+  const meetingStartUTC = DateTime.fromISO(rawStartTime, { zone: 'utc' });
 
   // Determine invitee timezone (from Calendly webhook) if available
   const inviteeTimezone = payload?.invitee?.timezone || payload?.timezone || null;
@@ -192,8 +193,14 @@ async function handleCreatedEvent(req, res, payload) {
   // Fallback to America/Los_Angeles (PST/PDT) if Calendly doesn't send a timezone.
   const clientZone = inviteeTimezone || 'America/Los_Angeles';
 
-  const meetingTimeUS = meetingStartUTC.setZone(clientZone).toFormat('ff');
-  const meetingTimeIndia = meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+  // Guard against invalid DateTime — prevents "Invalid DateTime" in Discord/WhatsApp messages
+  // Append timezone abbreviation so the team can see which timezone the client is in
+  const meetingTimeUS = meetingStartUTC.isValid
+    ? meetingStartUTC.setZone(clientZone).toFormat('ff') + ' ' + meetingStartUTC.setZone(clientZone).toFormat('ZZZZ')
+    : `Unknown (raw: ${rawStartTime || 'null'})`;
+  const meetingTimeIndia = meetingStartUTC.isValid
+    ? meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff') + ' IST'
+    : `Unknown (raw: ${rawStartTime || 'null'})`;
   const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
   const bookedAt = new Date(payload?.created_at || new Date()).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
@@ -472,12 +479,13 @@ async function handleCreatedEvent(req, res, payload) {
       "Invitee Phone": metaPhone || 'Not Provided',
       "Google Meet Link": meetLink,
       "Reschedule Link": rescheduleLink || 'Not Provided',
-      "Meeting Time (Client US)": meetingTimeUS,
+      "Meeting Time (Client)": meetingTimeUS,
       "Meeting Time (Team India)": meetingTimeIndia,
+      "Client Timezone": inviteeTimezone || 'Not provided by Calendly',
       "Booked At": bookedAt,
       "UTM Source": mergedBooking.utmSource || utmSource,
       "Lead Source": 'meta_lead_ad (synced)',
-      "Database Status": "✅ META SYNCED → SCHEDULED"
+      "Database Status": "\u2705 META SYNCED \u2192 SCHEDULED"
     };
 
     if (!isDuplicateDiscord(metaBookingDetails)) {
@@ -508,7 +516,7 @@ async function handleCreatedEvent(req, res, payload) {
         const mongoResult = await scheduleCall({
           phoneNumber: metaPhone,
           meetingStartISO: startISO,
-          meetingTime: meetingTimeIndia,
+          meetingTime: meetingTimeUS,
           inviteeName: inviteeName || mergedBooking.clientName,
           inviteeEmail,
           source: 'calendly_meta_sync',
@@ -518,6 +526,7 @@ async function handleCreatedEvent(req, res, payload) {
             bookingId: mergedBooking.bookingId,
             eventUri: payload?.scheduled_event?.uri,
             inviteeTimezone: inviteeTimezone,
+            meetingTimeIndia,
             meetingEndISO: payload?.scheduled_event?.end_time || null,
           }
         });
@@ -729,13 +738,14 @@ async function handleCreatedEvent(req, res, payload) {
     "Google Meet Link": meetLink,
     "Real Google Meet Link": newBooking.googleMeetUrl || meetLink,
     "Reschedule Link": rescheduleLink || 'Not Provided',
-    "Meeting Time (Client US)": meetingTimeUS,
+    "Meeting Time (Client)": meetingTimeUS,
     "Meeting Time (Team India)": meetingTimeIndia,
+    "Client Timezone": inviteeTimezone || 'Not provided by Calendly',
     "Booked At": bookedAt,
     "UTM Source": utmSource,
     "UTM Medium": utmMedium || 'N/A',
     "UTM Campaign": utmCampaign || 'N/A',
-    "Database Status": "✅ SAVED"
+    "Database Status": "\u2705 SAVED"
   };
 
   if (payload?.tracking?.utm_source !== 'webpage_visit' && payload?.tracking?.utm_source !== null && payload?.tracking?.utm_source !== 'direct') {
@@ -833,7 +843,7 @@ async function handleCreatedEvent(req, res, payload) {
     const mongoResult = await scheduleCall({
       phoneNumber: inviteePhone,
       meetingStartISO: payload?.scheduled_event?.start_time,
-      meetingTime: meetingTimeIndia,
+      meetingTime: meetingTimeUS,
       inviteeName,
       inviteeEmail,
       source: 'calendly',
@@ -843,6 +853,7 @@ async function handleCreatedEvent(req, res, payload) {
         bookingId: newBooking?.bookingId,
         eventUri: payload?.scheduled_event?.uri,
         inviteeTimezone: inviteeTimezone,
+        meetingTimeIndia,
         meetingEndISO: meetingEndTime
       }
     });
@@ -866,7 +877,7 @@ async function handleCreatedEvent(req, res, payload) {
     const reminderWebhook = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
     if (reminderWebhook) {
       const scheduledMessage =
-        `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting: ${meetingTimeIndia} (IST)\n• Reschedule Link: ${rescheduleLinkForReminder}\n• Reminder: 10 minutes before meeting\n• Scheduled: ${scheduledJobs.join(', ')}`;
+        `📞 **Reminder Call Scheduled!**\n• MongoDB Call ID: ${mongoResult.callId}\n• Client: ${inviteeName} (${inviteePhone})\n• Meeting (Client): ${meetingTimeUS}\n• Meeting (India): ${meetingTimeIndia}\n• Reschedule Link: ${rescheduleLinkForReminder}\n• Reminder: 10 minutes before meeting\n• Scheduled: ${scheduledJobs.join(', ')}`;
       await DiscordConnect(reminderWebhook, scheduledMessage);
     } else {
       Logger.warn('Discord webhook URL not configured');
@@ -1332,7 +1343,14 @@ async function handleRescheduledEvent(req, res, payload) {
         });
       } else {
         const newMeetingStartUTC = DateTime.fromISO(newStartTime, { zone: 'utc' });
-        const newMeetingTimeIndia = newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff');
+        const reschInviteeTimezone = new_invitee?.timezone || bookingRecord?.inviteeTimezone || null;
+        const reschClientZone = reschInviteeTimezone || 'America/Los_Angeles';
+        const newMeetingTimeClient = newMeetingStartUTC.isValid
+          ? newMeetingStartUTC.setZone(reschClientZone).toFormat('ff') + ' ' + newMeetingStartUTC.setZone(reschClientZone).toFormat('ZZZZ')
+          : `Unknown (raw: ${newStartTime || 'null'})`;
+        const newMeetingTimeIndia = newMeetingStartUTC.isValid
+          ? newMeetingStartUTC.setZone('Asia/Kolkata').toFormat('ff') + ' IST'
+          : `Unknown (raw: ${newStartTime || 'null'})`;
 
         //Use reschedule URL from webhook with proper fallback chain
         const finalRescheduleLink = rescheduleUrl ||
@@ -1343,7 +1361,7 @@ async function handleRescheduledEvent(req, res, payload) {
           const scheduleCallResult = await scheduleCall({
             phoneNumber: clientPhone,
             meetingStartISO: newStartTime,
-            meetingTime: newMeetingTimeIndia,
+            meetingTime: newMeetingTimeClient,
             inviteeName: clientName,
             inviteeEmail: clientEmail,
             source: 'reschedule',
@@ -1354,7 +1372,8 @@ async function handleRescheduledEvent(req, res, payload) {
               rescheduledFrom: oldStartTime,
               rescheduledTo: newStartTime,
               meetingEndISO: newEndTime,
-              inviteeTimezone: new_invitee?.timezone || bookingRecord?.inviteeTimezone || null
+              meetingTimeIndia: newMeetingTimeIndia,
+              inviteeTimezone: reschInviteeTimezone
             }
           });
 
@@ -1417,8 +1436,8 @@ async function handleRescheduledEvent(req, res, payload) {
 
       await DiscordConnectForMeet(
         `🔄 Meeting Rescheduled: ${clientName} (${clientEmail})\n` +
-        `📅 Old Time: ${DateTime.fromISO(oldStartTime).toFormat('ff')}\n` +
-        `📅 New Time: ${DateTime.fromISO(newStartTime).toFormat('ff')}\n` +
+        `📅 Old Time: ${(() => { const d = DateTime.fromISO(oldStartTime); return d.isValid ? d.toFormat('ff') : (oldStartTime || 'Unknown'); })()}\n` +
+        `📅 New Time: ${(() => { const d = DateTime.fromISO(newStartTime); return d.isValid ? d.toFormat('ff') : (newStartTime || 'Unknown'); })()}\n` +
         `🔗 Reschedule URL: ${rescheduleUrl || 'NOT PROVIDED BY CALENDLY'}\n` +
         `❌ Old Reminders: Call ${oldCallCancelled ? '✓' : '✗'}, WhatsApp ${oldWhatsAppCancelled ? '✓' : '✗'}, BDA Meeting Reminder ${oldDiscordMeetCancelled ? '✓' : '✗'}\n` +
         `✅ New Reminders: Call ${newCallScheduled ? '✓' : '✗'}, WhatsApp ${newWhatsAppScheduled ? '✓' : '✗'}, BDA Meeting Reminder ✓\n\n` +
@@ -1632,7 +1651,7 @@ async function handleCanceledEvent(req, res, payload) {
     if (meetingStartISO) {
       try {
         const meetingTime = DateTime.fromISO(meetingStartISO, { zone: 'utc' });
-        meetingTimeFormatted = meetingTime.toFormat('ff');
+        meetingTimeFormatted = meetingTime.isValid ? meetingTime.toFormat('ff') : `Unknown (raw: ${meetingStartISO})`;
       } catch (timeError) {
         Logger.warn('Failed to format meeting time', { error: timeError.message });
       }

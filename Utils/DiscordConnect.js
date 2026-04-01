@@ -28,7 +28,11 @@ export const DiscordConnect = async (url, message, usePrefix = true) => {
     return { ok: false, error: 'no_url' };
   }
 
-  const content = usePrefix ? `🚨 App Update: ${message}` : message;
+  const DISCORD_MAX_CHARS = 2000;
+  let content = usePrefix ? `🚨 App Update: ${message}` : message;
+  if (typeof content === 'string' && content.length > DISCORD_MAX_CHARS) {
+    content = content.slice(0, DISCORD_MAX_CHARS - 15) + '\n…[truncated]';
+  }
   const preview = typeof message === 'string' ? message.substring(0, 120) : '[non-string]';
   console.log('📤 Sending Discord webhook:', preview);
 

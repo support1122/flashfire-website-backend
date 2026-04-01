@@ -287,22 +287,8 @@ app.use(express.urlencoded({ extended: false }));
 
 
 // -------------------- Discord Utility --------------------
-export const DiscordConnectForMeet = async (message) => {
-  const webhookURL = process.env.DISCORD_MEET_WEB_HOOK_URL;
-  try {
-    const response = await fetch(webhookURL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: `🚨 App Update: ${message}` }),
-    });
-
-    if (!response.ok) throw new Error(`Failed to send: ${response.statusText}`);
-
-    console.log('✅ Message sent to Discord!');
-  } catch (error) {
-    console.error('❌ Error sending message:', error);
-  }
-};
+// Use the shared DiscordConnect with retry/rate-limit handling instead of raw fetch
+export { DiscordConnectForMeet } from './Utils/DiscordConnect.js';
 
 
 
@@ -629,9 +615,12 @@ function buildCallSummaryMessage(scheduledCall, meetingInfo, To, From, CallSid) 
       }
       
       if (meetingInfo.meetingTime && meetingInfo.meetingTime !== 'Unknown') {
-        summary += `📆 **Meeting:** ${meetingInfo.meetingTime}\n`;
+        summary += `📆 **Meeting (Client):** ${meetingInfo.meetingTime}\n`;
       }
-      
+      if (meetingInfo.meetingTimeIndia) {
+        summary += `📆 **Meeting (India):** ${meetingInfo.meetingTimeIndia}\n`;
+      }
+
       summary += `🎫 **Twilio SID:** ${CallSid}\n`;
       
       // Add separator between statuses (except for last one)
@@ -681,10 +670,47 @@ app.post("/call-status", async (req, res) => {
       scheduledCall = await ScheduledCallModel.findOne({ twilioCallSid: CallSid });
       
       if (scheduledCall) {
+        // Fix meetingTime if it's "Invalid DateTime" — reformat from the ISO date
+        let meetingTimeDisplay = scheduledCall.meetingTime || 'Unknown';
+        if (meetingTimeDisplay === 'Invalid DateTime' && scheduledCall.meetingStartISO) {
+          try {
+            const dt = DateTime.fromJSDate(
+              scheduledCall.meetingStartISO instanceof Date
+                ? scheduledCall.meetingStartISO
+                : new Date(scheduledCall.meetingStartISO),
+              { zone: 'utc' }
+            );
+            if (dt.isValid) {
+              meetingTimeDisplay = dt.setZone('Asia/Kolkata').toFormat('ff');
+            }
+          } catch { /* keep existing value */ }
+        }
+
+        // Also derive India time for team reference
+        let meetingTimeIndia = '';
+        if (scheduledCall.meetingStartISO) {
+          try {
+            const dtIndia = DateTime.fromJSDate(
+              scheduledCall.meetingStartISO instanceof Date
+                ? scheduledCall.meetingStartISO
+                : new Date(scheduledCall.meetingStartISO),
+              { zone: 'utc' }
+            );
+            if (dtIndia.isValid) {
+              meetingTimeIndia = dtIndia.setZone('Asia/Kolkata').toFormat('ff');
+            }
+          } catch { /* ignore */ }
+        }
+        // Use metadata.meetingTimeIndia if stored (backward compat)
+        if (!meetingTimeIndia && scheduledCall.metadata?.meetingTimeIndia) {
+          meetingTimeIndia = scheduledCall.metadata.meetingTimeIndia;
+        }
+
         meetingInfo = {
           inviteeName: scheduledCall.inviteeName || 'Unknown',
           inviteeEmail: scheduledCall.inviteeEmail || 'Unknown',
-          meetingTime: scheduledCall.meetingTime || 'Unknown'
+          meetingTime: meetingTimeDisplay,
+          meetingTimeIndia,
         };
         
         // Track status history
@@ -762,9 +788,13 @@ app.post("/call-status", async (req, res) => {
     }
     
     if (meetingInfo.meetingTime && meetingInfo.meetingTime !== 'Unknown') {
-      msg += `📆 **Meeting:** ${meetingInfo.meetingTime}\n`;
+      msg += `📆 **Meeting (Client):** ${meetingInfo.meetingTime}\n`;
     }
-    
+    if (meetingInfo.meetingTimeIndia) {
+      msg += `📆 **Meeting (India):** ${meetingInfo.meetingTimeIndia}\n`;
+    }
+
+    msg += `🎫 **Twilio SID:** ${CallSid}\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
     // Send Discord notification if configured
@@ -796,6 +826,170 @@ app.post("/call-status", async (req, res) => {
 // -------------------- Calendly Webhook --------------------
 app.post('/calendly-webhook', handleCalendlyWebhook);
 app.post("/twilio-ivr", TwilioReminder);
+
+// -------------------- /send/temp — Test all Discord notification types --------------------
+app.post('/send/temp', async (req, res) => {
+  try {
+    const {
+      clientName = 'Test Client',
+      clientEmail = 'test@example.com',
+      phoneNumber = '+19135551234',
+      meetingStartISO,
+      bdaEmail = 'bda@example.com',
+      inviteeTimezone = 'America/New_York',
+    } = req.body || {};
+
+    const meetingStart = meetingStartISO
+      ? new Date(meetingStartISO)
+      : new Date(Date.now() + 15 * 60 * 1000);
+
+    const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
+    const clientZone = inviteeTimezone || 'America/Los_Angeles';
+    // Include timezone abbreviation (e.g. "PDT", "CDT", "IST")
+    const tzAbbr = meetingStartUTC.isValid ? meetingStartUTC.setZone(clientZone).toFormat('ZZZZ') : '';
+    const formattedClient = meetingStartUTC.isValid
+      ? meetingStartUTC.setZone(clientZone).toFormat('ff') + ' ' + tzAbbr
+      : 'Unknown';
+    const formattedIndia = meetingStartUTC.isValid
+      ? meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff') + ' IST'
+      : 'Unknown';
+
+    const callSid = `CA_TEST_${Date.now().toString(36)}`;
+    const bookingId = `test_${Date.now()}`;
+    const results = {};
+
+    const callWebhook = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+    const meetWebhook = process.env.DISCORD_MEET_WEB_HOOK_URL;
+
+    // 1. Meeting Booked notification — exact same format as real CalendlyWebhookController
+    if (meetWebhook) {
+      try {
+        const bookingDetails = {
+          'Booking ID': bookingId,
+          'Campaign ID': 'test_campaign',
+          'Invitee Name': clientName,
+          'Invitee Email': clientEmail,
+          'Invitee Phone': phoneNumber,
+          'Google Meet Link': 'https://meet.google.com/test-link',
+          'Real Google Meet Link': 'https://meet.google.com/test-link',
+          'Reschedule Link': 'https://calendly.com/reschedulings/test',
+          'Meeting Time (Client)': formattedClient,
+          'Meeting Time (Team India)': formattedIndia,
+          'Client Timezone': inviteeTimezone || 'Not provided',
+          'Booked At': new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' }),
+          'UTM Source': 'test',
+          'UTM Medium': 'N/A',
+          'UTM Campaign': 'N/A',
+          'Database Status': '\u2705 SAVED (TEST)',
+        };
+        const r = await DiscordConnect(meetWebhook, JSON.stringify(bookingDetails, null, 2));
+        results.meetingBooked = { success: r.ok, error: r.error };
+      } catch (err) {
+        results.meetingBooked = { success: false, error: err.message };
+      }
+    } else {
+      results.meetingBooked = { success: false, error: 'DISCORD_MEET_WEB_HOOK_URL not configured' };
+    }
+
+    // 1b. Call Scheduled notification
+    if (callWebhook) {
+      try {
+        const callScheduledMsg =
+          `\u{1F4C5} **Call Scheduled (MongoDB)**\n` +
+          `\u{1F4DE} Phone: ${phoneNumber}\n` +
+          `\u{1F464} Name: ${clientName}\n` +
+          `\u{1F4E7} Email: ${clientEmail}\n` +
+          `\u23F0 Call at: ${new Date(meetingStart.getTime() - 10 * 60 * 1000).toISOString()}\n` +
+          `\u{1F4C6} Meeting (Client): ${formattedClient}\n` +
+          `\u{1F4C6} Meeting (India): ${formattedIndia}\n` +
+          `\u23F3 In: 10 minutes\n` +
+          `\u{1F516} Source: test`;
+        const r = await DiscordConnect(callWebhook, callScheduledMsg);
+        results.callScheduled = { success: r.ok, error: r.error };
+      } catch (err) {
+        results.callScheduled = { success: false, error: err.message };
+      }
+    }
+
+    // 2-4. Call status progression (initiated, ringing, completed)
+    if (callWebhook) {
+      for (const status of ['initiated', 'ringing', 'completed']) {
+        const statusDate = new Date().toUTCString();
+        let msg = `\u{1F6A8} **App Update: ${status}**\n`;
+        msg += `\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n`;
+        msg += `\u{1F4DE} **To:** ${phoneNumber}\n`;
+        msg += `\u{1F464} **From:** +14722138424\n`;
+        msg += `\u{1F464} **Name:** ${clientName}\n`;
+        msg += `\u{1F464} **Status:** ${status}\n`;
+        msg += `\u{1F464} **Answered By:** ${status === 'completed' ? 'human' : 'Unknown'}\n`;
+        if (status === 'completed') {
+          msg += `\u23F1\uFE0F **Duration:** 15 seconds\n`;
+        }
+        msg += `\u{1F464} **Call SID:** ${callSid}\n`;
+        msg += `\u{1F464} **Timestamp:** ${statusDate}\n`;
+        msg += `\u{1F4E7} **Email:** ${clientEmail}\n`;
+        msg += `\u{1F4C6} **Meeting (Client):** ${formattedClient}\n`;
+        msg += `\u{1F4C6} **Meeting (India):** ${formattedIndia}\n`;
+        msg += `\u{1F3AB} **Twilio SID:** ${callSid}\n`;
+        msg += `\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501`;
+
+        try {
+          const r = await DiscordConnect(callWebhook, msg, false);
+          results[`call_${status}`] = { success: r.ok, error: r.error };
+        } catch (err) {
+          results[`call_${status}`] = { success: false, error: err.message };
+        }
+      }
+    } else {
+      results.call_initiated = { success: false, error: 'DISCORD_REMINDER_CALL_WEBHOOK_URL not configured' };
+    }
+
+    // 5. Meeting reminder (hot lead)
+    if (meetWebhook) {
+      try {
+        const minutesUntil = Math.max(0, Math.round((meetingStart.getTime() - Date.now()) / 60000));
+        const reminderMsg = [
+          `\u{1F525} **Hot Lead \u2014 Meeting in ~${minutesUntil} minutes**`,
+          ``,
+          `**Client:** ${clientName}`,
+          `**Time (Client):** ${formattedClient}`,
+          `**Time (India):** ${formattedIndia}`,
+          `**Link:** https://meet.google.com/test-link`,
+          `**Assigned BDA:** ${bdaEmail}`,
+          ``,
+          `BDA team, confirm attendance by typing **"I'm in."** Let's close this.`,
+        ].join('\n');
+        const r = await DiscordConnect(meetWebhook, reminderMsg, false);
+        results.hotLead = { success: r.ok, error: r.error };
+      } catch (err) {
+        results.hotLead = { success: false, error: err.message };
+      }
+    }
+
+    // Summary
+    const totalSent = Object.values(results).filter(r => r.success).length;
+    const totalFailed = Object.values(results).filter(r => !r.success).length;
+
+    Logger.info('/send/temp completed', { totalSent, totalFailed });
+
+    res.json({
+      status: totalFailed === 0 ? 'all_sent' : totalSent === 0 ? 'all_failed' : 'partial',
+      totalSent,
+      totalFailed,
+      meetingTime: { client: formattedClient, india: formattedIndia, timezone: inviteeTimezone, iso: meetingStart.toISOString() },
+      results,
+      webhooks: {
+        DISCORD_MEET_WEB_HOOK_URL: !!meetWebhook,
+        DISCORD_REMINDER_CALL_WEBHOOK_URL: !!callWebhook,
+        DISCORD_BDA_ATTENDANCE_WEBHOOK_URL: !!process.env.DISCORD_BDA_ATTENDANCE_WEBHOOK_URL,
+      },
+    });
+  } catch (error) {
+    Logger.error('/send/temp error', { error: error.message, stack: error.stack });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // -------------------- Worker Setup --------------------
 // Worker is now handled in Utils/worker.js to avoid duplicate connections
 // This reduces Redis connection count and prevents "Too many requests" errors
