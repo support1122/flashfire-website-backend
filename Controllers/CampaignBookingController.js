@@ -18,6 +18,7 @@ import { sendScheduleEvent } from '../Services/FacebookConversionAPI.js';
 import { sendScheduleEvent as sendGoogleAdsScheduleEvent } from '../Services/GoogleAdsConversionAPI.js';
 import { sendScheduleEvent as sendLinkedInScheduleEvent } from '../Services/LinkedInConversionAPI.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
+import { crmUserMetaLeadsOnly } from '../Middlewares/CrmAuth.js';
 
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 
@@ -1880,7 +1881,6 @@ export const getLeadsPaginated = async (req, res) => {
     const {
       page = 1,
       limit = 50,
-      utmSource,
       search,
       fromDate,
       toDate,
@@ -1890,6 +1890,11 @@ export const getLeadsPaginated = async (req, res) => {
       status,
       qualification
     } = req.query;
+
+    let utmSource = req.query.utmSource;
+    if (crmUserMetaLeadsOnly(req)) {
+      utmSource = 'meta_lead_ad';
+    }
 
     const pageNum = parseInt(page);
     const limitNum = parseInt(limit);
@@ -2220,7 +2225,6 @@ export const getLeadsPaginated = async (req, res) => {
 export const getLeadsIds = async (req, res) => {
   try {
     const {
-      utmSource,
       search,
       fromDate,
       toDate,
@@ -2231,6 +2235,11 @@ export const getLeadsIds = async (req, res) => {
       qualification,
       limit = '5000'
     } = req.query;
+
+    let utmSource = req.query.utmSource;
+    if (crmUserMetaLeadsOnly(req)) {
+      utmSource = 'meta_lead_ad';
+    }
 
     const limitNum = Math.min(5000, Math.max(1, parseInt(String(limit), 10) || 5000));
     let matchQuery = {};
@@ -2243,7 +2252,19 @@ export const getLeadsIds = async (req, res) => {
     } else if (status && status !== 'all') {
       matchQuery.bookingStatus = status;
     }
-    if (utmSource && utmSource !== 'all') matchQuery.utmSource = utmSource;
+    if (utmSource && utmSource !== 'all') {
+      if (utmSource === 'meta_lead_ad') {
+        matchQuery.$and = matchQuery.$and || [];
+        matchQuery.$and.push({
+          $or: [
+            { metaLeadId: { $exists: true, $ne: null } },
+            { leadSource: 'meta_lead_ad' }
+          ]
+        });
+      } else {
+        matchQuery.utmSource = utmSource;
+      }
+    }
     if (normalizedPlanName && normalizedPlanName !== 'ALL') matchQuery['paymentPlan.name'] = normalizedPlanName;
     if (minAmount || maxAmount) {
       matchQuery['paymentPlan.price'] = {};
@@ -2281,6 +2302,7 @@ export const getLeadsIds = async (req, res) => {
         $or: [
           { scheduledEventStartTime: { $exists: true, $ne: null } },
           { leadSource: 'meta_lead_ad' },
+          { metaLeadId: { $exists: true, $ne: null } },
           { bookingStatus: 'not-scheduled' }
         ]
       });
@@ -2691,7 +2713,11 @@ export const getMeetingLinks = async (req, res) => {
 // ==================== LEADS ANALYTICS (Qualified Leads Graphs) ====================
 export const getLeadsAnalytics = async (req, res) => {
   try {
-    const { fromDate, toDate, qualification, utmSource, status, planName, minAmount, maxAmount } = req.query;
+    const { fromDate, toDate, qualification, status, planName, minAmount, maxAmount } = req.query;
+    let utmSource = req.query.utmSource;
+    if (crmUserMetaLeadsOnly(req)) {
+      utmSource = 'meta_lead_ad';
+    }
 
     // Build base match query - use scheduledEventStartTime for date (matches "Meetings from X to Y" / table)
     const matchQuery = {};

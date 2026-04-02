@@ -72,4 +72,22 @@ export function requireCrmPermission(permission) {
   };
 }
 
+/** True if CRM user may only access Meta-scoped lead APIs (not full Leads). */
+export function crmUserMetaLeadsOnly(req) {
+  const perms = req.crmUser?.permissions;
+  if (!Array.isArray(perms)) return false;
+  return perms.includes('meta_leads') && !perms.includes('leads');
+}
+
+export function requireCrmAnyPermission(permissions) {
+  const list = Array.isArray(permissions) ? permissions : [];
+  return (req, res, next) => {
+    const perms = req.crmUser?.permissions;
+    if (!Array.isArray(perms) || !list.some((p) => perms.includes(p))) {
+      return res.status(403).json({ success: false, error: 'Insufficient permission' });
+    }
+    return next();
+  };
+}
+
 
