@@ -147,7 +147,7 @@ import {
 // Redis/BullBoard removed — scheduling handled by MongoDB-based JobScheduler + UnifiedScheduler
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
-import { requireCrmAdmin, requireCrmUser, requireCrmPermission } from './Middlewares/CrmAuth.js';
+import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission } from './Middlewares/CrmAuth.js';
 import {
   getAvailableLeads,
   getLeadByEmail,
@@ -348,9 +348,9 @@ export default function Routes(app) {
   app.post('/api/facebook-conversion/schedule', sendScheduleEventManual); // Manually send Schedule event (testing)
   app.post('/api/facebook-conversion/custom', sendCustomEvent); // Send custom conversion event (testing)
   
-  app.get('/api/leads/paginated', requireCrmUser, requireCrmPermission('leads'), getLeadsPaginated);
-  app.get('/api/leads/ids', requireCrmUser, requireCrmPermission('leads'), getLeadsIds);
-  app.get('/api/leads/analytics', requireCrmUser, requireCrmPermission('leads'), getLeadsAnalytics);
+  app.get('/api/leads/paginated', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsPaginated);
+  app.get('/api/leads/ids', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsIds);
+  app.get('/api/leads/analytics', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsAnalytics);
   app.get('/api/meeting-links', requireCrmUser, requireCrmPermission('meeting_links'), getMeetingLinks);
 
   app.get('/api/campaign-bookings/:bookingId/custom-workflows', requireCrmUser, getCustomWorkflowsForBooking);

@@ -8,6 +8,7 @@ const CRM_PERMISSION_KEYS = [
   'all_data',
   'workflows',
   'leads',
+  'meta_leads',
   'claim_leads',
   'meeting_links',
   'bda_admin',
