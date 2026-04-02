@@ -1,18 +1,11 @@
-import { Queue } from 'bullmq';
 import dotenv from 'dotenv';
 import WatiService from '../Utils/WatiService.js';
 import { WhatsAppCampaignModel } from '../Schema_Models/WhatsAppCampaign.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { redisConnection } from '../Utils/queue.js';
 import { scheduleWhatsAppBatch } from '../Utils/JobScheduler.js';
 import { getIST10AM } from '../Utils/cronScheduler.js';
 
 dotenv.config();
-
-let whatsappQueue = null;
-if (redisConnection) {
-  whatsappQueue = new Queue('whatsappQueue', { connection: redisConnection });
-}
 
 // ==================== GET WATI TEMPLATES ====================
 export const getWatiTemplates = async (req, res) => {

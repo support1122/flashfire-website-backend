@@ -12,6 +12,14 @@ import { buildTemplateParameters } from './TemplateParameterBuilder.js';
 import { safeErrorDetails } from './safeErrorDetails.js';
 import { sendgridCircuitBreaker } from './CircuitBreaker.js';
 import { clientHasPaidBooking } from '../Controllers/WorkflowController.js';
+import { ScheduledWhatsAppReminderModel } from '../Schema_Models/ScheduledWhatsAppReminder.js';
+import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
+import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
+import { scheduleCall } from './CallScheduler.js';
+import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
+import { scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
+import { DiscordConnect } from './DiscordConnect.js';
+import { normalizePhoneForReminders, buildCallId } from './MeetingReminderUtils.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
@@ -588,6 +596,247 @@ async function processScheduledItems() {
   }
 }
 
+/**
+ * Runs at 10 AM IST daily.
+ * Ensures every meeting in the next 24 hours has its call, WA, and Discord reminders.
+ * Also cancels pending reminders for client-canceled meetings.
+ * Production-ready: idempotent, handles all edge cases.
+ */
+async function runDailyReminderBackfill() {
+  const DISCORD_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+  const report = { ensured: 0, cancelled: 0, skipped: 0, errors: 0, details: [] };
+
+  try {
+    console.log('🔁 [DailyBackfill] Starting 10am IST daily reminder backfill...');
+
+    const nowIST  = DateTime.now().setZone(IST_TIMEZONE);
+    const windowStart = nowIST.toJSDate();
+    const windowEnd   = nowIST.plus({ hours: 24 }).toJSDate();
+
+    // ── Part 1: Cancel reminders for client-canceled bookings ──────────────
+    const canceledBookings = await CampaignBookingModel.find({
+      bookingStatus: 'canceled',
+      statusChangeSource: 'calendly',
+      scheduledEventStartTime: { $gte: windowStart, $lt: windowEnd },
+    }).lean();
+
+    for (const b of canceledBookings) {
+      try {
+        const startMs = new Date(b.scheduledEventStartTime).getTime();
+        const phone   = b.clientPhone ? normalizePhoneForReminders(b.clientPhone) : null;
+
+        // Cancel WA reminders
+        const waResult = await ScheduledWhatsAppReminderModel.updateMany(
+          {
+            clientEmail: b.clientEmail,
+            meetingStartISO: { $gte: new Date(startMs - 60000), $lte: new Date(startMs + 60000) },
+            status: 'pending',
+          },
+          { $set: { status: 'cancelled', errorMessage: 'Cancelled: client canceled meeting (daily backfill)' } }
+        );
+
+        // Cancel call
+        if (phone) {
+          const callId = buildCallId(phone, startMs);
+          await ScheduledCallModel.updateMany(
+            { callId, status: 'pending' },
+            { $set: { status: 'cancelled', errorMessage: 'Cancelled: client canceled meeting (daily backfill)' } }
+          );
+        }
+
+        // Cancel discord reminder
+        await ScheduledDiscordMeetReminderModel.updateMany(
+          {
+            bookingId: b.bookingId,
+            status: 'pending',
+          },
+          { $set: { status: 'cancelled', errorMessage: 'Cancelled: client canceled meeting (daily backfill)' } }
+        );
+
+        report.cancelled++;
+        report.details.push(`❌ CANCEL: ${b.clientName} — meeting at ${new Date(b.scheduledEventStartTime).toISOString()}`);
+      } catch (err) {
+        report.errors++;
+        console.error(`[DailyBackfill] Error cancelling reminders for ${b.clientEmail}:`, err.message);
+      }
+    }
+
+    // ── Part 2: Ensure reminders for active scheduled bookings ─────────────
+    const activeBookings = await CampaignBookingModel.find({
+      bookingStatus: 'scheduled',
+      scheduledEventStartTime: { $gte: windowStart, $lt: windowEnd },
+    }).lean();
+
+    for (const b of activeBookings) {
+      try {
+        const meetingStartISO = b.scheduledEventStartTime instanceof Date
+          ? b.scheduledEventStartTime.toISOString()
+          : b.scheduledEventStartTime;
+
+        const meetingStartMs = new Date(meetingStartISO).getTime();
+        const minutesUntil   = (meetingStartMs - Date.now()) / 60000;
+
+        // Skip meetings too soon to meaningfully schedule a call (< 12 min)
+        if (minutesUntil < 12) {
+          report.skipped++;
+          report.details.push(`⏭️ TOO SOON: ${b.clientName} — ${Math.round(minutesUntil)}m away`);
+          continue;
+        }
+
+        const phone = b.clientPhone ? normalizePhoneForReminders(b.clientPhone) : null;
+
+        // ── Check existing records ──────────────────────────────────────────
+        const existingCall = phone
+          ? await ScheduledCallModel.findOne({
+              callId: buildCallId(phone, meetingStartMs),
+            }).lean()
+          : null;
+
+        const existingWA = phone
+          ? await ScheduledWhatsAppReminderModel.find({
+              phoneNumber: phone,
+              meetingStartISO: { $gte: new Date(meetingStartMs - 60000), $lte: new Date(meetingStartMs + 60000) },
+              status: { $in: ['pending', 'processing', 'completed'] },
+            }).lean()
+          : [];
+
+        const existingDiscord = await ScheduledDiscordMeetReminderModel.findOne({
+          bookingId: b.bookingId,
+          status: { $in: ['pending', 'processing', 'completed'] },
+        }).lean();
+
+        const needCall    = !existingCall && !!phone;
+        const needWA      = existingWA.length === 0 && !!phone;
+        const needDiscord = !existingDiscord;
+
+        if (!needCall && !needWA && !needDiscord) {
+          report.skipped++;
+          continue;
+        }
+
+        // ── Build time strings (same logic as CallScheduler) ──────────────
+        const meetingStartUTC = DateTime.fromISO(meetingStartISO, { zone: 'utc' });
+        const meetingEndISO   = b.scheduledEventEndTime
+          ? (b.scheduledEventEndTime instanceof Date ? b.scheduledEventEndTime.toISOString() : b.scheduledEventEndTime)
+          : null;
+        const meetingEndUTC   = meetingEndISO
+          ? DateTime.fromISO(meetingEndISO, { zone: 'utc' })
+          : meetingStartUTC.plus({ minutes: 15 });
+
+        const inviteeTz = b.inviteeTimezone || null;
+        let displayZone = inviteeTz;
+        if (!displayZone) {
+          const pst = meetingStartUTC.setZone('America/Los_Angeles').offset / 60;
+          displayZone = (pst === -8 || pst === -7) ? 'America/Los_Angeles' : 'America/New_York';
+        }
+
+        const startInZone = meetingStartUTC.setZone(displayZone);
+        const endInZone   = meetingEndUTC.setZone(displayZone);
+
+        const fmt = (dt) => dt.minute === 0
+          ? dt.toFormat('ha').toLowerCase()
+          : dt.toFormat('h:mma').toLowerCase();
+
+        const meetingTimeFormatted = `${fmt(startInZone)} – ${fmt(endInZone)}`;
+        const meetingDateFormatted = startInZone.toFormat('EEEE MMM d, yyyy');
+
+        // Timezone abbreviation
+        let tzAbbr = 'ET';
+        if (inviteeTz) {
+          const tz = DateTime.fromISO(meetingStartISO, { zone: inviteeTz });
+          tzAbbr = tz.isValid ? tz.toFormat('ZZZZ') : 'ET';
+        }
+
+        const sharedMeta = {
+          bookingId: b.bookingId,
+          inviteeTimezone: inviteeTz,
+          meetingEndISO,
+        };
+
+        // ── Schedule call (+ WA via scheduleCall when both missing) ─────────
+        if (needCall) {
+          const callResult = await scheduleCall({
+            phoneNumber: phone,
+            meetingStartISO,
+            inviteeName: b.clientName,
+            inviteeEmail: b.clientEmail,
+            source: 'manual',
+            meetingLink: b.calendlyMeetLink || null,
+            rescheduleLink: b.calendlyRescheduleLink || 'https://calendly.com/flashfirejobs',
+            skipWhatsAppReminders: !needWA, // If WA already exists, skip; else schedule together
+            metadata: sharedMeta,
+          });
+          if (callResult.success && !callResult.existing) {
+            report.ensured++;
+            report.details.push(`✅ CALL+WA: ${b.clientName} (${phone}) — ${meetingTimeFormatted}`);
+          }
+        } else if (needWA) {
+          // Call already exists but WA is missing — schedule WA separately with proper format
+          await scheduleAllWhatsAppReminders({
+            phoneNumber: phone,
+            meetingStartISO,
+            meetingTime: meetingTimeFormatted,
+            meetingDate: meetingDateFormatted,
+            clientName: b.clientName,
+            clientEmail: b.clientEmail,
+            meetingLink: b.calendlyMeetLink || null,
+            rescheduleLink: b.calendlyRescheduleLink || 'https://calendly.com/flashfirejobs',
+            source: 'manual',
+            timezone: tzAbbr,
+            metadata: sharedMeta,
+          });
+          report.ensured++;
+          report.details.push(`✅ WA ONLY: ${b.clientName} (${phone}) — ${meetingTimeFormatted}`);
+        }
+
+        // ── Schedule Discord reminder ──────────────────────────────────────
+        if (needDiscord) {
+          await scheduleDiscordMeetReminder({
+            bookingId: b.bookingId,
+            clientName: b.clientName,
+            clientEmail: b.clientEmail,
+            meetingStartISO,
+            meetingLink: b.calendlyMeetLink || null,
+            inviteeTimezone: inviteeTz,
+            source: 'manual',
+            metadata: { bookingId: b.bookingId },
+          });
+          if (!needCall && !needWA) {
+            report.ensured++;
+            report.details.push(`✅ DISCORD: ${b.clientName} — ${meetingTimeFormatted}`);
+          }
+        }
+      } catch (err) {
+        report.errors++;
+        console.error(`[DailyBackfill] Error processing ${b.clientEmail}:`, err.message);
+        report.details.push(`❌ ERROR: ${b.clientName} — ${err.message}`);
+      }
+    }
+
+    console.log(`✅ [DailyBackfill] Done — ensured: ${report.ensured}, cancelled: ${report.cancelled}, skipped: ${report.skipped}, errors: ${report.errors}`);
+
+    // Send Discord summary
+    if (DISCORD_WEBHOOK && (report.ensured > 0 || report.cancelled > 0 || report.errors > 0)) {
+      const lines = [
+        `🔁 **Daily Reminder Backfill (10am IST)**`,
+        `✅ Ensured: ${report.ensured} | ❌ Cancelled: ${report.cancelled} | ⏭️ Skipped: ${report.skipped} | 💥 Errors: ${report.errors}`,
+        '',
+        ...report.details.slice(0, 20), // cap to avoid Discord message limit
+      ];
+      await DiscordConnect(DISCORD_WEBHOOK, lines.join('\n'), false);
+    }
+  } catch (err) {
+    console.error('❌ [DailyBackfill] Fatal error:', err.message, err.stack);
+    if (process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL) {
+      await DiscordConnect(
+        process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL,
+        `❌ **Daily Reminder Backfill FAILED**: ${err.message}`,
+        false
+      ).catch(() => {});
+    }
+  }
+}
+
 export function startCronScheduler() {
   cron.schedule('*/15 * * * *', async () => {
     await processScheduledItems();
@@ -596,8 +845,16 @@ export function startCronScheduler() {
     timezone: IST_TIMEZONE
   });
 
-  console.log('✅ Cron scheduler started - checking every 15 minutes for scheduled items');
-  
+  // 10am IST daily: ensure all meetings in next 24h have reminders, cancel for canceled bookings
+  cron.schedule('0 10 * * *', async () => {
+    await runDailyReminderBackfill();
+  }, {
+    scheduled: true,
+    timezone: IST_TIMEZONE
+  });
+
+  console.log('✅ Cron scheduler started - every 15min processing + 10am IST daily backfill');
+
   processScheduledItems();
 }
 

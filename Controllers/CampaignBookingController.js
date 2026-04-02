@@ -1,7 +1,6 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
-import { callQueue } from '../Utils/queue.js';
 import { DateTime } from 'luxon';
 import { triggerWorkflow, cancelScheduledWorkflows, cancelScheduledWorkflowLogsForBooking } from './WorkflowController.js';
 import {
@@ -1416,16 +1415,8 @@ export const rescheduleBooking = async (req, res) => {
       }
     }
 
-    // Remove existing reminder call job if present
+    // Clear the old job reference (BullMQ removed — CallScheduler handles cancellation via MongoDB)
     if (booking.reminderCallJobId) {
-      try {
-        const existingJob = await callQueue.getJob(booking.reminderCallJobId);
-        if (existingJob) {
-          await existingJob.remove();
-        }
-      } catch (error) {
-        console.error('Error removing previous reminder call job:', error);
-      }
       booking.reminderCallJobId = null;
     }
 

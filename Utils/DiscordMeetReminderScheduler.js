@@ -293,24 +293,34 @@ export async function processDueDiscordMeetReminders() {
           }
         }
 
-        const meetingStart = new Date(reminder.meetingStartISO);
-        const meetingTimeWall = formatMeetingWallTime(
-          meetingStart,
-          reminder.inviteeTimezone
-        );
+        // Use booking's scheduledEventStartTime as fallback when reminder record has null/invalid ISO
+        const rawStart = new Date(reminder.meetingStartISO);
+        const effectiveMeetingStart =
+          rawStart && !isNaN(rawStart.getTime())
+            ? rawStart
+            : booking?.scheduledEventStartTime
+            ? new Date(booking.scheduledEventStartTime)
+            : null;
 
-        const headline = headlineForSendTime(meetingStart);
+        const clientTz =
+          reminder.inviteeTimezone ||
+          booking?.inviteeTimezone ||
+          null;
+
+        const meetingTimeClient = formatMeetingWallTime(effectiveMeetingStart, clientTz);
+        const meetingTimeIST   = formatMeetingWallTime(effectiveMeetingStart, 'Asia/Kolkata');
+
+        const headline = headlineForSendTime(effectiveMeetingStart || rawStart);
         const claimedBda = booking?.claimedBy?.name || booking?.claimedBy?.email || null;
-        const claimLine = claimedBda
-          ? `Assigned BDA: ${claimedBda}`
-          : `⚠️ **NOT CLAIMED** — No BDA assigned, someone needs to join!`;
+
         const messageLines = [
           headline,
           '',
-          `Client: ${reminder.clientName}`,
-          `Time: ${meetingTimeWall}`,
-          `Link: ${reminder.meetingLink || 'Not provided'}`,
-          claimLine,
+          `**Client:** ${reminder.clientName}`,
+          `**Time (Client):** ${meetingTimeClient}`,
+          `**Time (India):** ${meetingTimeIST}`,
+          `**Link:** ${reminder.meetingLink || 'Not provided'}`,
+          ...(claimedBda ? [`**Assigned BDA:** ${claimedBda}`] : []),
           '',
           "BDA team, confirm attendance by typing **\"I'm in.\"** Let's close this.",
         ];

@@ -226,10 +226,7 @@ import Routes from './Routes.js';
 import Connection from './Utils/ConnectDB.js';
 import cors from 'cors';
 import 'dotenv/config';
-// Import callQueue - may be null if Redis is not available
-// Primary call scheduling is handled by MongoDB-based CallScheduler
-// BullMQ is only used as backup
-import { callQueue } from './Utils/queue.js';
+// Redis/BullMQ removed — call scheduling via MongoDB-based CallScheduler + UnifiedScheduler
 import Twilio from 'twilio';
 import { DateTime } from 'luxon';
 import { Logger } from './Utils/Logger.js';
@@ -299,20 +296,6 @@ app.get("/call-status", async (req, res) => {
     ? `${process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL.substring(0, 30)}...` 
     : 'Not configured';
 
-  // Check queue status
-  let queueStatus = { available: false, waiting: 0, active: 0, completed: 0, failed: 0 };
-  try {
-    if (callQueue) {
-      const waiting = await callQueue.getWaitingCount();
-      const active = await callQueue.getActiveCount();
-      const completed = await callQueue.getCompletedCount();
-      const failed = await callQueue.getFailedCount();
-      queueStatus = { available: true, waiting, active, completed, failed };
-    }
-  } catch (error) {
-    console.error('Error checking queue status:', error);
-  }
-
   res.status(200).json({
     message: "✅ Call Status Webhook Endpoint is active",
     endpoint: "/call-status",
@@ -322,7 +305,7 @@ app.get("/call-status", async (req, res) => {
       configured: discordWebhookConfigured,
       urlPreview: webhookUrlPreview
     },
-    queue: queueStatus,
+    scheduling: "MongoDB-based (UnifiedScheduler + CallScheduler)",
     twilio: {
       fromNumber: process.env.TWILIO_FROM ? 'Configured' : 'Not configured',
       accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Configured' : 'Not configured'
@@ -347,25 +330,8 @@ app.get("/api/call-system-status", async (req, res) => {
         accountSid: process.env.TWILIO_ACCOUNT_SID ? 'Configured' : 'NOT CONFIGURED ⚠️',
         authToken: process.env.TWILIO_AUTH_TOKEN ? 'Configured' : 'NOT CONFIGURED ⚠️'
       },
-      redis: {
-        connected: !!redisConnection
-      },
-      queue: {
-        available: !!callQueue
-      }
+      scheduling: "MongoDB-based (UnifiedScheduler + CallScheduler)"
     };
-
-    // Get queue stats if available
-    if (callQueue) {
-      try {
-        status.queue.waiting = await callQueue.getWaitingCount();
-        status.queue.active = await callQueue.getActiveCount();
-        status.queue.completed = await callQueue.getCompletedCount();
-        status.queue.failed = await callQueue.getFailedCount();
-      } catch (error) {
-        status.queue.error = error.message;
-      }
-    }
 
     // Check recent bookings with call jobs
     try {
@@ -407,12 +373,13 @@ app.post("/api/debug/test-call", async (req, res) => {
       });
     }
 
-    if (!callQueue) {
-      return res.status(500).json({
-        success: false,
-        error: "callQueue is not initialized. Check Redis connection.",
-      });
-    }
+    // Redis/BullMQ removed. Use POST /api/campaign-bookings/:id/reschedule or the
+    // UnifiedScheduler to test calls via the MongoDB-based scheduling path.
+    return res.status(410).json({
+      success: false,
+      error: "BullMQ queue removed. Use MongoDB-based CallScheduler instead.",
+      hint: "Create a ScheduledCall record directly or use the booking reschedule endpoint."
+    });
 
     if (!process.env.TWILIO_FROM || !process.env.TWILIO_ACCOUNT_SID) {
       return res.status(500).json({

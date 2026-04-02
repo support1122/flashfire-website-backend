@@ -144,11 +144,7 @@ import {
   deleteWorkflowLog,
   deleteAllWorkflowsForBookingByStatus
 } from "./Controllers/WorkflowLogController.js";
-// Bull Board imports for queue monitoring
-import { createBullBoard } from '@bull-board/api';
-import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
-import { ExpressAdapter } from '@bull-board/express';
-import { callQueue, emailQueue, whatsappQueue, redisConnection } from './Utils/queue.js';
+// Redis/BullBoard removed — scheduling handled by MongoDB-based JobScheduler + UnifiedScheduler
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission } from './Middlewares/CrmAuth.js';
@@ -180,46 +176,6 @@ import { getIncentiveConfig, saveIncentiveConfig } from './Controllers/BdaIncent
 import express from 'express';
 
 export default function Routes(app) {
-  try {
-    const serverAdapter = new ExpressAdapter();
-    serverAdapter.setBasePath('/auth/logs');
-
-    const queues = [];
-    if (callQueue) {
-      queues.push(new BullMQAdapter(callQueue));
-      console.log('✅ [BullBoard] Added callQueue to dashboard');
-    }
-    if (emailQueue) {
-      queues.push(new BullMQAdapter(emailQueue));
-      console.log('✅ [BullBoard] Added emailQueue to dashboard');
-    }
-    if (whatsappQueue) {
-      queues.push(new BullMQAdapter(whatsappQueue));
-      console.log('✅ [BullBoard] Added whatsappQueue to dashboard');
-    }
-
-    if (queues.length > 0) {
-      const boardConfig = {
-        queues: queues,
-        serverAdapter: serverAdapter,
-      };
-
-      if (redisConnection) {
-        console.log('✅ [BullBoard] Redis connection available for stats');
-      }
-
-      createBullBoard(boardConfig);
-
-      app.use('/auth/logs', serverAdapter.getRouter());
-      console.log('✅ [BullBoard] Dashboard available at /auth/logs');
-      console.log('ℹ️  [BullBoard] Note: Clicking Redis logo may show errors with managed Redis (this is a Bull Board limitation, not affecting queue monitoring)');
-    } else {
-      console.warn('⚠️  [BullBoard] No queues available for monitoring');
-    }
-  } catch (error) {
-    console.error('❌ [BullBoard] Failed to initialize dashboard:', error.message);
-    console.error('❌ [BullBoard] Error stack:', error.stack);
-  }
 
   //login routes and registration routes :
   //the login and registraion routes works but we should or can use supabase auth system
