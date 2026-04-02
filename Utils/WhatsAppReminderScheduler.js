@@ -4,7 +4,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
 import watiService from './WatiService.js';
-import { DateTime } from 'luxon';
+import { DateTime, IANAZone } from 'luxon';
 import { scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
 import {
   parseMeetingStartToDate,
@@ -24,6 +24,9 @@ const STUCK_WA_PROCESSING_MS = Math.max(
   Number(process.env.WHATSAPP_REMINDER_STUCK_PROCESSING_MS) || 8 * 60 * 1000
 );
 const DISCORD_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
+
+/** Schedule 5-min WA reminder if meeting is at least this many minutes away (allows small clock drift vs strict >5). */
+const FIVE_MIN_SCHEDULE_EPS_MIN = Number(process.env.WA_FIVE_MIN_SCHEDULE_EPS_MIN) || 0.25;
 const DEFAULT_RESCHEDULE_LINK = 'https://www.google.com/url?q=https%3A%2F%2Fcalendly.com%2Freschedulings%2F8e172654-1dfa-49ae-944e-e260067a0f1f&sa=D&source=calendar&usd=2&usg=AOvVaw0_ea9AmvIBNwPqLl0HSU0g'; // Default reschedule link
 
 let isRunning = false;
@@ -339,7 +342,7 @@ export async function scheduleAllWhatsAppReminders({
     }
   }
 
-  if (minutesUntilMeeting > 5) {
+  if (minutesUntilMeeting > 5 - FIVE_MIN_SCHEDULE_EPS_MIN) {
     const result5min = await scheduleWhatsAppReminder({
       phoneNumber,
       meetingStartISO,
@@ -357,7 +360,7 @@ export async function scheduleAllWhatsAppReminders({
     });
     results['5min'] = result5min;
   } else {
-    console.log(`⏭️ [WhatsAppReminderScheduler] Skipping 5min reminder - meeting is ${minutesUntilMeeting.toFixed(1)}m away (< 5min)`);
+    console.log(`⏭️ [WhatsAppReminderScheduler] Skipping 5min reminder - meeting is ${minutesUntilMeeting.toFixed(1)}m away (within ~5min window)`);
     results['5min'] = { success: false, skipped: true, reason: `Meeting is only ${minutesUntilMeeting.toFixed(1)}m away` };
     
     if (DISCORD_WEBHOOK) {
@@ -561,6 +564,63 @@ export async function cancelWhatsAppRemindersForClient({ clientEmail = null, pho
 }
 
 /**
+ * When WATI template fields have Unknown/missing meetingTime, derive display window.
+ * Prefer meetingStartISO (correct for immediate/3h/5min); fall back to scheduledFor + stored offset.
+ * @param {object} scheduledReminder - Mongoose doc or lean object
+ * @returns {{ resolvedMeetingTime: string, resolvedTimezone: string }}
+ */
+export function resolveUnknownWhatsAppMeetingDisplay(scheduledReminder) {
+  const meta = scheduledReminder.metadata || {};
+  const rawTz = meta.inviteeTimezone || scheduledReminder.inviteeTimezone || 'America/New_York';
+  const inviteeTz =
+    typeof rawTz === 'string' && rawTz.trim() && IANAZone.isValidZone(rawTz.trim())
+      ? rawTz.trim()
+      : 'America/New_York';
+
+  const fmtWindow = (startDT) => {
+    if (!startDT.isValid) return null;
+    const endDT = startDT.plus({ minutes: 15 });
+    const fmt = (dt) =>
+      dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase();
+    const timeStr = `${fmt(startDT)} – ${fmt(endDT)}`;
+    const tzAbbr = startDT.toFormat('ZZZZ');
+    const tzLabel =
+      !tzAbbr.startsWith('GMT') && !tzAbbr.startsWith('UTC')
+        ? tzAbbr
+        : inviteeTz.includes('Kolkata') || inviteeTz.includes('Calcutta')
+          ? 'IST'
+          : startDT.toFormat('ZZ');
+    return { resolvedMeetingTime: timeStr, resolvedTimezone: tzLabel };
+  };
+
+  // Primary: real meeting instant (works for immediate / 3h / 5min; avoids wrong scheduledFor math)
+  const startFromIso = parseMeetingStartToDate(scheduledReminder.meetingStartISO);
+  if (startFromIso) {
+    const startDT = DateTime.fromJSDate(startFromIso, { zone: 'utc' }).setZone(inviteeTz);
+    const out = fmtWindow(startDT);
+    if (out) return out;
+  }
+
+  // Fallback: reverse from scheduledFor + offset stored at schedule time
+  if (scheduledReminder.scheduledFor) {
+    const offsetMap = { immediate: 1, '5min': 5, '3h': 180, '2hour': 120, '24hour': 1440 };
+    const reminderType = meta.reminderType ?? scheduledReminder.reminderType;
+    const offsetMin =
+      Number.isFinite(meta.reminderOffsetMinutes) && meta.reminderOffsetMinutes > 0
+        ? meta.reminderOffsetMinutes
+        : offsetMap[reminderType] ?? 5;
+    const derivedStart = new Date(
+      new Date(scheduledReminder.scheduledFor).getTime() + offsetMin * 60 * 1000
+    );
+    const startDT = DateTime.fromJSDate(derivedStart, { zone: 'utc' }).setZone(inviteeTz);
+    const out = fmtWindow(startDT);
+    if (out) return out;
+  }
+
+  return { resolvedMeetingTime: '', resolvedTimezone: '' };
+}
+
+/**
  * Send the actual WhatsApp message using WATI template
  */
 export async function sendWhatsAppMessage(scheduledReminder) {
@@ -575,24 +635,16 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     const templateName = 'flashfire_appointment_reminder';
     
     // Format meeting time with timezone: "4pm - 4:15pm ET" or "4pm - 4:15pm PST"
-    // If meetingTime is missing/Unknown, reverse-calculate from scheduledFor + reminder offset
+    // If meetingTime is missing/Unknown, use meetingStartISO or scheduledFor + metadata offset
     const isUnknownTime = !meetingTime || meetingTime === 'Unknown' || String(meetingTime).startsWith('Unknown') || meetingTime === 'undefined';
     let resolvedMeetingTime = meetingTime;
     let resolvedTimezone = (timezone && timezone !== 'null') ? timezone : '';
-    if (isUnknownTime && scheduledReminder.scheduledFor) {
-      const offsetMap = { 'immediate': 1, '5min': 5, '3h': 180, '2hour': 120, '24hour': 1440 };
-      const offsetMin = offsetMap[scheduledReminder.reminderType] ?? 5;
-      const derivedStart = new Date(new Date(scheduledReminder.scheduledFor).getTime() + offsetMin * 60 * 1000);
-      const tz = scheduledReminder.inviteeTimezone || 'America/New_York';
-      const { DateTime } = await import('luxon');
-      const startDT = DateTime.fromJSDate(derivedStart).setZone(tz);
-      const endDT   = startDT.plus({ minutes: 15 });
-      const fmt = (dt) => dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase();
-      resolvedMeetingTime = `${fmt(startDT)} – ${fmt(endDT)}`;
-      const tzAbbr = startDT.toFormat('ZZZZ');
-      resolvedTimezone = (!tzAbbr.startsWith('GMT') && !tzAbbr.startsWith('UTC'))
-        ? tzAbbr
-        : (tz.includes('Kolkata') || tz.includes('Calcutta')) ? 'IST' : startDT.toFormat('ZZ');
+    if (isUnknownTime) {
+      const derived = resolveUnknownWhatsAppMeetingDisplay(scheduledReminder);
+      if (derived.resolvedMeetingTime) {
+        resolvedMeetingTime = derived.resolvedMeetingTime;
+        resolvedTimezone = derived.resolvedTimezone || resolvedTimezone;
+      }
     }
     const meetingTimeWithTimezone = resolvedMeetingTime && resolvedTimezone
       ? `${resolvedMeetingTime} ${resolvedTimezone}`
