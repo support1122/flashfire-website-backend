@@ -5,6 +5,7 @@
   "main": "index.js",
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "fix-five-min-reminders": "node scripts/fix-five-min-reminders.mjs",
     "start": "node index.js",
     "worker": "node Utils/worker.js",
     "dev": "nodemon index.js"

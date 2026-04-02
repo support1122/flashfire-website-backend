@@ -60,9 +60,22 @@ export function formatMeetingWallTime(meetingStart, inviteeTimezone) {
 }
 
 export function headlineForSendTime(meetingStart) {
+  if (
+    !meetingStart ||
+    !(meetingStart instanceof Date) ||
+    Number.isNaN(meetingStart.getTime())
+  ) {
+    return '🔥 **Hot Lead — Meeting reminder**';
+  }
   const now = Date.now();
   const start = meetingStart.getTime();
+  if (Number.isNaN(start)) {
+    return '🔥 **Hot Lead — Meeting reminder**';
+  }
   const minutesUntil = (start - now) / 60000;
+  if (!Number.isFinite(minutesUntil)) {
+    return '🔥 **Hot Lead — Meeting reminder**';
+  }
 
   if (minutesUntil > 4.5) {
     return `🔥 **Hot Lead — Meeting in ~${Math.round(minutesUntil)} minutes**`;
@@ -315,7 +328,14 @@ export async function processDueDiscordMeetReminders() {
         const meetingTimeClient = formatMeetingWallTime(effectiveMeetingStart, clientTz);
         const meetingTimeIST   = formatMeetingWallTime(effectiveMeetingStart, 'Asia/Kolkata');
 
-        const headline = headlineForSendTime(effectiveMeetingStart || rawStart);
+        const headlineStart =
+          effectiveMeetingStart &&
+          !Number.isNaN(effectiveMeetingStart.getTime())
+            ? effectiveMeetingStart
+            : rawStart && !Number.isNaN(rawStart.getTime())
+              ? rawStart
+              : null;
+        const headline = headlineForSendTime(headlineStart);
         const claimedBda = booking?.claimedBy?.name || booking?.claimedBy?.email || null;
 
         const messageLines = [
