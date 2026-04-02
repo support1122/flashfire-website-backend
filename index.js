@@ -550,55 +550,55 @@ app.post("/api/debug/test-call", async (req, res) => {
   }
 });
 
-function buildCallSummaryMessage(scheduledCall, meetingInfo, To, From, CallSid) {
-  let summary = `✅ **Call Status Update (MongoDB Scheduler)**\n`;
-  summary += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
-  
-  // Add all status updates from history
-  if (scheduledCall.statusHistory && scheduledCall.statusHistory.length > 0) {
-    scheduledCall.statusHistory.forEach((statusUpdate, index) => {
-      const statusDate = statusUpdate.timestamp ? new Date(statusUpdate.timestamp).toUTCString() : 'Unknown';
-      
-      summary += `\n🚨 **App Update: ${statusUpdate.status}**\n`;
-      summary += `📞 **To:** ${To}\n`;
-      summary += `👤 **From:** ${From}\n`;
-      
-      if (meetingInfo.inviteeName && meetingInfo.inviteeName !== 'Unknown') {
-        summary += `👤 **Name:** ${meetingInfo.inviteeName}\n`;
-      }
-      
-      summary += `👤 **Status:** ${statusUpdate.status}\n`;
-      summary += `👤 **Answered By:** ${statusUpdate.answeredBy || 'Unknown'}\n`;
-      
-      if (statusUpdate.duration) {
-        summary += `⏱️ **Duration:** ${statusUpdate.duration} seconds\n`;
-      }
-      
-      summary += `👤 **Call SID:** ${CallSid}\n`;
-      summary += `👤 **Timestamp:** ${statusDate}\n`;
-      
-      if (meetingInfo.inviteeEmail && meetingInfo.inviteeEmail !== 'Unknown') {
-        summary += `📧 **Email:** ${meetingInfo.inviteeEmail}\n`;
-      }
-      
-      if (meetingInfo.meetingTime && meetingInfo.meetingTime !== 'Unknown') {
-        summary += `📆 **Meeting (Client):** ${meetingInfo.meetingTime}\n`;
-      }
-      if (meetingInfo.meetingTimeIndia) {
-        summary += `📆 **Meeting (India):** ${meetingInfo.meetingTimeIndia}\n`;
-      }
-
-      summary += `🎫 **Twilio SID:** ${CallSid}\n`;
-      
-      // Add separator between statuses (except for last one)
-      if (index < scheduledCall.statusHistory.length - 1) {
-        summary += `\n`;
-      }
-    });
+/**
+ * Translate raw Twilio CallStatus + duration into a human-readable label.
+ * Twilio sends "completed" even when the callee immediately rejects/cuts the call
+ * (duration = 0). We distinguish that here.
+ */
+function getEffectiveCallStatus(callStatus, durationSecs) {
+  const dur = parseInt(durationSecs ?? 0, 10) || 0;
+  switch (callStatus) {
+    case 'completed':
+      return dur <= 2
+        ? '📵 Rejected / Cut Short (0s)'
+        : `✅ Answered & Completed (${dur}s)`;
+    case 'no-answer':  return '🔇 No Answer';
+    case 'busy':       return '📵 Busy';
+    case 'failed':     return '❌ Failed';
+    case 'canceled':   return '🚫 Canceled';
+    case 'initiated':  return '📲 Initiated';
+    case 'ringing':    return '🔔 Ringing';
+    case 'in-progress':return '📞 In Progress';
+    default:           return callStatus || 'Unknown';
   }
-  
-  summary += `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
-  
+}
+
+function buildCallSummaryMessage(scheduledCall, meetingInfo, To, From, CallSid) {
+  // Use the last status entry as the final result
+  const last = scheduledCall.statusHistory?.[scheduledCall.statusHistory.length - 1];
+  const effectiveStatus = last
+    ? getEffectiveCallStatus(last.status, last.duration)
+    : 'Unknown';
+
+  let summary = `📞 **Call Summary**\n`;
+  summary += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
+  summary += `👤 **Client:** ${meetingInfo.inviteeName || 'Unknown'}\n`;
+  if (meetingInfo.inviteeEmail && meetingInfo.inviteeEmail !== 'Unknown') {
+    summary += `📧 **Email:** ${meetingInfo.inviteeEmail}\n`;
+  }
+  summary += `📞 **Phone:** ${To}\n`;
+  summary += `🏁 **Result:** ${effectiveStatus}\n`;
+  if (last?.duration) {
+    summary += `⏱️ **Duration:** ${last.duration}s\n`;
+  }
+  if (meetingInfo.meetingTime && meetingInfo.meetingTime !== 'Unknown') {
+    summary += `📆 **Meeting (Client):** ${meetingInfo.meetingTime}\n`;
+  }
+  if (meetingInfo.meetingTimeIndia) {
+    summary += `📆 **Meeting (India):** ${meetingInfo.meetingTimeIndia}\n`;
+  }
+  summary += `🎫 **Twilio SID:** ${CallSid}\n`;
+  summary += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
   return summary;
 }
 
@@ -693,24 +693,26 @@ app.post("/call-status", async (req, res) => {
         // Determine if this is a final status
         const finalStatuses = ['completed', 'busy', 'failed', 'no-answer', 'canceled'];
         isFinalStatus = finalStatuses.includes(CallStatus);
-        
-        // Update scheduled call with status history
+
+        // Better DB status: "completed" with 0s duration = rejected/cut, store as "rejected"
+        const duration = CallDuration ? parseInt(CallDuration, 10) : 0;
         const statusMap = {
-          'completed': 'completed',
-          'busy': 'failed',
-          'failed': 'failed',
-          'no-answer': 'failed',
-          'canceled': 'cancelled'
+          'completed': duration <= 2 ? 'rejected' : 'completed',
+          'busy':      'failed',
+          'failed':    'failed',
+          'no-answer': 'no-answer',
+          'canceled':  'cancelled'
         };
-        
+
         const updateData = {
           $push: { statusHistory: statusUpdate }
         };
-        
+
         if (statusMap[CallStatus]) {
           updateData.status = statusMap[CallStatus];
           if (CallStatus === 'completed') {
             updateData.completedAt = new Date();
+            updateData.callDuration = duration;
           }
         }
         
@@ -730,30 +732,23 @@ app.post("/call-status", async (req, res) => {
     const statusTimestamp = Timestamp ? new Date(Timestamp).toISOString() : new Date().toISOString();
     const statusDate = Timestamp ? new Date(Timestamp).toUTCString() : new Date().toUTCString();
 
-    // Build Discord message with real status information
-    let msg = `🚨 **App Update: ${CallStatus}**\n`;
+    // Build Discord message with meaningful status
+    const effectiveStatus = getEffectiveCallStatus(CallStatus, CallDuration);
+    let msg = `📞 **Call Update: ${effectiveStatus}**\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
     msg += `📞 **To:** ${To}\n`;
-    msg += `👤 **From:** ${From}\n`;
-    
+
     if (meetingInfo.inviteeName && meetingInfo.inviteeName !== 'Unknown') {
       msg += `👤 **Name:** ${meetingInfo.inviteeName}\n`;
     }
-    
-    msg += `👤 **Status:** ${CallStatus}\n`;
-    msg += `👤 **Answered By:** ${AnsweredBy || 'Unknown'}\n`;
-    
-    if (CallDuration) {
-      msg += `⏱️ **Duration:** ${CallDuration} seconds\n`;
-    }
-    
-    msg += `👤 **Call SID:** ${CallSid}\n`;
-    msg += `👤 **Timestamp:** ${statusDate}\n`;
-    
     if (meetingInfo.inviteeEmail && meetingInfo.inviteeEmail !== 'Unknown') {
       msg += `📧 **Email:** ${meetingInfo.inviteeEmail}\n`;
     }
-    
+
+    msg += `🏁 **Status:** ${effectiveStatus}\n`;
+    if (CallDuration) msg += `⏱️ **Duration:** ${CallDuration}s\n`;
+    if (AnsweredBy && AnsweredBy !== 'unknown') msg += `☎️ **Answered By:** ${AnsweredBy}\n`;
+
     if (meetingInfo.meetingTime && meetingInfo.meetingTime !== 'Unknown') {
       msg += `📆 **Meeting (Client):** ${meetingInfo.meetingTime}\n`;
     }
@@ -762,6 +757,7 @@ app.post("/call-status", async (req, res) => {
     }
 
     msg += `🎫 **Twilio SID:** ${CallSid}\n`;
+    msg += `🕐 **At:** ${statusDate}\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
     // Send Discord notification if configured
