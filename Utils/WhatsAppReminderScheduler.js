@@ -575,7 +575,28 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     const templateName = 'flashfire_appointment_reminder';
     
     // Format meeting time with timezone: "4pm - 4:15pm ET" or "4pm - 4:15pm PST"
-    const meetingTimeWithTimezone = timezone ? `${meetingTime} ${timezone}` : meetingTime;
+    // If meetingTime is missing/Unknown, reverse-calculate from scheduledFor + reminder offset
+    const isUnknownTime = !meetingTime || meetingTime === 'Unknown' || String(meetingTime).startsWith('Unknown') || meetingTime === 'undefined';
+    let resolvedMeetingTime = meetingTime;
+    let resolvedTimezone = (timezone && timezone !== 'null') ? timezone : '';
+    if (isUnknownTime && scheduledReminder.scheduledFor) {
+      const offsetMap = { 'immediate': 1, '5min': 5, '3h': 180, '2hour': 120, '24hour': 1440 };
+      const offsetMin = offsetMap[scheduledReminder.reminderType] ?? 5;
+      const derivedStart = new Date(new Date(scheduledReminder.scheduledFor).getTime() + offsetMin * 60 * 1000);
+      const tz = scheduledReminder.inviteeTimezone || 'America/New_York';
+      const { DateTime } = await import('luxon');
+      const startDT = DateTime.fromJSDate(derivedStart).setZone(tz);
+      const endDT   = startDT.plus({ minutes: 15 });
+      const fmt = (dt) => dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase();
+      resolvedMeetingTime = `${fmt(startDT)} – ${fmt(endDT)}`;
+      const tzAbbr = startDT.toFormat('ZZZZ');
+      resolvedTimezone = (!tzAbbr.startsWith('GMT') && !tzAbbr.startsWith('UTC'))
+        ? tzAbbr
+        : (tz.includes('Kolkata') || tz.includes('Calcutta')) ? 'IST' : startDT.toFormat('ZZ');
+    }
+    const meetingTimeWithTimezone = resolvedMeetingTime && resolvedTimezone
+      ? `${resolvedMeetingTime} ${resolvedTimezone}`
+      : (resolvedMeetingTime || '');
     
     // Template parameters: {{1}} = name, {{2}} = date, {{3}} = time with timezone, {{4}} = meeting link, {{5}} = reschedule link
     const parameters = [

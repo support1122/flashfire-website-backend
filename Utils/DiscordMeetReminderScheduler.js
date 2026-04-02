@@ -293,13 +293,18 @@ export async function processDueDiscordMeetReminders() {
           }
         }
 
-        // Use booking's scheduledEventStartTime as fallback when reminder record has null/invalid ISO
-        const rawStart = new Date(reminder.meetingStartISO);
+        // Resolve meeting start — 3-tier fallback:
+        // 1. reminder.meetingStartISO  2. booking.scheduledEventStartTime  3. scheduledFor + offset
+        // NOTE: new Date(null) = epoch (Jan 1 1970) which passes !isNaN — must guard against null/empty first
+        const rawStart = reminder.meetingStartISO ? new Date(reminder.meetingStartISO) : null;
         const effectiveMeetingStart =
-          rawStart && !isNaN(rawStart.getTime())
+          (rawStart && !isNaN(rawStart.getTime()))
             ? rawStart
-            : booking?.scheduledEventStartTime
+            : (booking?.scheduledEventStartTime)
             ? new Date(booking.scheduledEventStartTime)
+            // Last resort: reverse-calculate from scheduledFor + REMINDER_OFFSET_MINUTES
+            : (reminder.scheduledFor)
+            ? new Date(new Date(reminder.scheduledFor).getTime() + REMINDER_OFFSET_MINUTES * 60 * 1000)
             : null;
 
         const clientTz =
