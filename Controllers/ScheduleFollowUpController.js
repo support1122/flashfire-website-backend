@@ -1,7 +1,6 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { scheduleCall } from '../Utils/CallScheduler.js';
 import { scheduleAllWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler.js';
-import { emailQueue } from '../Utils/queue.js';
 import sgMail from '@sendgrid/mail';
 import { DateTime } from 'luxon';
 import { Logger } from '../Utils/Logger.js';
@@ -69,9 +68,10 @@ export default async function ScheduleFollowUp(req, res) {
       whatsapp: { success: false, error: null }
     };
 
-    // 1. Schedule Email at follow-up time
-    try {
-      const followUpMessage = `Hi ${booking.clientName || 'there'},
+    // 1. Follow-up email: send immediately via SendGrid (queue removed)
+    if (booking.clientEmail) {
+      try {
+        const followUpMessage = `Hi ${booking.clientName || 'there'},
 
 You asked for a follow-up regarding your consultation with FlashFire. We wanted to reach out and see how things are going.
 
@@ -81,9 +81,7 @@ Best regards,
 Elizabeth
 FlashFire Team`;
 
-      const emailJob = await emailQueue.add(
-        'send-follow-up-email',
-        {
+        await sgMail.send({
           to: booking.clientEmail,
           from: senderEmail,
           subject: 'Follow-up: FlashFire Consultation',
@@ -95,30 +93,23 @@ FlashFire Team`;
               <p>If you have any questions or would like to reschedule your meeting, please don't hesitate to reach out to us.</p>
               <p>Best regards,<br/>Elizabeth<br/>FlashFire Team</p>
             </div>
-          `,
-          bookingId: booking.bookingId,
-          followUpDateTime: followUpDate.toISOString()
-        },
-        {
-          delay: followUpDate.getTime() - now.getTime(),
-          jobId: `followup_email_${booking.bookingId}_${followUpDate.getTime()}`
-        }
-      );
+          `
+        });
 
-      results.email.success = true;
-      results.email.jobId = emailJob.id;
-      Logger.info('Scheduled follow-up email', {
-        bookingId: booking.bookingId,
-        email: booking.clientEmail,
-        scheduledFor: followUpDate.toISOString(),
-        jobId: emailJob.id
-      });
-    } catch (error) {
-      results.email.error = error.message;
-      Logger.error('Failed to schedule follow-up email', {
-        bookingId: booking.bookingId,
-        error: error.message
-      });
+        results.email.success = true;
+        Logger.info('Sent follow-up email immediately', {
+          bookingId: booking.bookingId,
+          email: booking.clientEmail
+        });
+      } catch (error) {
+        results.email.error = error.message;
+        Logger.error('Failed to send follow-up email', {
+          bookingId: booking.bookingId,
+          error: error.message
+        });
+      }
+    } else {
+      results.email.error = 'No email address available for booking';
     }
 
     // 2. Schedule Call 10 minutes before follow-up

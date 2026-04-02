@@ -106,19 +106,17 @@ async function main() {
       // Schedule WA reminders if missing
       if (waCount === 0 && phone && !DRY_RUN) {
         try {
-          const meetingTimeFormatted = meetingClient;
-          const meetingDateFormatted = DateTime.fromJSDate(meetingStart)
-            .setZone(booking.inviteeTimezone || 'America/New_York')
-            .toFormat('EEEE MMM d, yyyy');
-
           const tz = booking.inviteeTimezone || 'America/New_York';
-          // Map IANA to abbreviation
-          const tzAbbr = tz.includes('Kolkata') ? 'IST' :
-            tz.includes('New_York') ? 'ET' :
-            tz.includes('Chicago') ? 'CT' :
-            tz.includes('Denver') ? 'MT' :
-            tz.includes('Los_Angeles') ? 'PT' :
-            tz.includes('Calcutta') ? 'IST' : 'ET';
+          const startDT = DateTime.fromJSDate(meetingStart).setZone(tz);
+          const endDT = booking.scheduledEventEndTime
+            ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime)).setZone(tz)
+            : startDT.plus({ minutes: 15 });
+          const fmt = (dt) => dt.minute === 0
+            ? dt.toFormat('ha').toLowerCase()
+            : dt.toFormat('h:mma').toLowerCase();
+          const meetingTimeFormatted = `${fmt(startDT)} – ${fmt(endDT)}`;
+          const meetingDateFormatted = startDT.toFormat('EEEE MMM d, yyyy');
+          const tzAbbr = startDT.isValid ? startDT.toFormat('ZZZZ') : 'ET';
 
           const waResult = await scheduleAllWhatsAppReminders({
             phoneNumber: phone,

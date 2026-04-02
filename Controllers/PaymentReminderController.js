@@ -1,9 +1,6 @@
 import { Logger } from '../Utils/Logger.js';
 import { sendWhatsAppMessage } from '../Utils/WatiHelper.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { callQueue } from '../Utils/queue.js';
-
-
 export const schedulePaymentReminder = async (req, res) => {
   try {
     const { bookingId, clientName, clientPhone, paymentLink, reminderDays } = req.body;
@@ -58,21 +55,9 @@ export const schedulePaymentReminder = async (req, res) => {
       reminderDays
     };
 
-    // Add job to queue with delay
-    const job = await callQueue.add('payment-reminder', jobData, {
-      delay: delayMs,
-      removeOnComplete: 10,
-      removeOnFail: 5,
-      attempts: 3,
-      backoff: {
-        type: 'exponential',
-        delay: 2000,
-      },
-    });
-
-    // Update booking record with payment reminder info
+    // Store payment reminder in booking record
     const paymentReminderData = {
-      jobId: job.id.toString(),
+      jobId: null,
       paymentLink,
       reminderDays,
       scheduledTime,
@@ -101,8 +86,7 @@ export const schedulePaymentReminder = async (req, res) => {
         bookingId,
         clientName,
         reminderDays,
-        scheduledTime: scheduledTime.toISOString(),
-        jobId: job.id
+        scheduledTime: scheduledTime.toISOString()
       }
     });
 
@@ -168,17 +152,15 @@ export const cancelPaymentReminder = async (req, res) => {
   try {
     const { jobId } = req.params;
 
-    // Remove job from queue
-    const job = await callQueue.getJob(jobId);
-    if (!job) {
+    // Resolve bookingId from DB (no queue job to look up)
+    const booking = await CampaignBookingModel.findOne({ 'paymentReminders.jobId': jobId });
+    const bookingId = booking?.bookingId;
+    if (!bookingId) {
       return res.status(404).json({
         success: false,
         message: 'Payment reminder job not found'
       });
     }
-
-    const { bookingId } = job.data;
-    await job.remove();
 
     // Update database to mark reminder as cancelled
     await CampaignBookingModel.findOneAndUpdate(

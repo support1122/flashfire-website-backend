@@ -20,6 +20,7 @@ import { DateTime } from 'luxon';
 import crypto from 'crypto';
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { CalendlyWebhookDedupeModel } from '../Schema_Models/CalendlyWebhookDedupe.js';
+import { CalendlyWebhookLogModel } from '../Schema_Models/CalendlyWebhookLog.js';
 
 /** Compare stored Date / ISO string to Calendly start_time (same instant within 2 min). */
 function sameScheduledInstant(stored, isoFromPayload) {
@@ -195,14 +196,24 @@ async function handleCreatedEvent(req, res, payload) {
 
   // Guard against invalid DateTime — prevents "Invalid DateTime" in Discord/WhatsApp messages
   // Append timezone abbreviation so the team can see which timezone the client is in
-  const meetingTimeUS = meetingStartUTC.isValid
+  let meetingTimeUS = meetingStartUTC.isValid
     ? meetingStartUTC.setZone(clientZone).toFormat('ff') + ' ' + meetingStartUTC.setZone(clientZone).toFormat('ZZZZ')
     : `Unknown (raw: ${rawStartTime || 'null'})`;
-  const meetingTimeIndia = meetingStartUTC.isValid
+  let meetingTimeIndia = meetingStartUTC.isValid
     ? meetingStartUTC.setZone('Asia/Kolkata').toFormat('ff') + ' IST'
     : `Unknown (raw: ${rawStartTime || 'null'})`;
   const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
   const bookedAt = new Date(payload?.created_at || new Date()).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+
+  // Store raw webhook payload for debugging/audit (fire-and-forget)
+  const webhookLogId = payload?.invitee?.uri
+    ? `wh_${crypto.createHash('md5').update(payload.invitee.uri + (rawStartTime || '')).digest('hex')}`
+    : `wh_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  CalendlyWebhookLogModel.create({
+    webhookId: webhookLogId,
+    eventType: 'invitee.created',
+    payload: { ...payload },
+  }).catch(err => Logger.warn('Failed to store webhook log', { error: err.message }));
 
   // Extract and log reschedule link
   let rescheduleLink = payload?.reschedule_url || null;
@@ -728,6 +739,18 @@ async function handleCreatedEvent(req, res, payload) {
     Logger.warn('⚠️ Failed to import LinkedIn Conversion API service:', importError.message);
   }
 
+  // Recompute times if webhook missed start_time — use saved booking record as source of truth
+  if (!meetingStartUTC.isValid && newBooking?.scheduledEventStartTime) {
+    const fallbackUTC = DateTime.fromJSDate(
+      new Date(newBooking.scheduledEventStartTime), { zone: 'utc' }
+    );
+    if (fallbackUTC.isValid) {
+      const effectiveZone = inviteeTimezone || newBooking.inviteeTimezone || 'America/Los_Angeles';
+      meetingTimeUS    = fallbackUTC.setZone(effectiveZone).toFormat('ff') + ' ' + fallbackUTC.setZone(effectiveZone).toFormat('ZZZZ');
+      meetingTimeIndia = fallbackUTC.setZone('Asia/Kolkata').toFormat('ff') + ' IST';
+    }
+  }
+
   // Prepare booking details for Discord
   const bookingDetails = {
     "Booking ID": newBooking.bookingId,
@@ -747,6 +770,14 @@ async function handleCreatedEvent(req, res, payload) {
     "UTM Campaign": utmCampaign || 'N/A',
     "Database Status": "\u2705 SAVED"
   };
+
+  // Update webhook log with resolved bookingId
+  if (newBooking?.bookingId) {
+    CalendlyWebhookLogModel.updateOne(
+      { webhookId: webhookLogId },
+      { $set: { bookingId: newBooking.bookingId } }
+    ).catch(() => {});
+  }
 
   if (payload?.tracking?.utm_source !== 'webpage_visit' && payload?.tracking?.utm_source !== null && payload?.tracking?.utm_source !== 'direct') {
     try {
