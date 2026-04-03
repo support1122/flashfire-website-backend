@@ -649,11 +649,30 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     const meetingTimeWithTimezone = resolvedMeetingTime && resolvedTimezone
       ? `${resolvedMeetingTime} ${resolvedTimezone}`
       : (resolvedMeetingTime || '');
-    
+
+    // Resolve meetingDate — if null/undefined, derive from meetingStartISO or scheduledFor
+    let resolvedMeetingDate = meetingDate;
+    if (!meetingDate || meetingDate === 'undefined' || meetingDate === 'null') {
+      const meta = scheduledReminder.metadata || {};
+      const rawTz = meta.inviteeTimezone || scheduledReminder.inviteeTimezone;
+      const inviteeTz = (rawTz && typeof rawTz === 'string' && rawTz.trim() && IANAZone.isValidZone(rawTz.trim()))
+        ? rawTz.trim() : 'America/New_York';
+      const startFromIso = parseMeetingStartToDate(scheduledReminder.meetingStartISO);
+      if (startFromIso) {
+        resolvedMeetingDate = DateTime.fromJSDate(startFromIso, { zone: 'utc' }).setZone(inviteeTz).toFormat('EEEE MMM d, yyyy');
+      } else if (scheduledReminder.scheduledFor) {
+        const offsetMap = { immediate: 1, '5min': 5, '3h': 180, '2hour': 120, '24hour': 1440 };
+        const reminderType = meta.reminderType ?? scheduledReminder.reminderType;
+        const offsetMin = offsetMap[reminderType] ?? 5;
+        const derived = new Date(new Date(scheduledReminder.scheduledFor).getTime() + offsetMin * 60 * 1000);
+        resolvedMeetingDate = DateTime.fromJSDate(derived, { zone: 'utc' }).setZone(inviteeTz).toFormat('EEEE MMM d, yyyy');
+      }
+    }
+
     // Template parameters: {{1}} = name, {{2}} = date, {{3}} = time with timezone, {{4}} = meeting link, {{5}} = reschedule link
     const parameters = [
       clientName || 'Valued Client', // {{1}}
-      meetingDate, // {{2}}
+      resolvedMeetingDate || '', // {{2}}
       meetingTimeWithTimezone, // {{3}} - now includes timezone (e.g., "4pm - 4:15pm ET")
       meetingLink || 'Not Provided', // {{4}}
       rescheduleLink || DEFAULT_RESCHEDULE_LINK // {{5}}
