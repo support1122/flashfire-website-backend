@@ -1186,7 +1186,7 @@ export async function markAbsent(req, res) {
 
 // ==================== POST /api/bda-attendance/warn-absent ====================
 
-const WARN_DISCORD_LINE = '⚠️ BDA Not in Meeting';
+const WARN_DISCORD_LINE = '';
 
 export async function warnAbsent(req, res) {
   try {
