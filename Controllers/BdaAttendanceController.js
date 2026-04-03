@@ -1240,20 +1240,20 @@ export async function warnAbsent(req, res) {
       return res.status(200).json({ success: true, skipped: true, reason: 'no_webhook' });
     }
 
-    // try {
-    //   const response = await fetch(webhookUrl, {
-    //     method: 'POST',
-    //     headers: { 'Content-Type': 'application/json' },
-    //     body: JSON.stringify({ content: WARN_DISCORD_LINE }),
-    //   });
-    //   if (!response.ok) {
-    //     await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
-    //     return res.status(502).json({ success: false, error: 'Discord delivery failed' });
-    //   }
-    // } catch (err) {
-    //   await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
-    //   return res.status(502).json({ success: false, error: 'Discord delivery failed' });
-    // }
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: WARN_DISCORD_LINE }),
+      });
+      if (!response.ok) {
+        await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
+        return res.status(502).json({ success: false, error: 'Discord delivery failed' });
+      }
+    } catch (err) {
+      await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
+      return res.status(502).json({ success: false, error: 'Discord delivery failed' });
+    }
 
     notifyBdaSSE(emailNorm, 'attendance_update', { bookingId });
 
