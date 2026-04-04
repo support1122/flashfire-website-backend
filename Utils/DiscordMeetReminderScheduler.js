@@ -152,6 +152,11 @@ export async function scheduleDiscordMeetReminder({
       };
     }
 
+    // Pre-compute formatted times NOW so send time never needs to recalculate
+    // (avoids "Unknown" if meetingStartISO is ever null/invalid at send time)
+    const precomputedClientTime = formatMeetingWallTime(meetingStart, inviteeTimezone);
+    const precomputedIndiaTime = formatMeetingWallTime(meetingStart, 'Asia/Kolkata');
+
     await ScheduledDiscordMeetReminderModel.create({
       reminderId,
       bookingId,
@@ -163,6 +168,8 @@ export async function scheduleDiscordMeetReminder({
       inviteeTimezone,
       source,
       metadata,
+      precomputedClientTime,
+      precomputedIndiaTime,
     });
 
     // Register precision timer with UnifiedScheduler
@@ -325,8 +332,16 @@ export async function processDueDiscordMeetReminders() {
           booking?.inviteeTimezone ||
           null;
 
-        const meetingTimeClient = formatMeetingWallTime(effectiveMeetingStart, clientTz);
-        const meetingTimeIST   = formatMeetingWallTime(effectiveMeetingStart, 'Asia/Kolkata');
+        // Use pre-computed times stored at schedule time (most reliable).
+        // Fall back to runtime calculation only for old records that lack them.
+        const meetingTimeClient =
+          (reminder.precomputedClientTime && reminder.precomputedClientTime !== 'Unknown')
+            ? reminder.precomputedClientTime
+            : formatMeetingWallTime(effectiveMeetingStart, clientTz);
+        const meetingTimeIST =
+          (reminder.precomputedIndiaTime && reminder.precomputedIndiaTime !== 'Unknown')
+            ? reminder.precomputedIndiaTime
+            : formatMeetingWallTime(effectiveMeetingStart, 'Asia/Kolkata');
 
         const headlineStart =
           effectiveMeetingStart &&
