@@ -2,9 +2,10 @@ import { PaymentModel } from "../Schema_Models/Payment.js";
 import { DiscordConnect } from "../Utils/DiscordConnect.js";
 import { sendPaymentConfirmationEmail } from "../Utils/PaymentEmailHelper.js";
 
-// Hardcoded Discord webhook for PayPal events (requested explicitly)
 const PAYPAL_DISCORD_WEBHOOK =
-  "https://discord.com/api/webhooks/1465669920179228735/fdeuTWT2kIaENKSeOtecn0DmPe-fOQgSXPLnvb2GOH305ZSIO17rvT8lTgq109Hyq-Cb";
+  process.env.DISCORD_PAYPAL_WEBHOOK_URL ||
+  process.env.DISCORD_MAIN_WEBHOOK_URL ||
+  null;
 
 /**
  * Handle PayPal webhook events
@@ -25,28 +26,45 @@ export const handlePayPalWebhook = async (req, res) => {
       resourceType: webhookEvent.resource_type
     });
 
-    // Always send a simple Discord notification for ANY PayPal webhook event
-    try {
-      const basicMessageLines = [
-        'PayPal webhook event received',
-        '────────────────────────────────',
-        `Type:   ${webhookEvent.event_type || 'N/A'}`,
-        `ID:     ${webhookEvent.id || 'N/A'}`,
-        `Time:   ${webhookEvent.create_time || 'N/A'}`,
-      ];
+    // Send rich Discord notification for any PayPal payment event
+    if (PAYPAL_DISCORD_WEBHOOK) {
+      try {
+        const r = webhookEvent.resource || {};
+        // Extract buyer info from different event structures
+        const payer = r.payer || r.payment_source?.paypal || {};
+        const payerName = [payer.name?.given_name, payer.name?.surname].filter(Boolean).join(' ')
+          || payer.email_address || '';
+        const payerEmail = payer.email_address || '';
+        // Amount from capture or purchase_units
+        const amtObj = r.amount || r.purchase_units?.[0]?.amount || {};
+        const amount = amtObj.value ? `${amtObj.currency_code || 'USD'} ${amtObj.value}` : '';
+        // Description / item name
+        const item = r.purchase_units?.[0]?.items?.[0];
+        const description = item?.name || r.purchase_units?.[0]?.description || r.description || '';
+        const txnId = r.id || '';
+        const istTime = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
-      const basicMessage = basicMessageLines.join('\n');
+        const isPayment = ['PAYMENT.CAPTURE.COMPLETED', 'CHECKOUT.ORDER.COMPLETED'].includes(webhookEvent.event_type);
+        const emoji = isPayment ? '💰' : 'ℹ️';
 
-      await DiscordConnect(
-        PAYPAL_DISCORD_WEBHOOK,
-        basicMessage,
-        false // no emoji / prefix, just clean text
-      );
+        const lines = [
+          `${emoji} **PayPal: ${webhookEvent.event_type || 'Event'}**`,
+          '────────────────────────────────',
+          ...(payerName  ? [`👤 **Buyer:** ${payerName}`]        : []),
+          ...(payerEmail ? [`📧 **Email:** ${payerEmail}`]       : []),
+          ...(amount     ? [`💵 **Amount:** ${amount}`]          : []),
+          ...(description? [`📦 **Plan/Item:** ${description}`]  : []),
+          ...(txnId      ? [`🔖 **Transaction ID:** ${txnId}`]   : []),
+          `🕐 **Time (IST):** ${istTime}`,
+        ];
 
-      console.log('✅ Basic PayPal webhook notification sent to Discord');
-    } catch (discordError) {
-      console.error('❌ Failed to send basic PayPal webhook Discord notification:', discordError);
-      // Do not throw – webhook handling should continue
+        await DiscordConnect(PAYPAL_DISCORD_WEBHOOK, lines.join('\n'), false);
+        console.log('✅ PayPal webhook Discord notification sent');
+      } catch (discordError) {
+        console.error('❌ Failed to send PayPal Discord notification:', discordError.message);
+      }
+    } else {
+      console.warn('⚠️ DISCORD_PAYPAL_WEBHOOK_URL not set — skipping Discord notification');
     }
 
     // Handle different event types
