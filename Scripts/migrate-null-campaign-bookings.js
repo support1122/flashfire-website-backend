@@ -43,7 +43,7 @@ async function migrateNullCampaignBookings() {
         utmSource: 'ajrocks',
         utmMedium: 'email',
         utmCampaign: 'direct_booking',
-        generatedUrl: 'https://calendly.com/feedback-flashfire/30min?utm_source=ajrocks&utm_medium=email&utm_campaign=direct_booking',
+        generatedUrl: 'https://calendly.com/feedback-flashfire/15min?utm_source=ajrocks&utm_medium=email&utm_campaign=direct_booking',
         baseUrl: 'https://www.flashfirejobs.com',
         createdBy: 'system'
       });
