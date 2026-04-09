@@ -115,7 +115,7 @@ export const testNoShowTemplate = async (req, res) => {
     const now = new Date();
     const meetingDate = now.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     const meetingTime = '4pm – 4:15pm ET';
-    const rescheduleLink = 'https://calendly.com/feedback-flashfire/30min';
+    const rescheduleLink = 'https://calendly.com/feedback-flashfire/15min';
     
     const defaultParameters = [
       'Test Client Name',
