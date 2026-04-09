@@ -32,7 +32,7 @@ export const WorkflowConfig = {
   defaults: {
     senderEmail: process.env.DEFAULT_SENDER_EMAIL || 'elizabeth@flashfirehq.com',
     domain: process.env.DEFAULT_DOMAIN || 'flashfiremails.com',
-    schedulingLink: process.env.DEFAULT_SCHEDULING_LINK || 'https://calendly.com/feedback-flashfire/30min'
+    schedulingLink: process.env.DEFAULT_SCHEDULING_LINK || 'https://calendly.com/feedback-flashfire/15min'
   },
 
   retry: {
