@@ -1,7 +1,7 @@
 import { DateTime } from 'luxon';
 import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 
-const DEFAULT_SCHEDULING_LINK = 'https://calendly.com/feedback-flashfire/30min';
+const DEFAULT_SCHEDULING_LINK = 'https://calendly.com/feedback-flashfire/15min';
 
 /**
  * Resolves timezone abbreviation from IANA timezone name.
