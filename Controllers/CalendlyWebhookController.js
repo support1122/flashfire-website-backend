@@ -615,8 +615,8 @@ async function handleCreatedEvent(req, res, payload) {
           utmSource: utmSource,
           utmMedium: utmMedium || 'direct',
           utmCampaign: utmCampaign || 'calendly_direct',
-          generatedUrl: `https://calendly.com/feedback-flashfire/30min?utm_source=${utmSource}&utm_medium=${utmMedium || 'direct'}`,
-          baseUrl: 'https://calendly.com/feedback-flashfire/30min',
+          generatedUrl: `https://calendly.com/feedback-flashfire/15min?utm_source=${utmSource}&utm_medium=${utmMedium || 'direct'}`,
+          baseUrl: 'https://calendly.com/feedback-flashfire/15min',
           isActive: true
         });
 
