@@ -47,4 +47,14 @@ describe('resolveUnknownWhatsAppMeetingDisplay', () => {
     });
     assert.ok(d.resolvedMeetingTime.length > 0);
   });
+
+  it('never returns Unknown as timezone label', () => {
+    const d = resolveUnknownWhatsAppMeetingDisplay({
+      meetingStartISO: '2026-06-15T17:00:00.000Z',
+      metadata: { inviteeTimezone: 'America/New_York' },
+      timezone: 'Unknown',
+    });
+    assert.notEqual(String(d.resolvedTimezone).toLowerCase(), 'unknown');
+    assert.ok(d.resolvedTimezone.length > 0);
+  });
 });

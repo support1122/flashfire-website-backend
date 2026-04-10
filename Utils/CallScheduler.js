@@ -33,6 +33,37 @@ let twilioClient = null;
 let isRunning = false;
 let pollInterval = null;
 
+function getSafeTimezoneAbbreviation(meetingStartISO, ianaTimezone) {
+  const fallback = 'ET';
+  const startDate = parseMeetingStartToDate(meetingStartISO);
+  if (!startDate) return fallback;
+
+  const startUTC = DateTime.fromJSDate(startDate, { zone: 'utc' });
+  if (!startUTC.isValid) return fallback;
+
+  if (ianaTimezone && typeof ianaTimezone === 'string') {
+    const zoneName = ianaTimezone.trim();
+    const inZone = startUTC.setZone(zoneName);
+    if (inZone.isValid) {
+      const abbr = inZone.toFormat('ZZZZ');
+      if (abbr && !abbr.startsWith('GMT') && !abbr.startsWith('UTC') && abbr !== 'Unknown') {
+        return abbr;
+      }
+      if (zoneName.includes('Kolkata') || zoneName.includes('Calcutta')) return 'IST';
+      if (zoneName.includes('Los_Angeles') || zoneName.includes('Pacific')) return 'PT';
+      if (zoneName.includes('New_York') || zoneName.includes('Eastern')) return 'ET';
+      if (zoneName.includes('Chicago') || zoneName.includes('Central')) return 'CT';
+      if (zoneName.includes('Denver') || zoneName.includes('Mountain')) return 'MT';
+    }
+  }
+
+  const la = startUTC.setZone('America/Los_Angeles').offset / 60;
+  const ny = startUTC.setZone('America/New_York').offset / 60;
+  if (la === -8 || la === -7) return la === -8 ? 'PST' : 'PDT';
+  if (ny === -5 || ny === -4) return ny === -5 ? 'EST' : 'EDT';
+  return fallback;
+}
+
 // Initialize Twilio client
 if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
   twilioClient = Twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN);
@@ -236,51 +267,11 @@ export async function scheduleCall({
       
       const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
-      // Determine timezone: use invitee_timezone from webhook if available, otherwise fallback to hardcoded logic
-      let meetingTimezone;
-      if (metadata?.inviteeTimezone) {
-        // Convert IANA timezone string to abbreviation
-        const meetingStartForTZ = new Date(meetingStartISO);
-        const meetingStartUTCTZ = DateTime.fromJSDate(meetingStartForTZ, { zone: 'utc' });
-        const meetingInTimezone = meetingStartUTCTZ.setZone(metadata.inviteeTimezone);
-        const offset = meetingInTimezone.offset / 60;
-
-        // Check for PST/PDT (UTC-8 or UTC-7)
-        if (metadata.inviteeTimezone.includes('Los_Angeles') || metadata.inviteeTimezone.includes('Pacific')) {
-          meetingTimezone = offset === -8 ? 'PST' : 'PDT';
-        }
-        // Check for ET/EDT (UTC-5 or UTC-4)
-        else if (metadata.inviteeTimezone.includes('New_York') || metadata.inviteeTimezone.includes('Eastern')) {
-          meetingTimezone = offset === -5 ? 'ET' : 'EDT';
-        }
-        // Check for CT/CDT (UTC-6 or UTC-5)
-        else if (metadata.inviteeTimezone.includes('Chicago') || metadata.inviteeTimezone.includes('Central')) {
-          meetingTimezone = offset === -6 ? 'CT' : 'CDT';
-        }
-        // Check for MT/MDT (UTC-7 or UTC-6)
-        else if (metadata.inviteeTimezone.includes('Denver') || metadata.inviteeTimezone.includes('Mountain')) {
-          meetingTimezone = offset === -7 ? 'MT' : 'MDT';
-        }
-        // Fallback: determine from offset
-        else {
-          if (offset === -8 || offset === -7) meetingTimezone = 'PST';
-          else if (offset === -5 || offset === -4) meetingTimezone = 'ET';
-          else if (offset === -6 || offset === -5) meetingTimezone = 'CT';
-          else if (offset === -7 || offset === -6) meetingTimezone = 'MT';
-          else meetingTimezone = 'ET';
-        }
-        console.log(`✅ [CallScheduler] Using invitee_timezone from webhook: ${metadata.inviteeTimezone} -> ${meetingTimezone}`);
-      } else {
-        // Fallback to hardcoded logic if invitee_timezone not available
-        const meetingStartForTZ = new Date(meetingStartISO);
-        const meetingStartUTCTZ = DateTime.fromJSDate(meetingStartForTZ, { zone: 'utc' });
-        const meetingPST = meetingStartUTCTZ.setZone('America/Los_Angeles');
-        const pstOffset = meetingPST.offset / 60;
-        const meetingET = meetingStartUTCTZ.setZone('America/New_York');
-        const etOffset = meetingET.offset / 60;
-        meetingTimezone = (pstOffset === -8 || pstOffset === -7) ? 'PST' : ((etOffset === -5 || etOffset === -4) ? 'ET' : 'ET');
-        console.warn('⚠️ [CallScheduler] invitee_timezone not available, using fallback logic:', meetingTimezone);
-      }
+      const meetingTimezone = getSafeTimezoneAbbreviation(
+        meetingStartISO,
+        metadata?.inviteeTimezone || displayZone
+      );
+      console.log(`✅ [CallScheduler] timezone resolved: ${metadata?.inviteeTimezone || displayZone || 'fallback'} -> ${meetingTimezone}`);
 
       // Schedule all WhatsApp reminders (24h, 2h, 5min)
       const whatsappResults = await scheduleAllWhatsAppReminders({
@@ -693,4 +684,3 @@ export default {
   getSchedulerStats,
   getUpcomingCalls,
 };
-
