@@ -32,6 +32,33 @@ const DEFAULT_RESCHEDULE_LINK = 'https://www.google.com/url?q=https%3A%2F%2Fcale
 let isRunning = false;
 let pollInterval = null;
 
+const UNKNOWN_LIKE_RE = /^(unknown|undefined|null|invalid datetime)$/i;
+
+function isUnknownLike(value) {
+  if (value == null) return true;
+  const s = String(value).trim();
+  return s.length === 0 || UNKNOWN_LIKE_RE.test(s);
+}
+
+function sanitizeTimezoneLabel(label, inviteeTz = 'America/New_York') {
+  if (label != null) {
+    const raw = String(label).trim();
+    if (raw && !UNKNOWN_LIKE_RE.test(raw) && !raw.includes('/')) {
+      if (!raw.startsWith('GMT') && !raw.startsWith('UTC')) return raw;
+      if (inviteeTz.includes('Kolkata') || inviteeTz.includes('Calcutta')) return 'IST';
+      return raw;
+    }
+  }
+
+  const tz = typeof inviteeTz === 'string' && inviteeTz.trim() ? inviteeTz.trim() : 'America/New_York';
+  if (tz.includes('Kolkata') || tz.includes('Calcutta')) return 'IST';
+  if (tz.includes('Los_Angeles') || tz.includes('Pacific')) return 'PT';
+  if (tz.includes('New_York') || tz.includes('Eastern')) return 'ET';
+  if (tz.includes('Chicago') || tz.includes('Central')) return 'CT';
+  if (tz.includes('Denver') || tz.includes('Mountain')) return 'MT';
+  return 'ET';
+}
+
 
 /**
  * Determine timezone abbreviation from IANA timezone name or meeting time.
@@ -51,7 +78,7 @@ function getTimezoneAbbreviation(meetingStartISO, ianaTimezone) {
     if (ianaTimezone && typeof ianaTimezone === 'string') {
       const inZone = meetingStartUTC.setZone(ianaTimezone);
       if (inZone.isValid) {
-        return inZone.toFormat('ZZZZ'); // e.g. "CDT", "PDT", "EST", "IST"
+        return sanitizeTimezoneLabel(inZone.toFormat('ZZZZ'), ianaTimezone); // e.g. "CDT", "PDT", "EST", "IST"
       }
     }
 
@@ -64,10 +91,10 @@ function getTimezoneAbbreviation(meetingStartISO, ianaTimezone) {
     const etOffset = meetingET.offset / 60;
     if (etOffset === -5 || etOffset === -4) return etOffset === -5 ? 'EST' : 'EDT';
 
-    return 'ET';
+    return sanitizeTimezoneLabel(null, ianaTimezone || 'America/New_York');
   } catch (error) {
     console.warn('[WhatsAppReminderScheduler] Error determining timezone, defaulting to ET:', error.message);
-    return 'ET';
+    return sanitizeTimezoneLabel(null, ianaTimezone || 'America/New_York');
   }
 }
 
@@ -584,12 +611,7 @@ export function resolveUnknownWhatsAppMeetingDisplay(scheduledReminder) {
       dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase();
     const timeStr = `${fmt(startDT)} – ${fmt(endDT)}`;
     const tzAbbr = startDT.toFormat('ZZZZ');
-    const tzLabel =
-      !tzAbbr.startsWith('GMT') && !tzAbbr.startsWith('UTC')
-        ? tzAbbr
-        : inviteeTz.includes('Kolkata') || inviteeTz.includes('Calcutta')
-          ? 'IST'
-          : startDT.toFormat('ZZ');
+    const tzLabel = sanitizeTimezoneLabel(tzAbbr, inviteeTz);
     return { resolvedMeetingTime: timeStr, resolvedTimezone: tzLabel };
   };
 
@@ -636,16 +658,29 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     
     // Format meeting time with timezone: "4pm - 4:15pm ET" or "4pm - 4:15pm PST"
     // If meetingTime is missing/Unknown, use meetingStartISO or scheduledFor + metadata offset
-    const isUnknownTime = !meetingTime || meetingTime === 'Unknown' || String(meetingTime).startsWith('Unknown') || meetingTime === 'undefined';
+    const meta = scheduledReminder.metadata || {};
+    const rawTz = meta.inviteeTimezone || scheduledReminder.inviteeTimezone || 'America/New_York';
+    const inviteeTz = (typeof rawTz === 'string' && rawTz.trim() && IANAZone.isValidZone(rawTz.trim()))
+      ? rawTz.trim() : 'America/New_York';
+
+    const isUnknownTime = isUnknownLike(meetingTime) || String(meetingTime).trim().toLowerCase().startsWith('unknown');
     let resolvedMeetingTime = meetingTime;
-    let resolvedTimezone = (timezone && timezone !== 'null') ? timezone : '';
+    let resolvedTimezone = sanitizeTimezoneLabel(timezone, inviteeTz);
     if (isUnknownTime) {
       const derived = resolveUnknownWhatsAppMeetingDisplay(scheduledReminder);
       if (derived.resolvedMeetingTime) {
         resolvedMeetingTime = derived.resolvedMeetingTime;
-        resolvedTimezone = derived.resolvedTimezone || resolvedTimezone;
+        resolvedTimezone = sanitizeTimezoneLabel(derived.resolvedTimezone || resolvedTimezone, inviteeTz);
       }
     }
+
+    // Last-resort guard: never send "Unknown ET"/"Unknown ..."
+    if (isUnknownLike(resolvedMeetingTime) || String(resolvedMeetingTime).trim().toLowerCase().startsWith('unknown')) {
+      const derived = resolveUnknownWhatsAppMeetingDisplay(scheduledReminder);
+      resolvedMeetingTime = derived.resolvedMeetingTime || '';
+      resolvedTimezone = sanitizeTimezoneLabel(derived.resolvedTimezone || resolvedTimezone, inviteeTz);
+    }
+
     const meetingTimeWithTimezone = resolvedMeetingTime && resolvedTimezone
       ? `${resolvedMeetingTime} ${resolvedTimezone}`
       : (resolvedMeetingTime || '');
@@ -653,10 +688,6 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     // Resolve meetingDate — if null/undefined, derive from meetingStartISO or scheduledFor
     let resolvedMeetingDate = meetingDate;
     if (!meetingDate || meetingDate === 'undefined' || meetingDate === 'null') {
-      const meta = scheduledReminder.metadata || {};
-      const rawTz = meta.inviteeTimezone || scheduledReminder.inviteeTimezone;
-      const inviteeTz = (rawTz && typeof rawTz === 'string' && rawTz.trim() && IANAZone.isValidZone(rawTz.trim()))
-        ? rawTz.trim() : 'America/New_York';
       const startFromIso = parseMeetingStartToDate(scheduledReminder.meetingStartISO);
       if (startFromIso) {
         resolvedMeetingDate = DateTime.fromJSDate(startFromIso, { zone: 'utc' }).setZone(inviteeTz).toFormat('EEEE MMM d, yyyy');
@@ -978,4 +1009,3 @@ export default {
   getWhatsAppReminderSchedulerStats,
   getUpcomingWhatsAppReminders,
 };
-
