@@ -2,6 +2,7 @@ import sgMail from "@sendgrid/mail";
 import dotenv from "dotenv";
 dotenv.config();
 import { DiscordConnect } from "./DiscordConnect.js";
+import { generateInvoicePdfBuffer } from "./InvoicePdfHelper.js";
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1 || process.env.SENDGRID_API_KEY);
 
@@ -17,7 +18,11 @@ export async function sendPaymentConfirmationEmail(paymentData) {
       planName,
       planSubtitle,
       paypalOrderId,
+      transactionId,
+      transactionProvider = 'PayPal',
       paymentDate = new Date(),
+      invoiceNumber,
+      includePdfInvoice = true,
     } = paymentData;
 
     if (!customerEmail || !customerFirstName || !amount || !planName) {
@@ -26,6 +31,9 @@ export async function sendPaymentConfirmationEmail(paymentData) {
 
     const customerName = `${customerFirstName} ${customerLastName || ''}`.trim();
     const formattedAmount = parseFloat(amount).toFixed(2);
+    const finalTransactionId = transactionId || paypalOrderId || `txn_${Date.now()}`;
+    const finalInvoiceNumber = invoiceNumber || `INV-${Date.now()}`;
+    const transactionLabel = transactionProvider === 'Stripe' ? 'Payment Intent ID' : 'Transaction ID';
     const formattedDate = new Date(paymentDate).toLocaleDateString('en-US', {
       year: 'numeric',
       month: 'long',
@@ -98,8 +106,12 @@ export async function sendPaymentConfirmationEmail(paymentData) {
                                                 <td style="padding: 8px 0; color: #333333; font-size: 16px; font-weight: 700; color: #ff5722;">${currency} ${formattedAmount}</td>
                                             </tr>
                                             <tr>
-                                                <td style="padding: 8px 0; color: #666666; font-size: 14px;">Transaction ID:</td>
-                                                <td style="padding: 8px 0; color: #333333; font-size: 14px; font-family: monospace;">${paypalOrderId}</td>
+                                                <td style="padding: 8px 0; color: #666666; font-size: 14px;">${transactionLabel}:</td>
+                                                <td style="padding: 8px 0; color: #333333; font-size: 14px; font-family: monospace;">${finalTransactionId}</td>
+                                            </tr>
+                                            <tr>
+                                                <td style="padding: 8px 0; color: #666666; font-size: 14px;">Invoice Number:</td>
+                                                <td style="padding: 8px 0; color: #333333; font-size: 14px; font-family: monospace;">${finalInvoiceNumber}</td>
                                             </tr>
                                             <tr>
                                                 <td style="padding: 8px 0; color: #666666; font-size: 14px;">Payment Date:</td>
@@ -164,7 +176,8 @@ We are pleased to confirm that we have successfully received your payment. Your 
 PAYMENT DETAILS:
 - Plan: ${planName}${planSubtitle ? ` - ${planSubtitle}` : ''}
 - Amount Paid: ${currency} ${formattedAmount}
-- Transaction ID: ${paypalOrderId}
+- ${transactionLabel}: ${finalTransactionId}
+- Invoice Number: ${finalInvoiceNumber}
 - Payment Date: ${formattedDate}
 - Status: Completed
 
@@ -177,6 +190,31 @@ This is an automated confirmation email. Please do not reply to this message.
 © ${new Date().getFullYear()} FlashFire. All rights reserved.
       `.trim()
     };
+
+    if (includePdfInvoice) {
+      const invoicePdf = await generateInvoicePdfBuffer({
+        invoiceNumber: finalInvoiceNumber,
+        customerName,
+        customerEmail,
+        planName,
+        planSubtitle,
+        amount,
+        currency,
+        paymentDate,
+        transactionId: finalTransactionId,
+        transactionProvider,
+        status: 'Completed',
+      });
+
+      msg.attachments = [
+        {
+          content: invoicePdf.toString('base64'),
+          filename: `${finalInvoiceNumber}.pdf`,
+          type: 'application/pdf',
+          disposition: 'attachment',
+        },
+      ];
+    }
 
     const result = await sgMail.send(msg);
     
@@ -204,6 +242,7 @@ Name:        ${customerName}
 Email:       ${customerEmail}
 Plan:        ${planDisplay}
 Amount:      ${currency} ${formattedAmount}
+Invoice:     ${finalInvoiceNumber}
 Date:        ${formattedDate}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`;

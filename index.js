@@ -277,6 +277,8 @@ app.use(
 app.options(/.*/, cors({ origin: true, credentials: true }));
 // app.use(cors());
 app.use(compression());
+// Stripe webhook must receive raw body for signature verification.
+app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
