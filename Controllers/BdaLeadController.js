@@ -21,6 +21,8 @@ const CAD_BASE_PRICES = {
   EXECUTIVE: 799
 };
 
+const BDA_ALLOWED_LEAD_STATUSES = ['paid', 'scheduled', 'completed', 'rescheduled'];
+
 /** Compute prorated incentive (INR) for one line. configByPlan: Map(planName -> { basePriceUsd, incentivePerLeadInr }). */
 function incentiveForLine(configByPlan, planName, amount, currency) {
   if (!planName || !amount || amount <= 0) return 0;
@@ -56,7 +58,7 @@ function incentiveForBooking(configByPlan, booking) {
 export const getAvailableLeads = async (req, res) => {
   try {
     const bookings = await CampaignBookingModel.find({
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] },
+      bookingStatus: { $in: BDA_ALLOWED_LEAD_STATUSES },
       $or: [
         { 'claimedBy.email': { $exists: false } },
         { 'claimedBy.email': null }
@@ -93,7 +95,7 @@ export const getLeadByEmail = async (req, res) => {
 
     const booking = await CampaignBookingModel.findOne({
       clientEmail: email.toLowerCase().trim(),
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+      bookingStatus: { $in: BDA_ALLOWED_LEAD_STATUSES }
     })
       .sort({ scheduledEventStartTime: -1 })
       .lean();
@@ -148,10 +150,10 @@ export const claimLead = async (req, res) => {
       });
     }
 
-    if (!['paid', 'scheduled', 'completed'].includes(booking.bookingStatus)) {
+    if (!BDA_ALLOWED_LEAD_STATUSES.includes(booking.bookingStatus)) {
       return res.status(400).json({
         success: false,
-        message: 'Only leads with status paid, scheduled, or completed can be claimed'
+        message: 'Only leads with status paid, scheduled, completed, or rescheduled can be claimed'
       });
     }
 
@@ -401,7 +403,7 @@ export const getBdaAnalysis = async (req, res) => {
 
     const matchBase = {};
 
-    const validStatuses = ['paid', 'scheduled', 'completed'];
+    const validStatuses = BDA_ALLOWED_LEAD_STATUSES;
     if (status && status !== 'all') {
       matchBase.bookingStatus = status;
     } else {
@@ -1063,14 +1065,14 @@ export const getAllClientsWithClaimInfo = async (req, res) => {
 
     const match = {
       'claimedBy.email': { $exists: true, $ne: null },
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] }
+      bookingStatus: { $in: BDA_ALLOWED_LEAD_STATUSES }
     };
 
     if (bdaEmail) {
       match['claimedBy.email'] = bdaEmail.toLowerCase().trim();
     }
 
-    if (status && ['paid', 'scheduled', 'completed'].includes(status)) {
+    if (status && BDA_ALLOWED_LEAD_STATUSES.includes(status)) {
       match.bookingStatus = status;
     }
 
