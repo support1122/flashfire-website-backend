@@ -21,6 +21,7 @@ import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js
 import { crmUserMetaLeadsOnly } from '../Middlewares/CrmAuth.js';
 
 import { logReminderError } from '../Schema_Models/ReminderError.js';
+import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibility.js';
 
 const PHONE_REGEX = /^\+?[1-9]\d{9,14}$/;
 
@@ -912,6 +913,17 @@ export const updateBookingStatus = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'Booking not found'
+      });
+    }
+
+    const postMeetingCheck = validatePostMeetingBookingStatus(
+      existingBooking.scheduledEventStartTime,
+      status
+    );
+    if (!postMeetingCheck.ok) {
+      return res.status(400).json({
+        success: false,
+        message: postMeetingCheck.message,
       });
     }
 

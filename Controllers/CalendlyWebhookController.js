@@ -21,6 +21,7 @@ import crypto from 'crypto';
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { CalendlyWebhookDedupeModel } from '../Schema_Models/CalendlyWebhookDedupe.js';
 import { CalendlyWebhookLogModel } from '../Schema_Models/CalendlyWebhookLog.js';
+import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibility.js';
 
 /** Compare stored Date / ISO string to Calendly start_time (same instant within 2 min). */
 function sameScheduledInstant(stored, isoFromPayload) {
@@ -1046,16 +1047,32 @@ async function handleNoShowEvent(req, res, payload) {
     rescheduleUrl: bookingData.rescheduleUrl
   });
 
+  const noShowEligibility = bookingRecord
+    ? validatePostMeetingBookingStatus(bookingRecord.scheduledEventStartTime, 'no-show')
+    : { ok: true };
+  const allowNoShowSideEffects = !bookingRecord || noShowEligibility.ok;
+
   // Send Discord notification
   try {
-    await DiscordConnectForMeet(`🚨 No-Show Alert: ${clientName} (${clientEmail}) missed their meeting. UTM Source: ${bookingData.utmSource || 'Unknown'}`);
+    if (allowNoShowSideEffects) {
+      await DiscordConnectForMeet(`🚨 No-Show Alert: ${clientName} (${clientEmail}) missed their meeting. UTM Source: ${bookingData.utmSource || 'Unknown'}`);
+    } else {
+      await DiscordConnectForMeet(
+        `⚠ Calendly invitee_no_show for ${clientName} (${clientEmail}) — CRM status not updated (${noShowEligibility.message}). UTM: ${bookingData.utmSource || 'Unknown'}`
+      );
+      Logger.warn('Calendly no-show webhook: skipped notifications and DB update until meeting + 5m', {
+        clientEmail,
+        bookingId: bookingRecord?.bookingId,
+        scheduledEventStartTime: bookingRecord?.scheduledEventStartTime,
+      });
+    }
   } catch (discordError) {
     Logger.error('Failed to send Discord notification', { error: discordError.message });
   }
 
-  // Send WhatsApp message if phone number is available
+  // Send WhatsApp message if phone number is available (only when eligible — same rule as CRM status)
   let whatsappSent = false;
-  if (bookingData.clientPhone) {
+  if (allowNoShowSideEffects && bookingData.clientPhone) {
     const whatsappResult = await sendNoShowReminder(bookingData);
 
     if (whatsappResult.success) {
@@ -1072,6 +1089,8 @@ async function handleNoShowEvent(req, res, payload) {
         clientPhone: bookingData.clientPhone
       });
     }
+  } else if (!allowNoShowSideEffects) {
+    Logger.warn('Skipped no-show WhatsApp: meeting not past grace window', { clientEmail });
   } else {
     Logger.warn('No phone number available for WhatsApp reminder', {
       clientName,
@@ -1083,31 +1102,38 @@ async function handleNoShowEvent(req, res, payload) {
   // Update booking record if found
   if (bookingRecord) {
     try {
-      bookingRecord.bookingStatus = 'no-show';
-      bookingRecord.statusChangedAt = new Date();
-      bookingRecord.statusChangeSource = 'calendly';
-      bookingRecord.statusChangedBy = 'calendly_webhook';
-      bookingRecord.noShowDate = new Date();
-      bookingRecord.noShowProcessed = true;
-      bookingRecord.whatsappReminderSent = whatsappSent;
-      if (whatsappSent) {
-        bookingRecord.whatsappSentAt = new Date();
-      }
-      // Update reschedule URL if we got it from webhook and it's not already saved
-      if (rescheduleUrl && !bookingRecord.calendlyRescheduleLink) {
-        bookingRecord.calendlyRescheduleLink = rescheduleUrl;
-        Logger.info('Updated booking record with reschedule URL from webhook', {
+      if (!noShowEligibility.ok) {
+        Logger.info('No-show webhook: booking matched but not persisting status yet', {
+          bookingId: bookingRecord.bookingId,
+          clientEmail,
+        });
+      } else {
+        bookingRecord.bookingStatus = 'no-show';
+        bookingRecord.statusChangedAt = new Date();
+        bookingRecord.statusChangeSource = 'calendly';
+        bookingRecord.statusChangedBy = 'calendly_webhook';
+        bookingRecord.noShowDate = new Date();
+        bookingRecord.noShowProcessed = true;
+        bookingRecord.whatsappReminderSent = whatsappSent;
+        if (whatsappSent) {
+          bookingRecord.whatsappSentAt = new Date();
+        }
+        // Update reschedule URL if we got it from webhook and it's not already saved
+        if (rescheduleUrl && !bookingRecord.calendlyRescheduleLink) {
+          bookingRecord.calendlyRescheduleLink = rescheduleUrl;
+          Logger.info('Updated booking record with reschedule URL from webhook', {
+            bookingId: bookingRecord._id,
+            rescheduleUrl
+          });
+        }
+        await bookingRecord.save();
+
+        Logger.info('Updated booking record with no-show status', {
           bookingId: bookingRecord._id,
-          rescheduleUrl
+          clientEmail,
+          whatsappSent
         });
       }
-      await bookingRecord.save();
-
-      Logger.info('Updated booking record with no-show status', {
-        bookingId: bookingRecord._id,
-        clientEmail,
-        whatsappSent
-      });
     } catch (updateError) {
       Logger.error('Failed to update booking record', {
         error: updateError.message,
