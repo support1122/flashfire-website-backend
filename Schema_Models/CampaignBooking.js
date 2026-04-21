@@ -140,7 +140,20 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  metaCampaignName: {
+    type: String,
+    default: null,
+    index: true
+  },
   metaAdsetId: {
+    type: String,
+    default: null
+  },
+  metaAdsetName: {
+    type: String,
+    default: null
+  },
+  metaAdName: {
     type: String,
     default: null
   },
@@ -149,6 +162,18 @@ export const CampaignBookingSchema = new mongoose.Schema({
     default: null
   },
   metaFormName: {
+    type: String,
+    default: null
+  },
+  metaPlatform: {
+    type: String,
+    default: null
+  },
+  metaIsOrganic: {
+    type: Boolean,
+    default: null
+  },
+  metaLeadStatus: {
     type: String,
     default: null
   },

@@ -1941,7 +1941,13 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
     if (utmCampaign && utmCampaign !== 'all') {
-      matchQuery.utmCampaign = utmCampaign;
+      matchQuery.$and = matchQuery.$and || [];
+      matchQuery.$and.push({
+        $or: [
+          { utmCampaign: utmCampaign },
+          { metaCampaignName: utmCampaign },
+        ],
+      });
     }
     if (utmMedium && utmMedium !== 'all') {
       matchQuery.utmMedium = utmMedium;
@@ -1988,7 +1994,9 @@ export const getLeadsPaginated = async (req, res) => {
           { clientPhone: { $regex: escapedSearch, $options: 'i' } },
           { utmSource: { $regex: escapedSearch, $options: 'i' } },
           { utmMedium: { $regex: escapedSearch, $options: 'i' } },
-          { utmCampaign: { $regex: escapedSearch, $options: 'i' } }
+          { utmCampaign: { $regex: escapedSearch, $options: 'i' } },
+          { metaCampaignName: { $regex: escapedSearch, $options: 'i' } },
+          { metaAdName: { $regex: escapedSearch, $options: 'i' } }
         ];
       }
     }
@@ -2290,7 +2298,13 @@ export const getLeadsIds = async (req, res) => {
       }
     }
     if (utmCampaign && utmCampaign !== 'all') {
-      matchQuery.utmCampaign = utmCampaign;
+      matchQuery.$and = matchQuery.$and || [];
+      matchQuery.$and.push({
+        $or: [
+          { utmCampaign: utmCampaign },
+          { metaCampaignName: utmCampaign },
+        ],
+      });
     }
     if (utmMedium && utmMedium !== 'all') {
       matchQuery.utmMedium = utmMedium;
@@ -2796,7 +2810,13 @@ export const getLeadsAnalytics = async (req, res) => {
       }
     }
     if (utmCampaign && utmCampaign !== 'all') {
-      matchQuery.utmCampaign = utmCampaign;
+      matchQuery.$and = matchQuery.$and || [];
+      matchQuery.$and.push({
+        $or: [
+          { utmCampaign: utmCampaign },
+          { metaCampaignName: utmCampaign },
+        ],
+      });
     }
     if (utmMedium && utmMedium !== 'all') {
       matchQuery.utmMedium = utmMedium;
@@ -3327,6 +3347,51 @@ export const getLeadsAnalytics = async (req, res) => {
       success: false,
       message: 'Failed to fetch leads analytics',
       error: error.message
+    });
+  }
+};
+
+/**
+ * Return distinct utmSource / utmMedium / utmCampaign / metaCampaignName values actually
+ * present on CampaignBooking documents. Used to populate the Leads view filter dropdowns
+ * so every value that exists on a lead is selectable (even orphan values not registered
+ * as a Campaign doc).
+ */
+export const getDistinctBookingUtm = async (_req, res) => {
+  try {
+    const [utmSources, utmMediums, utmCampaigns, metaCampaignNames, metaAdNames] = await Promise.all([
+      CampaignBookingModel.distinct('utmSource'),
+      CampaignBookingModel.distinct('utmMedium'),
+      CampaignBookingModel.distinct('utmCampaign'),
+      CampaignBookingModel.distinct('metaCampaignName'),
+      CampaignBookingModel.distinct('metaAdName'),
+    ]);
+
+    const clean = (arr) =>
+      Array.from(
+        new Set(
+          arr
+            .filter((v) => typeof v === 'string' && v.trim() !== '')
+            .map((v) => v.trim())
+        )
+      ).sort();
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        utmSources: clean(utmSources),
+        utmMediums: clean(utmMediums),
+        utmCampaigns: clean(utmCampaigns),
+        metaCampaignNames: clean(metaCampaignNames),
+        metaAdNames: clean(metaAdNames),
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching distinct booking utm values:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to fetch distinct booking utm values',
+      error: error.message,
     });
   }
 };
