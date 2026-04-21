@@ -296,10 +296,16 @@ export const handleMetaLeadWebhook = async (req, res) => {
             metaLeadId: leadgen_id,
             metaFormId: form_id || null,
             metaAdId: ad_id || null,
+            metaAdName: leadValue.ad_name || leadData?.ad_name || null,
             metaAdsetId: adgroup_id || null,
+            metaAdsetName: leadValue.adset_name || leadData?.adset_name || null,
             metaPageId: pageId || null,
             metaFormName: formName || null,
             metaCampaignId: leadValue.campaign_id || null,
+            metaCampaignName: leadValue.campaign_name || leadData?.campaign_name || null,
+            metaPlatform: leadValue.platform || leadData?.platform || null,
+            metaIsOrganic: typeof leadValue.is_organic === 'boolean' ? leadValue.is_organic : null,
+            metaLeadStatus: leadValue.lead_status || null,
             metaRawData: leadData || leadValue
           };
           if (clientPhone) {
@@ -315,23 +321,33 @@ export const handleMetaLeadWebhook = async (req, res) => {
           await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
           console.log(`Meta lead merged: ${existingLead.bookingId} | ${existingLead.clientEmail} | ${existingLead.bookingStatus} | Form: ${formName}`);
         } else {
+          const metaCampaignName = leadValue.campaign_name || leadData?.campaign_name || null;
+          const metaAdName = leadValue.ad_name || leadData?.ad_name || null;
+          const metaAdsetName = leadValue.adset_name || leadData?.adset_name || null;
+          const metaPlatform = leadValue.platform || leadData?.platform || null;
           const newBooking = new CampaignBookingModel({
             clientName: clientName.trim(),
             clientEmail: normalizedEmail,
             clientPhone: clientPhone || null,
             normalizedClientPhone: normalizedPhone || null,
-            utmSource: parsedFields.utmSource || 'meta_lead_ad',
+            utmSource: parsedFields.utmSource || metaPlatform || 'meta_lead_ad',
             utmMedium: parsedFields.utmMedium || 'paid',
-            utmCampaign: parsedFields.utmCampaign || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form'),
+            utmCampaign: parsedFields.utmCampaign || metaCampaignName || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form'),
             bookingStatus: 'not-scheduled',
             leadSource: 'meta_lead_ad',
             metaLeadId: leadgen_id,
             metaFormId: form_id || null,
             metaAdId: ad_id || null,
+            metaAdName,
             metaAdsetId: adgroup_id || null,
+            metaAdsetName,
             metaPageId: pageId || null,
             metaFormName: formName || null,
             metaCampaignId: leadValue.campaign_id || null,
+            metaCampaignName,
+            metaPlatform,
+            metaIsOrganic: typeof leadValue.is_organic === 'boolean' ? leadValue.is_organic : null,
+            metaLeadStatus: leadValue.lead_status || null,
             metaRawData: leadData || leadValue,
             anythingToKnow: additionalNotes || null,
             bookingCreatedAt: created_time ? new Date(created_time * 1000) : new Date()
@@ -520,14 +536,20 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       id,
       created_time,
       ad_id,
+      ad_name,
       form_id,
       campaign_id,
+      campaign_name,
       adset_id,
+      adset_name,
       form_name,
       job_type,
       email,
       full_name,
-      phone
+      phone,
+      platform,
+      is_organic,
+      lead_status
     } = body;
 
     const metaLeadId = id != null && id !== '' ? String(id).trim() : '';
@@ -548,14 +570,16 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     const clientPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
     const normalizedClientPhone = normalizedPhoneLast10(clientPhone);
 
-    const utmCampaign = ad_id != null && String(ad_id).trim() !== '' ? `meta_ad_${String(ad_id).trim()}` : 'meta_lead_form';
+    const resolvedCampaignName = campaign_name != null && String(campaign_name).trim() !== '' ? String(campaign_name).trim() : null;
+    const utmCampaign = resolvedCampaignName
+      || (ad_id != null && String(ad_id).trim() !== '' ? `meta_ad_${String(ad_id).trim()}` : 'meta_lead_form');
 
     const anythingToKnow = `Job type: ${job_type != null ? String(job_type) : ''}`;
 
     const filter = { metaLeadId };
 
     const $set = {
-      utmSource: 'meta_lead_ad',
+      utmSource: platform != null && String(platform).trim() !== '' ? String(platform).trim() : 'meta_lead_ad',
       utmMedium: 'paid',
       utmCampaign,
       clientName,
@@ -567,9 +591,15 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       metaLeadId,
       metaFormId: form_id != null ? String(form_id) : null,
       metaAdId: ad_id != null ? String(ad_id) : null,
+      metaAdName: ad_name != null ? String(ad_name) : null,
       metaCampaignId: campaign_id != null ? String(campaign_id) : null,
+      metaCampaignName: resolvedCampaignName,
       metaAdsetId: adset_id != null ? String(adset_id) : null,
+      metaAdsetName: adset_name != null ? String(adset_name) : null,
       metaFormName: form_name != null ? String(form_name) : null,
+      metaPlatform: platform != null ? String(platform) : null,
+      metaIsOrganic: typeof is_organic === 'boolean' ? is_organic : (is_organic === 'true' ? true : (is_organic === 'false' ? false : null)),
+      metaLeadStatus: lead_status != null ? String(lead_status) : null,
       anythingToKnow,
       metaRawData: body,
       updatedAt: now
