@@ -26,6 +26,22 @@ import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibil
 const PHONE_REGEX = /^\+?[1-9]\d{9,14}$/;
 
 /**
+ * Case-insensitive exact-match regex for dropdown filter values (utmSource / utmMedium /
+ * utmCampaign). Lets "cpc" in a Campaign doc match "CPC" on a booking, "Paid" match "paid",
+ * "usa-job" match "USA-Job", etc. Also tolerates `+` ↔ space (URL decoding artifacts).
+ */
+const REGEX_SPECIALS = /[.*+?^${}()|[\]\\]/g;
+function caseInsensitiveExact(value) {
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  // Escape regex specials, then allow `+` and a single space to be interchangeable so
+  // URL-encoded ("Google+Discovery+Arun") and decoded ("Google Discovery Arun") variants
+  // both match.
+  const escaped = trimmed.replace(REGEX_SPECIALS, '\\$&').replace(/[+ ]/g, '[+ ]');
+  return { $regex: `^${escaped}$`, $options: 'i' };
+}
+
+/**
  * Schedule all reminders (call, WhatsApp, Discord BDA) for a booking.
  * Skips if meeting is too soon (<10 min).
  * Call internally schedules WhatsApp reminders.
@@ -1937,20 +1953,20 @@ export const getLeadsPaginated = async (req, res) => {
           ]
         });
       } else {
-        matchQuery.utmSource = utmSource;
+        matchQuery.utmSource = caseInsensitiveExact(utmSource);
       }
     }
     if (utmCampaign && utmCampaign !== 'all') {
       matchQuery.$and = matchQuery.$and || [];
       matchQuery.$and.push({
         $or: [
-          { utmCampaign: utmCampaign },
-          { metaCampaignName: utmCampaign },
+          { utmCampaign: caseInsensitiveExact(utmCampaign) },
+          { metaCampaignName: caseInsensitiveExact(utmCampaign) },
         ],
       });
     }
     if (utmMedium && utmMedium !== 'all') {
-      matchQuery.utmMedium = utmMedium;
+      matchQuery.utmMedium = caseInsensitiveExact(utmMedium);
     }
 
     if (normalizedPlanName && normalizedPlanName !== 'ALL') {
@@ -2294,20 +2310,20 @@ export const getLeadsIds = async (req, res) => {
           ]
         });
       } else {
-        matchQuery.utmSource = utmSource;
+        matchQuery.utmSource = caseInsensitiveExact(utmSource);
       }
     }
     if (utmCampaign && utmCampaign !== 'all') {
       matchQuery.$and = matchQuery.$and || [];
       matchQuery.$and.push({
         $or: [
-          { utmCampaign: utmCampaign },
-          { metaCampaignName: utmCampaign },
+          { utmCampaign: caseInsensitiveExact(utmCampaign) },
+          { metaCampaignName: caseInsensitiveExact(utmCampaign) },
         ],
       });
     }
     if (utmMedium && utmMedium !== 'all') {
-      matchQuery.utmMedium = utmMedium;
+      matchQuery.utmMedium = caseInsensitiveExact(utmMedium);
     }
     if (normalizedPlanName && normalizedPlanName !== 'ALL') matchQuery['paymentPlan.name'] = normalizedPlanName;
     if (minAmount || maxAmount) {
@@ -2806,20 +2822,20 @@ export const getLeadsAnalytics = async (req, res) => {
           ]
         });
       } else {
-        matchQuery.utmSource = utmSource;
+        matchQuery.utmSource = caseInsensitiveExact(utmSource);
       }
     }
     if (utmCampaign && utmCampaign !== 'all') {
       matchQuery.$and = matchQuery.$and || [];
       matchQuery.$and.push({
         $or: [
-          { utmCampaign: utmCampaign },
-          { metaCampaignName: utmCampaign },
+          { utmCampaign: caseInsensitiveExact(utmCampaign) },
+          { metaCampaignName: caseInsensitiveExact(utmCampaign) },
         ],
       });
     }
     if (utmMedium && utmMedium !== 'all') {
-      matchQuery.utmMedium = utmMedium;
+      matchQuery.utmMedium = caseInsensitiveExact(utmMedium);
     }
 
     // When no date filter, include leads without scheduledEventStartTime (meta leads, not-scheduled)
