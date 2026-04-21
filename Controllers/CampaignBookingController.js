@@ -1897,6 +1897,8 @@ export const getLeadsPaginated = async (req, res) => {
       fromDate,
       toDate,
       planName,
+      utmMedium,
+      utmCampaign,
       minAmount,
       maxAmount,
       status,
@@ -1938,6 +1940,12 @@ export const getLeadsPaginated = async (req, res) => {
         matchQuery.utmSource = utmSource;
       }
     }
+    if (utmCampaign && utmCampaign !== 'all') {
+      matchQuery.utmCampaign = utmCampaign;
+    }
+    if (utmMedium && utmMedium !== 'all') {
+      matchQuery.utmMedium = utmMedium;
+    }
 
     if (normalizedPlanName && normalizedPlanName !== 'ALL') {
       matchQuery['paymentPlan.name'] = normalizedPlanName;
@@ -1978,7 +1986,9 @@ export const getLeadsPaginated = async (req, res) => {
           { clientName: { $regex: escapedSearch, $options: 'i' } },
           { clientEmail: { $regex: escapedSearch, $options: 'i' } },
           { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-          { utmSource: { $regex: escapedSearch, $options: 'i' } }
+          { utmSource: { $regex: escapedSearch, $options: 'i' } },
+          { utmMedium: { $regex: escapedSearch, $options: 'i' } },
+          { utmCampaign: { $regex: escapedSearch, $options: 'i' } }
         ];
       }
     }
@@ -2241,6 +2251,8 @@ export const getLeadsIds = async (req, res) => {
       fromDate,
       toDate,
       planName,
+      utmMedium,
+      utmCampaign,
       minAmount,
       maxAmount,
       status,
@@ -2277,6 +2289,12 @@ export const getLeadsIds = async (req, res) => {
         matchQuery.utmSource = utmSource;
       }
     }
+    if (utmCampaign && utmCampaign !== 'all') {
+      matchQuery.utmCampaign = utmCampaign;
+    }
+    if (utmMedium && utmMedium !== 'all') {
+      matchQuery.utmMedium = utmMedium;
+    }
     if (normalizedPlanName && normalizedPlanName !== 'ALL') matchQuery['paymentPlan.name'] = normalizedPlanName;
     if (minAmount || maxAmount) {
       matchQuery['paymentPlan.price'] = {};
@@ -2302,7 +2320,9 @@ export const getLeadsIds = async (req, res) => {
         { clientName: { $regex: escapedSearch, $options: 'i' } },
         { clientEmail: { $regex: escapedSearch, $options: 'i' } },
         { clientPhone: { $regex: escapedSearch, $options: 'i' } },
-        { utmSource: { $regex: escapedSearch, $options: 'i' } }
+        { utmSource: { $regex: escapedSearch, $options: 'i' } },
+        { utmMedium: { $regex: escapedSearch, $options: 'i' } },
+        { utmCampaign: { $regex: escapedSearch, $options: 'i' } }
       ];
     }
     // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad, not-scheduled) to appear
@@ -2725,7 +2745,7 @@ export const getMeetingLinks = async (req, res) => {
 // ==================== LEADS ANALYTICS (Qualified Leads Graphs) ====================
 export const getLeadsAnalytics = async (req, res) => {
   try {
-    const { fromDate, toDate, qualification, status, planName, minAmount, maxAmount } = req.query;
+    const { fromDate, toDate, qualification, status, planName, utmMedium, utmCampaign, minAmount, maxAmount } = req.query;
     let utmSource = req.query.utmSource;
     if (crmUserMetaLeadsOnly(req)) {
       utmSource = 'meta_lead_ad';
@@ -2774,6 +2794,12 @@ export const getLeadsAnalytics = async (req, res) => {
       } else {
         matchQuery.utmSource = utmSource;
       }
+    }
+    if (utmCampaign && utmCampaign !== 'all') {
+      matchQuery.utmCampaign = utmCampaign;
+    }
+    if (utmMedium && utmMedium !== 'all') {
+      matchQuery.utmMedium = utmMedium;
     }
 
     // When no date filter, include leads without scheduledEventStartTime (meta leads, not-scheduled)
