@@ -18,22 +18,27 @@ export const CampaignBookingSchema = new mongoose.Schema({
   utmSource: {
     type: String,
     required: true,
+    trim: true,
     index: true
   },
   utmMedium: {
     type: String,
+    trim: true,
     default: null
   },
   utmCampaign: {
     type: String,
+    trim: true,
     default: null
   },
   utmContent: {
     type: String,
+    trim: true,
     default: null
   },
   utmTerm: {
     type: String,
+    trim: true,
     default: null
   },
   // Client details
@@ -427,15 +432,44 @@ export const CampaignBookingSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Keep normalizedClientPhone in sync with clientPhone for lead matching/sync
+const UTM_STRING_FIELDS = ['utmSource', 'utmMedium', 'utmCampaign', 'utmContent', 'utmTerm'];
+
+function trimUtmObject(obj) {
+  if (!obj || typeof obj !== 'object') return;
+  for (const k of UTM_STRING_FIELDS) {
+    if (typeof obj[k] === 'string') {
+      const t = obj[k].trim();
+      obj[k] = t === '' ? null : t;
+    }
+  }
+}
+
+// Keep normalizedClientPhone in sync with clientPhone for lead matching/sync.
+// Also trim utm* strings — URL-decoded `+` can leave leading whitespace (e.g. " Canada-Arun")
+// which breaks exact-match filters in the CRM.
 CampaignBookingSchema.pre('save', function (next) {
   if (this.clientPhone) {
     this.normalizedClientPhone = normalizePhoneForMatching(this.clientPhone) || null;
   } else {
     this.normalizedClientPhone = null;
   }
+  trimUtmObject(this);
   next();
 });
+
+// Mongoose schema `trim: true` does not apply to update-style writes ($set / upserts).
+// Mirror the normalization on every update query so sheet upserts & status updates
+// never re-introduce leading/trailing whitespace in utm fields.
+function preUpdateTrimUtm(next) {
+  const update = this.getUpdate() || {};
+  if (update.$set) trimUtmObject(update.$set);
+  trimUtmObject(update);
+  this.setUpdate(update);
+  next();
+}
+CampaignBookingSchema.pre('updateOne', preUpdateTrimUtm);
+CampaignBookingSchema.pre('updateMany', preUpdateTrimUtm);
+CampaignBookingSchema.pre('findOneAndUpdate', preUpdateTrimUtm);
 
 // Indexes for efficient queries
 CampaignBookingSchema.index({ utmSource: 1, bookingCreatedAt: -1 });

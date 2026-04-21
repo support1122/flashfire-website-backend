@@ -69,18 +69,22 @@ export const CampaignSchema = new mongoose.Schema({
   },
   utmMedium: {
     type: String,
+    trim: true,
     default: 'campaign'
   },
   utmCampaign: {
     type: String,
+    trim: true,
     default: null
   },
   utmContent: {
     type: String,
+    trim: true,
     default: null
   },
   utmTerm: {
     type: String,
+    trim: true,
     default: null
   },
   generatedUrl: {
