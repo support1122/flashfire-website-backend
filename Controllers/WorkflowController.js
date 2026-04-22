@@ -553,6 +553,12 @@ export const triggerCustomWorkflowForBooking = async (req, res) => {
     if (!booking) {
       return res.status(404).json({ success: false, message: 'Booking not found' });
     }
+    if (booking.bookingStatus === 'paid' || booking.bookingStatus === 'ignored') {
+      return res.status(400).json({
+        success: false,
+        message: 'Workflows are disabled for paid/ignored leads'
+      });
+    }
     const workflow = await WorkflowModel.findOne({ workflowId, isCustom: true, isActive: true }).lean();
     if (!workflow) {
       return res.status(404).json({ success: false, message: 'Custom workflow not found or inactive' });
@@ -727,10 +733,10 @@ export const triggerWorkflow = async (bookingId, action) => {
       return { success: false, message: 'Booking not found' };
     }
 
-    // STRICT: Never send workflows to paid clients
-    if (booking.bookingStatus === 'paid') {
-      Logger.info('Skipping workflow trigger: booking is already paid', { bookingId, clientEmail: booking.clientEmail });
-      return { success: true, triggered: false, message: 'Paid clients do not receive workflows' };
+    // STRICT: Never send workflows to paid/ignored clients
+    if (booking.bookingStatus === 'paid' || booking.bookingStatus === 'ignored') {
+      Logger.info('Skipping workflow trigger: booking is paid/ignored', { bookingId, clientEmail: booking.clientEmail });
+      return { success: true, triggered: false, message: 'Paid/ignored clients do not receive workflows' };
     }
     const hasPaid = await clientHasPaidBooking(booking.clientEmail, booking.clientPhone);
     if (hasPaid) {
@@ -832,7 +838,7 @@ export const cancelScheduledWorkflows = async (bookingId, newStatus, oldStatus =
     // Statuses that should cancel all scheduled workflows
     // Cancel workflows when moving to these statuses from workflow-triggering statuses (like 'no-show')
     // This prevents old workflows from executing for the wrong status
-    const cancelTriggerStatuses = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled', 'not-scheduled'];
+    const cancelTriggerStatuses = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled', 'not-scheduled', 'ignored'];
     
     if (!cancelTriggerStatuses.includes(newStatus)) {
       return { success: true, cancelled: 0, message: 'Status does not require workflow cancellation' };
@@ -1208,11 +1214,11 @@ export const processScheduledWorkflows = async () => {
         if (scheduledWorkflow.status === 'scheduled' && 
             new Date(scheduledWorkflow.scheduledFor) <= now) {
           try {
-            // STRICT: Skip paid clients - never execute workflows for them
-            if (booking.bookingStatus === 'paid') {
+            // STRICT: Skip paid/ignored clients - never execute workflows for them
+            if (booking.bookingStatus === 'paid' || booking.bookingStatus === 'ignored') {
               await CampaignBookingModel.updateOne(
                 { bookingId: booking.bookingId, 'scheduledWorkflows._id': scheduledWorkflow._id },
-                { $set: { 'scheduledWorkflows.$.status': 'cancelled', 'scheduledWorkflows.$.error': 'Skipped: Client is paid' } }
+                { $set: { 'scheduledWorkflows.$.status': 'cancelled', 'scheduledWorkflows.$.error': 'Skipped: Client is paid/ignored' } }
               );
               continue;
             }

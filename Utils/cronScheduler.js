@@ -115,19 +115,19 @@ export async function executeWorkflowLog(log) {
       return;
     }
 
-    // STRICT: Never execute workflows for paid clients (safety check at execution time)
-    if (booking.bookingStatus === 'paid') {
+    // STRICT: Never execute workflows for paid/ignored clients (safety check at execution time)
+    if (booking.bookingStatus === 'paid' || booking.bookingStatus === 'ignored') {
       await WorkflowLogModel.updateOne(
         { logId: log.logId },
         { 
           $set: { 
             status: 'cancelled',
-            error: 'Skipped: Client is marked as paid - workflows are not sent to paid clients',
+            error: 'Skipped: Client is marked as paid/ignored - workflows are not sent',
             executedAt: new Date()
           }
         }
       );
-      console.log(`⏭️ Skipped workflow log ${log.logId}: booking ${log.bookingId} is paid`);
+      console.log(`⏭️ Skipped workflow log ${log.logId}: booking ${log.bookingId} is paid/ignored`);
       return;
     }
     const hasPaid = await clientHasPaidBooking(booking.clientEmail, booking.clientPhone);
@@ -758,6 +758,7 @@ async function runDailyReminderBackfill() {
           const callResult = await scheduleCall({
             phoneNumber: phone,
             meetingStartISO,
+            meetingTime: meetingTimeFormatted,
             inviteeName: b.clientName,
             inviteeEmail: b.clientEmail,
             source: 'manual',

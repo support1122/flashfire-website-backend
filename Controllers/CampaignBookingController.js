@@ -1256,12 +1256,25 @@ export const updateBookingStatus = async (req, res) => {
       }
     }
 
+    // If status changed to "ignored", cancel scheduled workflow logs immediately
+    // so cron workers never execute stale workflow records.
+    if (status === 'ignored') {
+      try {
+        await cancelScheduledWorkflowLogsForBooking(bookingId, 'Cancelled: Booking status changed to ignored');
+      } catch (logCancelError) {
+        Logger.warn('Error cancelling scheduled workflow logs for ignored booking', {
+          bookingId,
+          error: logCancelError.message
+        });
+      }
+    }
+
     // Cancel scheduled workflows when status changes to certain statuses
     // This should happen BEFORE triggering new workflows
     // Cancel workflows when moving away from workflow-triggering statuses (like 'no-show') 
     // to other statuses, so old workflows don't execute for the wrong status
     const oldStatus = existingBooking.bookingStatus;
-    const statusesThatCancelWorkflows = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled', 'not-scheduled'];
+    const statusesThatCancelWorkflows = ['completed', 'paid', 'canceled', 'scheduled', 'rescheduled', 'not-scheduled', 'ignored'];
     
     // Cancel workflows if:
     // 1. New status is in the cancellation list AND
