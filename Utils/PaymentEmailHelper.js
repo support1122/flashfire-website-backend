@@ -220,7 +220,9 @@ This is an automated confirmation email. Please do not reply to this message.
     
     // Send Discord notification about email being sent
     try {
-      const discordWebhookUrl = process.env.DISCORD_PAYMENT_EMAIL || process.env.DISCORD_WEB_HOOK_URL;
+      const discordWebhookUrl = transactionProvider === 'Stripe'
+        ? (process.env.DISCORD_STRIPE_WEBHOOK_URL || process.env.DISCORD_PAYMENT_EMAIL || process.env.DISCORD_WEB_HOOK_URL)
+        : (process.env.DISCORD_PAYMENT_EMAIL || process.env.DISCORD_WEB_HOOK_URL);
       
       if (discordWebhookUrl) {
         const formattedDate = new Date(paymentDate).toLocaleDateString('en-US', {
