@@ -144,6 +144,50 @@ export async function scheduleDiscordMeetReminder({
 
     const existing = await ScheduledDiscordMeetReminderModel.findOne({ reminderId });
     if (existing) {
+      // Cancel+rebook: reviving a cancelled row for the same booking/meeting. Reset
+      // status + scheduling fields so the poller picks it up again.
+      if (existing.status === 'cancelled') {
+        const precomputedClientTime = formatMeetingWallTime(meetingStart, inviteeTimezone);
+        const precomputedIndiaTime = formatMeetingWallTime(meetingStart, 'Asia/Kolkata');
+        await ScheduledDiscordMeetReminderModel.updateOne(
+          { _id: existing._id },
+          {
+            $set: {
+              status: 'pending',
+              attempts: 0,
+              errorMessage: null,
+              processedAt: null,
+              completedAt: null,
+              deliveryDriftMs: null,
+              scheduledFor: reminderTime,
+              meetingStartISO: meetingStart,
+              meetingLink,
+              inviteeTimezone,
+              source,
+              metadata,
+              bookingId,
+              clientName,
+              clientEmail,
+              precomputedClientTime,
+              precomputedIndiaTime,
+            },
+          }
+        );
+        try {
+          const { getScheduler } = await import('./UnifiedScheduler.js');
+          const scheduler = getScheduler();
+          if (scheduler) scheduler.scheduleTimer('discord', reminderId, reminderTime);
+        } catch {}
+        console.log('🔁 [DiscordMeetReminder] Reactivated cancelled reminder (cancel+rebook)', {
+          reminderId, bookingId, scheduledFor: reminderTime.toISOString(),
+        });
+        return {
+          success: true,
+          reminderId,
+          reactivated: true,
+          scheduledFor: reminderTime,
+        };
+      }
       return {
         success: true,
         reminderId,
