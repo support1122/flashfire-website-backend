@@ -116,25 +116,50 @@ export async function scheduleCall({
 
     const callId = buildCallId(phoneNumber, meetingStart.getTime());
 
-    // Check if call already exists
+    // Check if call already exists. If cancelled (cancel+rebook), revive it; else skip.
     const existingCall = await ScheduledCallModel.findOne({ callId });
-    if (existingCall) {
+    if (existingCall && existingCall.status !== 'cancelled') {
       console.log('ℹ️ [CallScheduler] Call already scheduled:', callId);
       return { success: true, callId, existing: true, scheduledFor: existingCall.scheduledFor };
     }
 
-    // Create scheduled call
-    const scheduledCall = await ScheduledCallModel.create({
-      callId,
-      phoneNumber,
-      scheduledFor: callTime,
-      meetingTime,
-      meetingStartISO: meetingStart,
-      inviteeName,
-      inviteeEmail,
-      source,
-      metadata
-    });
+    if (existingCall && existingCall.status === 'cancelled') {
+      await ScheduledCallModel.updateOne(
+        { _id: existingCall._id },
+        {
+          $set: {
+            status: 'pending',
+            attempts: 0,
+            errorMessage: null,
+            processedAt: null,
+            completedAt: null,
+            twilioCallSid: null,
+            deliveryDriftMs: null,
+            scheduledFor: callTime,
+            meetingTime,
+            meetingStartISO: meetingStart,
+            inviteeName,
+            inviteeEmail,
+            source,
+            metadata,
+          },
+        }
+      );
+      console.log('🔁 [CallScheduler] Reactivated cancelled call (cancel+rebook):', callId);
+    } else {
+      // Create scheduled call
+      await ScheduledCallModel.create({
+        callId,
+        phoneNumber,
+        scheduledFor: callTime,
+        meetingTime,
+        meetingStartISO: meetingStart,
+        inviteeName,
+        inviteeEmail,
+        source,
+        metadata
+      });
+    }
 
     // Register precision timer with UnifiedScheduler
     try {

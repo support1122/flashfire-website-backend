@@ -296,7 +296,39 @@ async function handleCreatedEvent(req, res, payload) {
     !!emailsMatch &&
     sameScheduledInstant(existingBooking.scheduledEventStartTime, scheduledStartISO);
 
-  if (existingBooking && !mergedFromFrontendCapture) {
+  /**
+   * Cancel + rebook: client cancelled the original event and re-booked the same slot,
+   * so Calendly sent invitee.canceled (which nuked our reminders) followed by a fresh
+   * invitee.created carrying a new scheduled_event.uri / invitee.uri. Same email + same
+   * start time still matches `duplicateQuery`, but this is NOT a duplicate — the stored
+   * calendlyEventUri points at the cancelled event and the booking has no live reminders.
+   * Detect by comparing incoming URIs to what we have and re-merge so reminders reschedule.
+   */
+  const incomingEventUri = payload?.scheduled_event?.uri || null;
+  const rebookedSameSlot =
+    !!existingBooking &&
+    !mergedFromFrontendCapture &&
+    !!emailsMatch &&
+    sameScheduledInstant(existingBooking.scheduledEventStartTime, scheduledStartISO) &&
+    (
+      (!!inviteeUri && existingBooking.calendlyInviteeUri && inviteeUri !== existingBooking.calendlyInviteeUri) ||
+      (!!incomingEventUri && existingBooking.calendlyEventUri && incomingEventUri !== existingBooking.calendlyEventUri)
+    );
+
+  if (rebookedSameSlot) {
+    Logger.info('Cancel+rebook at same slot — merging new Calendly event onto existing booking so reminders reschedule', {
+      email: inviteeEmail,
+      existingBookingId: existingBooking.bookingId,
+      storedEventUri: existingBooking.calendlyEventUri,
+      incomingEventUri,
+      storedInviteeUri: existingBooking.calendlyInviteeUri,
+      incomingInviteeUri: inviteeUri,
+    });
+  }
+
+  const shouldMergeIntoExisting = mergedFromFrontendCapture || rebookedSameSlot;
+
+  if (existingBooking && !shouldMergeIntoExisting) {
     Logger.warn('🔄 Duplicate booking detected - already exists in database', {
       email: inviteeEmail,
       phone: inviteePhone,
@@ -330,7 +362,7 @@ async function handleCreatedEvent(req, res, payload) {
   }
 
   let newBooking = null;
-  if (mergedFromFrontendCapture) {
+  if (shouldMergeIntoExisting) {
     newBooking = await CampaignBookingModel.findOneAndUpdate(
       { bookingId: existingBooking.bookingId },
       {
@@ -358,17 +390,19 @@ async function handleCreatedEvent(req, res, payload) {
       },
       { new: true }
     );
-    Logger.info('✅ Merged Calendly invitee.created into existing booking (frontend capture)', {
-      bookingId: newBooking?.bookingId,
-      inviteeUri,
-    });
+    Logger.info(
+      rebookedSameSlot
+        ? '✅ Merged Calendly invitee.created into existing booking (cancel+rebook)'
+        : '✅ Merged Calendly invitee.created into existing booking (frontend capture)',
+      { bookingId: newBooking?.bookingId, inviteeUri, rebookedSameSlot }
+    );
     if (!newBooking) {
       return res.status(500).json({ success: false, error: 'Failed to merge Calendly data into booking' });
     }
   }
 
   try {
-  if (!mergedFromFrontendCapture) {
+  if (!shouldMergeIntoExisting) {
   // META LEAD SYNC: Check if there's an existing meta lead with 'not-scheduled' status
   // matching by email or phone (without country code). If found, upgrade it to 'scheduled'
   // and merge Calendly booking data into it instead of creating a new booking.
@@ -595,11 +629,11 @@ async function handleCreatedEvent(req, res, payload) {
       reminders: metaReminderResults
     });
   }
-  } // end if (!mergedFromFrontendCapture) — meta lead sync
+  } // end if (!shouldMergeIntoExisting) — meta lead sync
 
   // Find campaign by UTM source
   let campaignId = null;
-  if (!mergedFromFrontendCapture) {
+  if (!shouldMergeIntoExisting) {
   let campaign = await CampaignModel.findOne({ utmSource });
 
   if (campaign) {
@@ -662,7 +696,7 @@ async function handleCreatedEvent(req, res, payload) {
   });
 
   await newBooking.save();
-  } // end if (!mergedFromFrontendCapture) — campaign + new booking
+  } // end if (!shouldMergeIntoExisting) — campaign + new booking
 
   // Mark user as booked
   try {
@@ -1204,6 +1238,21 @@ export const testWebhook = async (req, res) => {
 
 async function handleRescheduledEvent(req, res, payload) {
   try {
+    // Audit trail — mirror invitee.created path so reschedules are visible in CalendlyWebhookLog
+    try {
+      const newInviteeUri = payload?.new_invitee?.invitee?.uri || payload?.new_invitee?.uri || null;
+      const logId = newInviteeUri
+        ? `wh_resched_${crypto.createHash('md5').update(newInviteeUri).digest('hex')}`
+        : `wh_resched_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      CalendlyWebhookLogModel.create({
+        webhookId: logId,
+        eventType: 'invitee.rescheduled',
+        payload: { ...payload },
+      }).catch(err => Logger.warn('Failed to store reschedule webhook log', { error: err.message }));
+    } catch (logErr) {
+      Logger.warn('Reschedule webhook log wrapper threw', { error: logErr.message });
+    }
+
     // ✅ FIXED: Correct destructuring for rescheduled event
     const { old_invitee, new_invitee } = payload;
 
@@ -1533,6 +1582,21 @@ async function handleRescheduledEvent(req, res, payload) {
 
 async function handleCanceledEvent(req, res, payload) {
   try {
+    // Audit trail — mirror invitee.created so cancels are visible in CalendlyWebhookLog
+    try {
+      const inviteeUri = payload?.invitee?.uri || payload?.uri || null;
+      const logId = inviteeUri
+        ? `wh_cancel_${crypto.createHash('md5').update(inviteeUri).digest('hex')}`
+        : `wh_cancel_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      CalendlyWebhookLogModel.create({
+        webhookId: logId,
+        eventType: 'invitee.canceled',
+        payload: { ...payload },
+      }).catch(err => Logger.warn('Failed to store cancel webhook log', { error: err.message }));
+    } catch (logErr) {
+      Logger.warn('Cancel webhook log wrapper threw', { error: logErr.message });
+    }
+
     const clientEmail = payload?.invitee?.email || payload?.email || null;
     const clientName = payload?.invitee?.name || payload?.name || 'Valued Client';
 

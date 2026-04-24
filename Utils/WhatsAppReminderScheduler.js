@@ -146,11 +146,45 @@ export async function scheduleWhatsAppReminder({
 
     const reminderId = buildWhatsAppReminderId(reminderType, phoneNumber, meetingStart.getTime());
 
-    // Check if reminder already exists
+    // Check if reminder already exists. If cancelled (cancel+rebook), revive it; else skip.
     const existingReminder = await ScheduledWhatsAppReminderModel.findOne({ reminderId });
-    if (existingReminder) {
+    if (existingReminder && existingReminder.status !== 'cancelled') {
       console.log(`ℹ️ [WhatsAppReminderScheduler] ${reminderType} reminder already scheduled:`, reminderId);
       return { success: true, reminderId, existing: true, scheduledFor: existingReminder.scheduledFor };
+    }
+    if (existingReminder && existingReminder.status === 'cancelled') {
+      const meetingTimezone = timezone || getTimezoneAbbreviation(meetingStartISO, metadata?.inviteeTimezone);
+      const finalRescheduleLink = rescheduleLink || DEFAULT_RESCHEDULE_LINK;
+      await ScheduledWhatsAppReminderModel.updateOne(
+        { _id: existingReminder._id },
+        {
+          $set: {
+            status: 'pending',
+            attempts: 0,
+            errorMessage: null,
+            processedAt: null,
+            completedAt: null,
+            scheduledFor: reminderTime,
+            meetingTime,
+            meetingDate,
+            meetingStartISO: meetingStart,
+            clientName,
+            clientEmail,
+            meetingLink: meetingLink || 'Not Provided',
+            rescheduleLink: finalRescheduleLink,
+            timezone: meetingTimezone,
+            source,
+            metadata: { ...metadata, reminderType, reminderOffsetMinutes },
+          },
+        }
+      );
+      try {
+        const { getScheduler } = await import('./UnifiedScheduler.js');
+        const scheduler = getScheduler();
+        if (scheduler) scheduler.scheduleTimer('whatsapp', reminderId, reminderTime);
+      } catch {}
+      console.log(`🔁 [WhatsAppReminderScheduler] Reactivated cancelled ${reminderType} reminder (cancel+rebook):`, reminderId);
+      return { success: true, reminderId, reactivated: true, scheduledFor: reminderTime };
     }
 
     // Use default reschedule link if not provided
@@ -278,7 +312,38 @@ export async function scheduleAllWhatsAppReminders({
   
   try {
     const existingImmediate = await ScheduledWhatsAppReminderModel.findOne({ reminderId: immediateReminderId });
-    if (!existingImmediate) {
+    if (existingImmediate && existingImmediate.status === 'cancelled') {
+      await ScheduledWhatsAppReminderModel.updateOne(
+        { _id: existingImmediate._id },
+        {
+          $set: {
+            status: 'pending',
+            attempts: 0,
+            errorMessage: null,
+            processedAt: null,
+            completedAt: null,
+            scheduledFor: immediateReminderTime,
+            meetingTime,
+            meetingDate,
+            meetingStartISO: meetingStart,
+            clientName,
+            clientEmail,
+            meetingLink: meetingLink || 'Not Provided',
+            rescheduleLink: rescheduleLink || DEFAULT_RESCHEDULE_LINK,
+            timezone: timezone || getTimezoneAbbreviation(meetingStartISO, metadata?.inviteeTimezone),
+            source,
+            metadata: { ...metadata, isImmediateReminder: true, actualMeetingTime: meetingStartISO },
+          },
+        }
+      );
+      try {
+        const { getScheduler } = await import('./UnifiedScheduler.js');
+        const scheduler = getScheduler();
+        if (scheduler) scheduler.scheduleTimer('whatsapp', immediateReminderId, immediateReminderTime);
+      } catch {}
+      console.log('🔁 [WhatsAppReminderScheduler] Reactivated cancelled immediate reminder (cancel+rebook):', immediateReminderId);
+      results['immediate'] = { success: true, reminderId: immediateReminderId, reactivated: true, scheduledFor: immediateReminderTime };
+    } else if (!existingImmediate) {
       const immediateReminder = await ScheduledWhatsAppReminderModel.create({
         reminderId: immediateReminderId,
         phoneNumber,
