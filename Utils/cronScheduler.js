@@ -23,6 +23,23 @@ import { normalizePhoneForReminders, buildCallId } from './MeetingReminderUtils.
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+function isValidEmail(s) { return typeof s === 'string' && EMAIL_RE.test(s.trim()); }
+
+function isPermanentSendError(error) {
+  if (!error) return false;
+  const msg = (error.message || '').toLowerCase();
+  if (msg.includes('does not contain a valid address')) return true;
+  if (msg.includes('invalid from email')) return true;
+  // SendGrid wraps 400 in error.code / error.response.statusCode
+  const status = error.code || error.response?.statusCode;
+  if (status === 400 || status === 401 || status === 403) {
+    const body = JSON.stringify(error.response?.body || error.responseBody || '');
+    if (/invalid|does not contain a valid address|from address/i.test(body)) return true;
+  }
+  return false;
+}
+
 const IST_TIMEZONE = 'Asia/Kolkata';
 const SEND_HOUR = 19; // 7 PM IST (for backward compatibility with campaigns)
 const SEND_MINUTE = 30;
@@ -154,8 +171,22 @@ export async function executeWorkflowLog(log) {
         );
         return;
       }
+      if (!isValidEmail(booking.clientEmail)) {
+        await WorkflowLogModel.updateOne(
+          { logId: log.logId },
+          { $set: { status: 'failed', error: `Invalid client email format: ${booking.clientEmail}`, executedAt: new Date() } }
+        );
+        return;
+      }
       const domainName = log.step.domainName || 'flashfiremails.com';
       let senderEmail = log.step.senderEmail || process.env.SENDER_EMAIL || process.env.SENDGRID_FROM_EMAIL || 'elizabeth@flashfirehq.com';
+      if (!isValidEmail(senderEmail)) {
+        await WorkflowLogModel.updateOne(
+          { logId: log.logId },
+          { $set: { status: 'failed', error: `Invalid sender email: ${senderEmail}`, executedAt: new Date() } }
+        );
+        return;
+      }
 
       const msg = {
         to: booking.clientEmail,
@@ -246,12 +277,13 @@ export async function executeWorkflowLog(log) {
     console.error(`[cronScheduler] Error executing workflow log ${log.logId}:`, error.message);
 
     const isCircuitBreakerError = error.message?.includes('Circuit breaker');
+    const permanent = isPermanentSendError(error);
     const currentAttempts = isCircuitBreakerError
       ? (log.attempts || 0)  // Don't count circuit breaker blocks as real attempts
       : (log.attempts || 0) + 1;
     const maxAttempts = log.maxAttempts || 3;
 
-    if (currentAttempts < maxAttempts) {
+    if (!permanent && currentAttempts < maxAttempts) {
       // Circuit breaker errors: retry in 2 minutes (service might be back)
       // Other errors: exponential backoff — 5min, 20min, 80min
       const delayMs = isCircuitBreakerError
