@@ -1,5 +1,6 @@
 import { UserModel } from '../Schema_Models/User.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { WorkflowLogModel } from '../Schema_Models/WorkflowLog.js';
 
 export default async function DeleteUserRecords(req, res) {
     try {
@@ -51,6 +52,12 @@ export default async function DeleteUserRecords(req, res) {
                 clientName: booking.clientName,
                 scheduledTime: booking.scheduledEventStartTime
             }));
+            const bookingIds = bookings.map(b => b.bookingId);
+            const cancelLogs = await WorkflowLogModel.updateMany(
+                { bookingId: { $in: bookingIds }, status: { $in: ['scheduled', 'processing'] } },
+                { $set: { status: 'cancelled', error: 'Cancelled: booking deleted via DeleteUserRecords', executedAt: new Date() } }
+            );
+            deletionResults.workflowLogsCancelled = cancelLogs.modifiedCount;
             const bookingResult = await CampaignBookingModel.deleteMany({ clientEmail: emailLower });
             deletionResults.bookingsDeleted = bookingResult.deletedCount;
         }
