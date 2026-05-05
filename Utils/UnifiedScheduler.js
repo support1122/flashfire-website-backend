@@ -63,10 +63,19 @@ export class UnifiedScheduler {
     const delayMs = Math.max(0, new Date(scheduledFor).getTime() - Date.now());
     if (delayMs === 0) return; // Already overdue — safety poll will catch it
 
+    // Node setTimeout uses int32 ms; delays > ~24.85 days fire immediately.
+    // Re-arm in chunks so far-future reminders wait until their real scheduledFor.
+    const MAX_TIMEOUT_MS = 2_147_483_647;
+    const armDelay = Math.min(delayMs, MAX_TIMEOUT_MS);
+
     const timer = setTimeout(() => {
       this.timers.delete(key);
-      this._trigger();
-    }, delayMs);
+      if (armDelay < delayMs) {
+        this.scheduleTimer(type, id, scheduledFor);
+      } else {
+        this._trigger();
+      }
+    }, armDelay);
     if (timer.unref) timer.unref();
     this.timers.set(key, timer);
   }
