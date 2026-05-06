@@ -1472,6 +1472,86 @@ export async function beaconReportEndEvent(req, res) {
   }
 }
 
+// ==================== GET /api/bda-attendance/missed-logs ====================
+
+export async function getMissedMeetingLogs(req, res) {
+  try {
+    const { fromDate, toDate, page = '1', limit = '20' } = req.query;
+    const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
+    const skip = (pageNum - 1) * limitNum;
+
+    const attendanceMatch = { status: 'absent' };
+    if (fromDate || toDate) {
+      attendanceMatch.meetingScheduledStart = {};
+      if (fromDate) {
+        const from = new Date(String(fromDate));
+        from.setHours(0, 0, 0, 0);
+        attendanceMatch.meetingScheduledStart.$gte = from;
+      }
+      if (toDate) {
+        const to = new Date(String(toDate));
+        to.setHours(23, 59, 59, 999);
+        attendanceMatch.meetingScheduledStart.$lte = to;
+      }
+    }
+
+    const [rows, totalCount] = await Promise.all([
+      BdaAttendanceModel.aggregate([
+        { $match: attendanceMatch },
+        {
+          $lookup: {
+            from: 'campaignbookings',
+            localField: 'bookingId',
+            foreignField: 'bookingId',
+            as: 'booking',
+          },
+        },
+        {
+          $unwind: {
+            path: '$booking',
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        { $sort: { meetingScheduledStart: -1, markedAt: -1 } },
+        { $skip: skip },
+        { $limit: limitNum },
+        {
+          $project: {
+            _id: 0,
+            bookingId: 1,
+            bdaName: 1,
+            bdaEmail: 1,
+            notes: 1,
+            markedAt: 1,
+            meetingScheduledStart: 1,
+            clientName: { $ifNull: ['$booking.clientName', null] },
+            clientEmail: { $ifNull: ['$booking.clientEmail', null] },
+            meetingVideoUrl: { $ifNull: ['$booking.meetingVideoUrl', null] },
+            bookingStatus: { $ifNull: ['$booking.bookingStatus', null] },
+            utmSource: { $ifNull: ['$booking.utmSource', null] },
+          },
+        },
+      ]),
+      BdaAttendanceModel.countDocuments(attendanceMatch),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      data: rows,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        totalCount,
+        totalPages: Math.ceil(totalCount / limitNum),
+      },
+    });
+  } catch (error) {
+    console.error('[BdaAttendance] getMissedMeetingLogs error:', error);
+    return res.status(500).json({ success: false, error: 'Internal server error' });
+  }
+}
+
 // ==================== GET /api/bda-attendance/by-booking/:bookingId ====================
 
 export async function getAttendanceByBooking(req, res) {

@@ -92,7 +92,8 @@ import {
   createTestMeeting,
   sseConnection,
   getAttendanceByBooking,
-  getAttendanceBulk
+  getAttendanceBulk,
+  getMissedMeetingLogs
 } from "./Controllers/BdaAttendanceController.js";
 import { requireBdaExtension } from "./Middlewares/CrmAuth.js";
 // Facebook Conversion API Controllers
@@ -267,6 +268,7 @@ export default function Routes(app) {
   app.get('/api/bda-attendance/sse', sseConnection);
   app.get('/api/bda-attendance/by-booking/:bookingId', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceByBooking);
   app.get('/api/bda-attendance/bulk', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceBulk);
+  app.get('/api/bda-attendance/missed-logs', requireCrmUser, requireCrmPermission('meeting_links'), getMissedMeetingLogs);
 
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);
