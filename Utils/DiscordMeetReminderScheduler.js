@@ -357,6 +357,22 @@ export async function processDueDiscordMeetReminders() {
           }
         }
 
+        // Single-winner claim across backends.
+        if (reminder.bookingId) {
+          const claim = await CampaignBookingModel.findOneAndUpdate(
+            { bookingId: reminder.bookingId, bdaDiscordReminderSentAt: null },
+            { $set: { bdaDiscordReminderSentAt: new Date(), bdaDiscordReminderSentBy: 'main' } },
+            { new: false }
+          );
+          if (!claim) {
+            await ScheduledDiscordMeetReminderModel.updateOne(
+              { _id: reminder._id },
+              { status: 'cancelled', errorMessage: 'bdaDiscordReminderSentAt already set (other backend dispatched)' }
+            );
+            continue;
+          }
+        }
+
         // Resolve meeting start — 3-tier fallback:
         // 1. reminder.meetingStartISO  2. booking.scheduledEventStartTime  3. scheduledFor + offset
         // NOTE: new Date(null) = epoch (Jan 1 1970) which passes !isNaN — must guard against null/empty first

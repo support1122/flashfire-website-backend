@@ -427,6 +427,34 @@ export const CampaignBookingSchema = new mongoose.Schema({
   attachedCustomWorkflowIds: {
     type: [String],
     default: []
+  },
+  // Single-winner dispatch flags. First dispatcher (main or microservice) atomically
+  // claims the field via { field: null } → { $set: { field: <now> } }. Atomic claim
+  // wins exactly once, preventing duplicate Discord/WA/Call sends across backends.
+  bdaDiscordReminderSentAt: {
+    type: Date,
+    default: null,
+    index: true
+  },
+  bdaDiscordReminderSentBy: {
+    type: String,
+    default: null
+  },
+  whatsappReminderSentAt: {
+    type: Date,
+    default: null
+  },
+  whatsappReminderSentBy: {
+    type: String,
+    default: null
+  },
+  bdaCallPlacedAt: {
+    type: Date,
+    default: null
+  },
+  bdaCallPlacedBy: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true

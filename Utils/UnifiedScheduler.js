@@ -329,6 +329,24 @@ export class UnifiedScheduler {
         return;
       }
 
+      // Single-winner claim across backends.
+      const bId = call.metadata?.bookingId || call.bookingId;
+      if (bId) {
+        const claim = await CampaignBookingModel.findOneAndUpdate(
+          { bookingId: bId, bdaCallPlacedAt: null },
+          { $set: { bdaCallPlacedAt: new Date(), bdaCallPlacedBy: 'main' } },
+          { new: false }
+        );
+        if (!claim) {
+          await ScheduledCallModel.updateOne(
+            { _id: call._id },
+            { status: 'cancelled', errorMessage: 'bdaCallPlacedAt already set (other backend dispatched)' }
+          );
+          console.log(`[UnifiedScheduler] Call skipped — already placed: ${call.callId}`);
+          return;
+        }
+      }
+
       logReminderDrift('call', call.callId, call.scheduledFor);
 
       const result = await makeCall(call);
@@ -407,6 +425,24 @@ export class UnifiedScheduler {
         );
         console.log(`[UnifiedScheduler] WA blocked (${guard.reason}): ${reminder.reminderId}`);
         return;
+      }
+
+      // Single-winner claim across backends.
+      const bIdWa = reminder.metadata?.bookingId || reminder.bookingId;
+      if (bIdWa) {
+        const claim = await CampaignBookingModel.findOneAndUpdate(
+          { bookingId: bIdWa, whatsappReminderSentAt: null },
+          { $set: { whatsappReminderSentAt: new Date(), whatsappReminderSentBy: 'main' } },
+          { new: false }
+        );
+        if (!claim) {
+          await ScheduledWhatsAppReminderModel.updateOne(
+            { _id: reminder._id },
+            { status: 'cancelled', errorMessage: 'whatsappReminderSentAt already set (other backend dispatched)' }
+          );
+          console.log(`[UnifiedScheduler] WA skipped — already sent: ${reminder.reminderId}`);
+          return;
+        }
       }
 
       logReminderDrift('whatsapp', reminder.reminderId, reminder.scheduledFor);
@@ -504,6 +540,24 @@ export class UnifiedScheduler {
         );
         console.log(`[UnifiedScheduler] Discord blocked (${guard.reason}): ${reminder.reminderId}`);
         return;
+      }
+
+      // Single-winner claim across backends.
+      const bIdDisc = reminder.metadata?.bookingId || reminder.bookingId;
+      if (bIdDisc) {
+        const claim = await CampaignBookingModel.findOneAndUpdate(
+          { bookingId: bIdDisc, bdaDiscordReminderSentAt: null },
+          { $set: { bdaDiscordReminderSentAt: new Date(), bdaDiscordReminderSentBy: 'main' } },
+          { new: false }
+        );
+        if (!claim) {
+          await ScheduledDiscordMeetReminderModel.updateOne(
+            { _id: reminder._id },
+            { status: 'cancelled', errorMessage: 'bdaDiscordReminderSentAt already set (other backend dispatched)' }
+          );
+          console.log(`[UnifiedScheduler] Discord skipped — already sent: ${reminder.reminderId}`);
+          return;
+        }
       }
 
       const meetingStart = new Date(reminder.meetingStartISO);

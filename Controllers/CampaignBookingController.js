@@ -1468,6 +1468,13 @@ export const rescheduleBooking = async (req, res) => {
     booking.rescheduledAt = new Date();
     booking.rescheduledCount = (booking.rescheduledCount || 0) + 1;
     booking.scheduledEventStartTime = parsedTime;
+    // Reset single-winner dispatch flags so the next meeting's reminder can fire.
+    booking.bdaDiscordReminderSentAt = null;
+    booking.bdaDiscordReminderSentBy = null;
+    booking.whatsappReminderSentAt = null;
+    booking.whatsappReminderSentBy = null;
+    booking.bdaCallPlacedAt = null;
+    booking.bdaCallPlacedBy = null;
 
     const phone = normalizedPhone;
     const delayMs = parsedTime.getTime() - Date.now() - 10 * 60 * 1000;
