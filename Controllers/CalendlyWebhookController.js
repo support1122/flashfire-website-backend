@@ -1419,6 +1419,13 @@ async function handleRescheduledEvent(req, res, payload) {
           bookingRecord.calendlyMeetLink = meetLink;
         }
         bookingRecord.rescheduledCount = (bookingRecord.rescheduledCount || 0) + 1;
+        // Reset single-winner dispatch flags so new meeting's reminder can fire.
+        bookingRecord.bdaDiscordReminderSentAt = null;
+        bookingRecord.bdaDiscordReminderSentBy = null;
+        bookingRecord.whatsappReminderSentAt = null;
+        bookingRecord.whatsappReminderSentBy = null;
+        bookingRecord.bdaCallPlacedAt = null;
+        bookingRecord.bdaCallPlacedBy = null;
 
         await bookingRecord.save();
 
