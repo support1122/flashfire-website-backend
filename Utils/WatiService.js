@@ -407,12 +407,48 @@ class WatiService {
         url: error.config?.url,
         requestPayload: error.config?.data ? JSON.parse(error.config.data) : null
       });
-      
+
       return {
         success: false,
         error: errorMessage,
         watiResponse: watiErrorDetails || error.response?.data
       };
+    }
+  }
+
+  /**
+   * Update custom attributes on a WATI contact.
+   * Used to set is_booking_scheduled=true when a Calendly booking is confirmed so
+   * WATI automations can check the attribute and skip "not-scheduled" messages.
+   *
+   * @param {string} phone - The client phone number (any format)
+   * @param {Array<{name: string, value: string}>} customParams - Attribute key-value pairs
+   * @returns {Promise<{success: boolean, data?: any, error?: string}>}
+   */
+  async updateContactAttributes(phone, customParams) {
+    try {
+      if (!phone) return { success: false, error: 'No phone number provided' };
+
+      const mobile = phone.replace(/\D/g, '');
+      if (mobile.length < 10) return { success: false, error: 'Invalid phone number' };
+
+      const url = `${this.apiBaseUrl}/api/v1/updateContactAttributesByName`;
+      const response = await axios.post(
+        url,
+        { name: `+${mobile}`, customParams },
+        { headers: this.headers, timeout: 8000 }
+      );
+
+      console.log('✅ [WatiService] Contact attributes updated:', {
+        phone: mobile,
+        attrs: customParams.map(p => `${p.name}=${p.value}`).join(', '),
+      });
+
+      return { success: true, data: response.data };
+    } catch (error) {
+      const msg = error.response?.data?.message || error.message;
+      console.warn('⚠️ [WatiService] updateContactAttributes failed:', msg);
+      return { success: false, error: msg };
     }
   }
 }

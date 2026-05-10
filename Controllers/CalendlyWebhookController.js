@@ -1,5 +1,6 @@
 import { Logger } from '../Utils/Logger.js';
 import { sendNoShowReminder } from '../Utils/WatiHelper.js';
+import watiService from '../Utils/WatiService.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
@@ -399,6 +400,15 @@ async function handleCreatedEvent(req, res, payload) {
     if (!newBooking) {
       return res.status(500).json({ success: false, error: 'Failed to merge Calendly data into booking' });
     }
+
+    // Tell WATI the contact is now scheduled so its automation skips "not-scheduled" messages
+    const mergePhone = inviteePhone || newBooking.clientPhone;
+    if (mergePhone) {
+      watiService.updateContactAttributes(mergePhone, [
+        { name: 'is_booking_scheduled', value: 'true' },
+        { name: 'booking_status', value: 'scheduled' },
+      ]).catch(err => Logger.warn('Failed to update WATI attribute on merge', { error: err.message }));
+    }
   }
 
   try {
@@ -463,6 +473,15 @@ async function handleCreatedEvent(req, res, payload) {
       clientEmail: mergedBooking.clientEmail,
       metaLeadId: mergedBooking.metaLeadId
     });
+
+    // Tell WATI the contact is now scheduled so its automation skips "not-scheduled" messages
+    const metaSyncPhone = inviteePhone || mergedBooking.clientPhone;
+    if (metaSyncPhone) {
+      watiService.updateContactAttributes(metaSyncPhone, [
+        { name: 'is_booking_scheduled', value: 'true' },
+        { name: 'booking_status', value: 'scheduled' },
+      ]).catch(err => Logger.warn('Failed to update WATI attribute on meta sync', { error: err.message }));
+    }
 
     // Mark user as booked
     try {
@@ -696,6 +715,14 @@ async function handleCreatedEvent(req, res, payload) {
   });
 
   await newBooking.save();
+
+  // Tell WATI the contact is now scheduled so its automation skips "not-scheduled" messages
+  if (inviteePhone) {
+    watiService.updateContactAttributes(inviteePhone, [
+      { name: 'is_booking_scheduled', value: 'true' },
+      { name: 'booking_status', value: 'scheduled' },
+    ]).catch(err => Logger.warn('Failed to update WATI attribute on new booking', { error: err.message }));
+  }
   } // end if (!shouldMergeIntoExisting) — campaign + new booking
 
   // Mark user as booked
@@ -1429,6 +1456,14 @@ async function handleRescheduledEvent(req, res, payload) {
 
         await bookingRecord.save();
 
+        // Tell WATI the contact is still scheduled (new time) so its automation skips "not-scheduled" messages
+        if (clientPhone) {
+          watiService.updateContactAttributes(clientPhone, [
+            { name: 'is_booking_scheduled', value: 'true' },
+            { name: 'booking_status', value: 'rescheduled' },
+          ]).catch(err => Logger.warn('Failed to update WATI attribute on reschedule', { error: err.message }));
+        }
+
         Logger.info('Updated booking record with reschedule information', {
           bookingId: bookingRecord._id,
           clientEmail,
@@ -1761,6 +1796,14 @@ async function handleCanceledEvent(req, res, payload) {
         bookingRecord.canceledBy = canceledBy;
         bookingRecord.cancelReason = cancelReason;
         await bookingRecord.save();
+
+        // Tell WATI the meeting is cancelled so its automation can re-enter "not-scheduled" sequence
+        if (clientPhone) {
+          watiService.updateContactAttributes(clientPhone, [
+            { name: 'is_booking_scheduled', value: 'false' },
+            { name: 'booking_status', value: 'canceled' },
+          ]).catch(err => Logger.warn('Failed to update WATI attribute on cancel', { error: err.message }));
+        }
 
         Logger.info('Updated booking record status to canceled', {
           bookingId: bookingRecord._id,
