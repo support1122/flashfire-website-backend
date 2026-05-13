@@ -1621,6 +1621,7 @@ async function handleCanceledEvent(req, res, payload) {
     }
 
     let bookingRecord = null;
+    let staleCancelForRebookedEvent = false;
     try {
       const query = { clientEmail: clientEmail };
 
@@ -1635,12 +1636,33 @@ async function handleCanceledEvent(req, res, payload) {
         bookingRecord = await CampaignBookingModel.findOne(query);
       }
 
-      // Fallback ONLY if we couldn't find exact match
+      // Fallback ONLY if we couldn't find exact match.
+      // Cancel+rebook race: invitee.created for the new event may have already overwritten
+      // calendlyEventUri to the new event's URI. If the cancel arrives moments later, the
+      // exact-match lookup misses. The fallback then grabs the latest booking and would
+      // clobber the freshly-rebooked record with status=canceled. Detect that and skip the
+      // status update so the live rebooked booking keeps its reminders.
       if (!bookingRecord) {
-        Logger.warn('Could not find booking with exact event URI or start time, falling back to latest booking (risky)', { clientEmail });
+        Logger.warn('Could not find booking with exact event URI or start time, falling back to latest booking', { clientEmail });
         bookingRecord = await CampaignBookingModel.findOne({
           clientEmail: clientEmail
         }).sort({ bookingCreatedAt: -1 }).limit(1);
+
+        if (
+          bookingRecord &&
+          calendlyEventUri &&
+          bookingRecord.calendlyEventUri &&
+          bookingRecord.calendlyEventUri !== calendlyEventUri
+        ) {
+          staleCancelForRebookedEvent = true;
+          Logger.warn('Stale cancel for rebooked event — refusing to overwrite booking status', {
+            clientEmail,
+            cancelEventUri: calendlyEventUri,
+            currentBookingEventUri: bookingRecord.calendlyEventUri,
+            bookingId: bookingRecord.bookingId,
+            bookingStatus: bookingRecord.bookingStatus,
+          });
+        }
       }
 
     } catch (dbError) {
@@ -1679,7 +1701,14 @@ async function handleCanceledEvent(req, res, payload) {
     let callCancelled = false;
     let whatsappCancelled = false;
 
-    if (clientPhone && meetingStartISO) {
+    if (staleCancelForRebookedEvent) {
+      Logger.info('Stale cancel — skipping reminder cancellation to protect rebooked event', {
+        clientEmail,
+        meetingStartISO,
+      });
+    }
+
+    if (!staleCancelForRebookedEvent && clientPhone && meetingStartISO) {
       // Cancel call reminder
       try {
         const cancelCallResult = await cancelCall({
@@ -1728,7 +1757,7 @@ async function handleCanceledEvent(req, res, payload) {
     // Cancel Discord BDA meeting alert (3-min "I'm in" reminder) for this meeting
     // ✅ Same identifier as call reminder; fallback by clientName if no match by email
     let discordMeetCancelled = false;
-    try {
+    if (!staleCancelForRebookedEvent) try {
       const cancelDiscordResult = await cancelDiscordMeetRemindersForMeeting({
         meetingStartISO,
         clientEmail,
@@ -1751,7 +1780,7 @@ async function handleCanceledEvent(req, res, payload) {
     }
 
     // Update booking record status to canceled
-    if (bookingRecord) {
+    if (bookingRecord && !staleCancelForRebookedEvent) {
       try {
         bookingRecord.bookingStatus = 'canceled';
         bookingRecord.statusChangedAt = new Date();
@@ -1772,6 +1801,11 @@ async function handleCanceledEvent(req, res, payload) {
           bookingId: bookingRecord?._id
         });
       }
+    } else if (staleCancelForRebookedEvent) {
+      Logger.info('Skipped booking status update — cancel was for a rebooked old event', {
+        bookingId: bookingRecord?.bookingId,
+        clientEmail,
+      });
     }
 
     // Format meeting time for Discord
