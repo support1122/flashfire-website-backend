@@ -46,8 +46,11 @@ const BdaAttendanceSchema = new mongoose.Schema(
     },
 
     status: {
+      // "absent" is set ONLY when a BDA explicitly marks themselves absent.
+      // "unmarked" = no response captured (scheduler / bad join URL) — the BDA
+      // may have simply forgotten to mark, so it must NOT count as absent.
       type: String,
-      enum: ["present", "absent", "manual"],
+      enum: ["present", "absent", "manual", "unmarked"],
       required: true,
       index: true,
     },

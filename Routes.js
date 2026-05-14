@@ -149,6 +149,7 @@ import {
 } from "./Controllers/WorkflowLogController.js";
 // Redis/BullBoard removed — scheduling handled by MongoDB-based JobScheduler + UnifiedScheduler
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
+import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission } from './Middlewares/CrmAuth.js';
 import {
@@ -227,6 +228,10 @@ export default function Routes(app) {
   app.post('/api/crm/admin/users', requireCrmAdmin, createCrmUser);
   app.put('/api/crm/admin/users/:id', requireCrmAdmin, updateCrmUser);
   app.delete('/api/crm/admin/users/:id', requireCrmAdmin, deleteCrmUser);
+
+  // Activity feed — gated by the `activity_logs` permission (admin tick).
+  app.get('/api/crm/activity-logs', requireCrmUser, requireCrmPermission('activity_logs'), getActivityLogs);
+  app.get('/api/crm/activity-logs/filters', requireCrmUser, requireCrmPermission('activity_logs'), getActivityFilters);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);

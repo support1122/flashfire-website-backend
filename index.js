@@ -224,6 +224,7 @@ import { handleCalendlyWebhook } from './Controllers/CalendlyWebhookController.j
 import express from 'express';
 import Routes from './Routes.js';
 import Connection from './Utils/ConnectDB.js';
+import { activityLogMiddleware } from './Utils/ActivityLogger.js';
 import cors from 'cors';
 import 'dotenv/config';
 // Redis/BullMQ removed — call scheduling via MongoDB-based CallScheduler + UnifiedScheduler
@@ -281,6 +282,9 @@ app.use(compression());
 app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+
+// Activity logging — records every mutating CRM/BDA request after it finishes.
+app.use(activityLogMiddleware);
 
 
 

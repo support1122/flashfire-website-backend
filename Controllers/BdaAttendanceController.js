@@ -811,6 +811,8 @@ export async function reportJoin(req, res) {
       const notes = `Google Meet landing page (not a real meeting room). URL: ${String(meetLink).slice(0, 240)}`;
       const prev = await BdaAttendanceModel.findOne({ bookingId, bdaEmail: emailNorm });
 
+      // Bad join URL — record as "unmarked", not "absent". The BDA tried to
+      // join; only an explicit mark-absent action may set status: 'absent'.
       const attendance = await BdaAttendanceModel.findOneAndUpdate(
         { bookingId, bdaEmail: emailNorm },
         {
@@ -818,7 +820,7 @@ export async function reportJoin(req, res) {
             bdaName: name,
             bdaEmail: emailNorm,
             bookingId,
-            status: 'absent',
+            status: 'unmarked',
             source: 'manual',
             markedAt: new Date(),
             joinedAt: null,
@@ -837,29 +839,30 @@ export async function reportJoin(req, res) {
         { upsert: true, new: true }
       );
 
-      const wasAlreadyAbsent = prev?.status === 'absent';
-      if (!wasAlreadyAbsent) {
-        const absentMsg =
-          `❌ **BDA Absent** (Meet landing URL)\n` +
+      const wasAlreadyRecorded = prev?.status === 'unmarked' || prev?.status === 'absent';
+      if (!wasAlreadyRecorded) {
+        const warnMsg =
+          `⚠️ **BDA No Response (Unmarked)** — Meet landing URL\n` +
           `**BDA:** ${name} (${emailNorm})\n` +
           `**Client:** ${booking.clientName}\n` +
           `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
-          `_Reason: Join attempted from meet.google.com/landing — not a real Meet room._`;
-        await sendAbsentDiscord(absentMsg);
+          `_Join attempted from meet.google.com/landing — not a real Meet room. NOT marked absent._`;
+        await sendAbsentDiscord(warnMsg);
         await BdaAttendanceModel.updateOne({ _id: attendance._id }, { discordNotified: true });
       }
 
       notifyBdaSSE(emailNorm, 'attendance_update', {
         bookingId,
-        status: 'absent',
+        status: 'unmarked',
         source: 'manual',
       });
 
       return res.status(200).json({
         success: true,
-        markedAbsent: true,
+        markedAbsent: false,
+        status: 'unmarked',
         attendanceId: attendance.attendanceId,
-        message: 'Meet landing URL does not count as joined; marked absent.',
+        message: 'Meet landing URL does not count as joined; recorded as unmarked.',
       });
     }
 
@@ -1481,7 +1484,9 @@ export async function getMissedMeetingLogs(req, res) {
     const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
     const skip = (pageNum - 1) * limitNum;
 
-    const attendanceMatch = { status: 'absent' };
+    // Missed = explicitly absent OR unmarked (no response captured). Unmarked
+    // is NOT a confirmed absence — surfaced here so admin can follow up.
+    const attendanceMatch = { status: { $in: ['absent', 'unmarked'] } };
     if (fromDate || toDate) {
       attendanceMatch.meetingScheduledStart = {};
       if (fromDate) {
@@ -1522,9 +1527,17 @@ export async function getMissedMeetingLogs(req, res) {
             bookingId: 1,
             bdaName: 1,
             bdaEmail: 1,
+            status: 1,
+            source: 1,
             notes: 1,
             markedAt: 1,
+            joinedAt: 1,
+            leftAt: 1,
+            durationMs: 1,
+            cumulativeDurationMs: 1,
+            meetLink: 1,
             meetingScheduledStart: 1,
+            meetingScheduledEnd: 1,
             clientName: { $ifNull: ['$booking.clientName', null] },
             clientEmail: { $ifNull: ['$booking.clientEmail', null] },
             meetingVideoUrl: { $ifNull: ['$booking.meetingVideoUrl', null] },
@@ -1572,6 +1585,11 @@ export async function getAttendanceByBooking(req, res) {
             leftAt: attendance.leftAt,
             markedAt: attendance.markedAt,
             meetLink: attendance.meetLink,
+            durationMs: attendance.durationMs ?? null,
+            cumulativeDurationMs: attendance.cumulativeDurationMs ?? 0,
+            meetingScheduledStart: attendance.meetingScheduledStart ?? null,
+            meetingScheduledEnd: attendance.meetingScheduledEnd ?? null,
+            notes: attendance.notes ?? null,
           }
         : null,
     });
@@ -1606,6 +1624,9 @@ export async function getAttendanceBulk(req, res) {
         joinedAt: att.joinedAt,
         leftAt: att.leftAt,
         markedAt: att.markedAt,
+        durationMs: att.durationMs ?? null,
+        cumulativeDurationMs: att.cumulativeDurationMs ?? 0,
+        notes: att.notes ?? null,
       };
     }
 
