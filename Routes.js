@@ -151,7 +151,7 @@ import {
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
-import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission } from './Middlewares/CrmAuth.js';
+import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
 import {
   getAvailableLeads,
   getLeadByEmail,
@@ -239,9 +239,9 @@ export default function Routes(app) {
   
   app.get('/api/bda/available-leads', requireCrmUser, getAvailableLeads);
   app.get('/api/bda/lead-by-email/:email', requireCrmUser, getLeadByEmail);
-  app.post('/api/bda/claim-lead/:bookingId', requireCrmUser, claimLead);
-  app.post('/api/bda/unclaim-lead/:bookingId', requireCrmUser, bdaUnclaimLead);
-  app.put('/api/bda/update-lead/:bookingId', requireCrmUser, updateLeadDetails);
+  app.post('/api/bda/claim-lead/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), claimLead);
+  app.post('/api/bda/unclaim-lead/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), bdaUnclaimLead);
+  app.put('/api/bda/update-lead/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), updateLeadDetails);
   app.get('/api/bda/my-leads', requireCrmUser, getMyClaimedLeads);
   app.get('/api/bda/performance', requireCrmUser, getMyBdaPerformance);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);

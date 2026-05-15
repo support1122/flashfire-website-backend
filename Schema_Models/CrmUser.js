@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-const CRM_PERMISSION_KEYS = [
+const CRM_MODULE_KEYS = [
   'email_campaign',
   'campaign_manager',
   'whatsapp_campaign',
@@ -13,6 +13,14 @@ const CRM_PERMISSION_KEYS = [
   'meeting_links',
   'bda_admin',
   'activity_logs',
+];
+
+// View = `<module>` (legacy key, backwards-compatible). Edit = `<module>_edit`.
+// Holding `<module>_edit` without `<module>` is meaningless — controllers/UI treat
+// edit as implying view.
+const CRM_PERMISSION_KEYS = [
+  ...CRM_MODULE_KEYS,
+  ...CRM_MODULE_KEYS.map((k) => `${k}_edit`),
 ];
 
 const CrmUserSchema = new mongoose.Schema(
@@ -49,5 +57,6 @@ const CrmUserSchema = new mongoose.Schema(
 
 export const CrmUserModel = mongoose.models.CrmUser || mongoose.model('CrmUser', CrmUserSchema);
 export const CRM_PERMISSION_KEYS_ALLOWED = CRM_PERMISSION_KEYS;
+export const CRM_MODULE_KEYS_ALLOWED = CRM_MODULE_KEYS;
 
 

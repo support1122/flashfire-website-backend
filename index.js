@@ -1040,6 +1040,34 @@ app.listen(PORT || 4001, async () => {
   } catch (error) {
     console.warn('⚠️ [Server] Failed to seed default campaigns:', error.message);
   }
+
+  // One-time backfill: existing CRM users with a view permission get the matching
+  // `_edit` permission so behavior does not regress when per-module view/edit ships.
+  // Idempotent — only adds missing edit keys.
+  try {
+    const { CrmUserModel, CRM_MODULE_KEYS_ALLOWED } = await import('./Schema_Models/CrmUser.js');
+    const users = await CrmUserModel.find({}).select('_id permissions');
+    let updated = 0;
+    for (const u of users) {
+      const perms = Array.isArray(u.permissions) ? u.permissions : [];
+      const additions = [];
+      for (const mod of CRM_MODULE_KEYS_ALLOWED) {
+        if (perms.includes(mod) && !perms.includes(`${mod}_edit`)) {
+          additions.push(`${mod}_edit`);
+        }
+      }
+      if (additions.length > 0) {
+        u.permissions = [...perms, ...additions];
+        await u.save();
+        updated += 1;
+      }
+    }
+    if (updated > 0) {
+      console.log(`✅ [Server] Backfilled _edit permissions for ${updated} existing CRM user(s)`);
+    }
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to backfill CRM edit permissions:', error.message);
+  }
 });
 
 // Initialize GeoIP after server startup
