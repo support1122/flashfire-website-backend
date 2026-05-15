@@ -855,10 +855,6 @@ export const cancelScheduledWorkflows = async (bookingId, newStatus, oldStatus =
       sw => sw.status === 'scheduled'
     );
 
-    if (scheduledWorkflows.length === 0) {
-      return { success: true, cancelled: 0, message: 'No scheduled workflows to cancel' };
-    }
-
     const cancellationReason = `Status changed to ${newStatus}`;
     const cancelledWorkflows = [];
 
@@ -915,19 +911,37 @@ export const cancelScheduledWorkflows = async (bookingId, newStatus, oldStatus =
       }
     }
 
+    // Also cancel the actual WorkflowLog rows (the cron reads from this collection,
+    // not from booking.scheduledWorkflows). Without this, embedded array is updated
+    // but the cron still fires the not-scheduled / old-status logs.
+    let cancelledLogs = 0;
+    try {
+      const logResult = await WorkflowLogModel.updateMany(
+        { bookingId, status: 'scheduled' },
+        { $set: { status: 'cancelled', error: cancellationReason, executedAt: null } }
+      );
+      cancelledLogs = logResult.modifiedCount || 0;
+    } catch (logCancelErr) {
+      Logger.error('Failed to cancel WorkflowLog rows during status change', {
+        bookingId, newStatus, error: logCancelErr.message
+      });
+    }
+
     Logger.info('Cancelled scheduled workflows due to status change', {
       bookingId,
       oldStatus,
       newStatus,
       cancelledCount: cancelledWorkflows.length,
+      cancelledLogCount: cancelledLogs,
       clientEmail: booking.clientEmail
     });
 
     return {
       success: true,
       cancelled: cancelledWorkflows.length,
+      cancelledLogs,
       workflows: cancelledWorkflows,
-      message: `Cancelled ${cancelledWorkflows.length} scheduled workflow(s)`
+      message: `Cancelled ${cancelledWorkflows.length} scheduled workflow(s) and ${cancelledLogs} log(s)`
     };
 
   } catch (error) {

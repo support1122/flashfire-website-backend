@@ -118,7 +118,9 @@ export async function pollForAbsentBDAs() {
       const bdaEmail = meeting.claimedBy?.email || 'unassigned';
       const bdaName = meeting.claimedBy?.name || 'Unassigned';
 
-      // No attendance record - mark absent
+      // No attendance record — record as "unmarked", NOT "absent".
+      // The BDA may have attended but forgotten to mark; only an explicit
+      // mark-absent action is allowed to set status: 'absent'.
       try {
         await BdaAttendanceModel.findOneAndUpdate(
           { bookingId: meeting.bookingId, bdaEmail },
@@ -127,14 +129,14 @@ export async function pollForAbsentBDAs() {
               bdaName,
               bdaEmail,
               bookingId: meeting.bookingId,
-              status: 'absent',
+              status: 'unmarked',
               source: 'scheduler',
               markedAt: now,
               meetingScheduledStart: meeting.scheduledEventStartTime,
               meetingScheduledEnd: meeting.scheduledEventEndTime || null,
               discordNotified: true,
               notes: isClaimed
-                ? 'Auto-detected absent by server scheduler (no response 60s after start)'
+                ? 'No response captured 60s after start — BDA must confirm present or mark absent'
                 : 'Meeting not claimed by any BDA — no one joined',
             },
             $setOnInsert: {
@@ -145,11 +147,11 @@ export async function pollForAbsentBDAs() {
         );
 
         const message = isClaimed
-          ? `❌ **BDA Absent (Auto-Detected)**\n` +
+          ? `⚠️ **BDA No Response (Unmarked)**\n` +
             `**BDA:** ${bdaName} (${bdaEmail})\n` +
             `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
             `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
-            `_No response received (automatic or manual) after 60 seconds of meeting start._`
+            `_No response 60s after start. NOT marked absent — BDA may have forgotten. Needs review._`
           : `🚨 **NO BDA ASSIGNED — Meeting Started!**\n` +
             `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
             `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
@@ -162,7 +164,7 @@ export async function pollForAbsentBDAs() {
         // Duplicate key is expected if record was just created by extension
         if (err.code !== 11000) {
           console.error(
-            `[BdaAbsentScheduler] Error marking absent for ${meeting.bookingId}:`,
+            `[BdaAbsentScheduler] Error recording unmarked attendance for ${meeting.bookingId}:`,
             err.message
           );
         }

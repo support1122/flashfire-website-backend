@@ -65,8 +65,24 @@ export function requireBdaExtension(req, res, next) {
 export function requireCrmPermission(permission) {
   return (req, res, next) => {
     const perms = req.crmUser?.permissions;
-    if (!Array.isArray(perms) || !perms.includes(permission)) {
+    if (!Array.isArray(perms)) {
       return res.status(403).json({ success: false, error: 'Insufficient permission' });
+    }
+    // Holding the `_edit` variant implies view access for the same module.
+    const editVariant = `${permission}_edit`;
+    if (!perms.includes(permission) && !perms.includes(editVariant)) {
+      return res.status(403).json({ success: false, error: 'Insufficient permission' });
+    }
+    return next();
+  };
+}
+
+/** Require edit (mutate) permission for a module. View alone is not sufficient. */
+export function requireCrmEdit(module) {
+  return (req, res, next) => {
+    const perms = req.crmUser?.permissions;
+    if (!Array.isArray(perms) || !perms.includes(`${module}_edit`)) {
+      return res.status(403).json({ success: false, error: 'Read-only access — edit permission required' });
     }
     return next();
   };
