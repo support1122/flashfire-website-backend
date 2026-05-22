@@ -3363,7 +3363,8 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { '_id.month': 1 } }
       ]),
 
-      // 23. UTM SOURCE — how many leads + their current status (deduped by client).
+      // 23. UTM SOURCE — leads + current status, per month (deduped by client).
+      // Month bucket = meeting month, so the Graphs UTM table can be filtered by month.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
@@ -3372,12 +3373,16 @@ export const getLeadsAnalytics = async (req, res) => {
           $group: {
             _id: '$groupKey',
             utmSource: { $first: { $ifNull: ['$utmSource', 'direct'] } },
-            bookingStatus: { $first: '$bookingStatus' }
+            bookingStatus: { $first: '$bookingStatus' },
+            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
           }
         },
         {
           $group: {
-            _id: '$utmSource',
+            _id: {
+              month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
+              source: '$utmSource'
+            },
             total: { $sum: 1 },
             completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
             noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
@@ -3388,10 +3393,10 @@ export const getLeadsAnalytics = async (req, res) => {
             notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
           }
         },
-        { $sort: { total: -1 } }
+        { $sort: { '_id.month': 1 } }
       ]),
 
-      // 24. UTM MEDIUM — how many leads + their current status (deduped by client).
+      // 24. UTM MEDIUM — leads + current status, per month (deduped by client).
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
@@ -3400,12 +3405,16 @@ export const getLeadsAnalytics = async (req, res) => {
           $group: {
             _id: '$groupKey',
             utmMedium: { $first: { $ifNull: ['$utmMedium', 'none'] } },
-            bookingStatus: { $first: '$bookingStatus' }
+            bookingStatus: { $first: '$bookingStatus' },
+            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
           }
         },
         {
           $group: {
-            _id: '$utmMedium',
+            _id: {
+              month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
+              medium: '$utmMedium'
+            },
             total: { $sum: 1 },
             completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
             noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
@@ -3416,7 +3425,7 @@ export const getLeadsAnalytics = async (req, res) => {
             notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
           }
         },
-        { $sort: { total: -1 } }
+        { $sort: { '_id.month': 1 } }
       ])
     ]);
 
@@ -3586,7 +3595,8 @@ export const getLeadsAnalytics = async (req, res) => {
     }));
 
     const utmSourceStatus = utmSourceStatusResult.map(r => ({
-      source: r._id,
+      month: r._id.month,
+      source: r._id.source,
       total: r.total,
       completed: r.completed,
       noShow: r.noShow,
@@ -3598,7 +3608,8 @@ export const getLeadsAnalytics = async (req, res) => {
     }));
 
     const utmMediumStatus = utmMediumStatusResult.map(r => ({
-      medium: r._id,
+      month: r._id.month,
+      medium: r._id.medium,
       total: r.total,
       completed: r.completed,
       noShow: r.noShow,
