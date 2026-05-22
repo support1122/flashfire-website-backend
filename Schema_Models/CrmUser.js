@@ -13,6 +13,7 @@ const CRM_MODULE_KEYS = [
   'meeting_links',
   'bda_admin',
   'activity_logs',
+  'lead_analytics',
 ];
 
 // View = `<module>` (legacy key, backwards-compatible). Edit = `<module>_edit`.

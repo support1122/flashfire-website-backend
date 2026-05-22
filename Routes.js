@@ -150,6 +150,7 @@ import {
 // Redis/BullBoard removed — scheduling handled by MongoDB-based JobScheduler + UnifiedScheduler
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
+import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
 import {
@@ -232,6 +233,9 @@ export default function Routes(app) {
   // Activity feed — gated by the `activity_logs` permission (admin tick).
   app.get('/api/crm/activity-logs', requireCrmUser, requireCrmPermission('activity_logs'), getActivityLogs);
   app.get('/api/crm/activity-logs/filters', requireCrmUser, requireCrmPermission('activity_logs'), getActivityFilters);
+
+  // Graphs module — paid-client analytics sourced from the clients-tracking DB.
+  app.get('/api/crm/paid-clients/analytics', requireCrmUser, requireCrmPermission('lead_analytics'), getPaidClientsAnalytics);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);
@@ -360,7 +364,7 @@ export default function Routes(app) {
   
   app.get('/api/leads/paginated', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsPaginated);
   app.get('/api/leads/ids', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsIds);
-  app.get('/api/leads/analytics', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsAnalytics);
+  app.get('/api/leads/analytics', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics']), getLeadsAnalytics);
   app.get('/api/meeting-links', requireCrmUser, requireCrmPermission('meeting_links'), getMeetingLinks);
 
   app.get('/api/campaign-bookings/:bookingId/custom-workflows', requireCrmUser, getCustomWorkflowsForBooking);
