@@ -2795,7 +2795,7 @@ export const getMeetingLinks = async (req, res) => {
 // ==================== LEADS ANALYTICS (Qualified Leads Graphs) ====================
 export const getLeadsAnalytics = async (req, res) => {
   try {
-    const { fromDate, toDate, qualification, status, planName, utmMedium, utmCampaign, minAmount, maxAmount } = req.query;
+    const { fromDate, toDate, qualification, status, planName, utmMedium, utmCampaign, minAmount, maxAmount, leadSource, bdaEmail, sourceType } = req.query;
     let utmSource = req.query.utmSource;
     if (crmUserMetaLeadsOnly(req)) {
       utmSource = 'meta_lead_ad';
@@ -2857,6 +2857,24 @@ export const getLeadsAnalytics = async (req, res) => {
     if (utmMedium && utmMedium !== 'all') {
       matchQuery.utmMedium = caseInsensitiveExact(utmMedium);
     }
+    if (leadSource && leadSource !== 'all') {
+      matchQuery.leadSource = String(leadSource);
+    }
+    if (bdaEmail && bdaEmail !== 'all') {
+      matchQuery['claimedBy.email'] = caseInsensitiveExact(bdaEmail);
+    }
+    // sourceType filter: 'paid' = came from paid ads, 'organic' = everything else.
+    if (sourceType === 'paid' || sourceType === 'organic') {
+      const paidMarkers = {
+        $or: [
+          { metaIsOrganic: false },
+          { utmMedium: { $in: [/^cpc$/i, /^ppc$/i, /^paid$/i, /^paid[_-]?social$/i] } },
+          { metaAdId: { $exists: true, $nin: [null, ''] } },
+        ],
+      };
+      matchQuery.$and = matchQuery.$and || [];
+      matchQuery.$and.push(sourceType === 'paid' ? paidMarkers : { $nor: [paidMarkers] });
+    }
 
     // When no date filter, include leads without scheduledEventStartTime (meta leads, not-scheduled)
     if (!matchQuery.scheduledEventStartTime) {
@@ -2880,6 +2898,21 @@ export const getLeadsAnalytics = async (req, res) => {
       ]
     };
 
+    // Paid vs organic source-type expression (reusable). Paid = explicit ad markers.
+    const sourceTypeExpr = {
+      $cond: [
+        {
+          $or: [
+            { $eq: ['$metaIsOrganic', false] },
+            { $in: [{ $toLower: { $ifNull: ['$utmMedium', ''] } }, ['cpc', 'ppc', 'paid', 'paid_social', 'paid-social', 'paidsocial']] },
+            { $and: [{ $ne: [{ $ifNull: ['$metaAdId', null] }, null] }, { $ne: ['$metaAdId', ''] }] },
+          ],
+        },
+        'paid',
+        'organic',
+      ],
+    };
+
     // Run all aggregation pipelines concurrently for max performance
     const [
       funnelResult,
@@ -2899,7 +2932,9 @@ export const getLeadsAnalytics = async (req, res) => {
       velocityResult,
       bdaResult,
       leadSourceTypeResult,
-      monthlyComparisonResult
+      monthlyComparisonResult,
+      monthlyStatusResult,
+      monthlySourceTypeResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3216,6 +3251,40 @@ export const getLeadsAnalytics = async (req, res) => {
           }
         },
         { $sort: { _id: 1 } }
+      ]),
+
+      // 19. MONTHLY STATUS BREAKDOWN: per-month count of each bookingStatus
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            total: { $sum: 1 },
+            completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
+            noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+            cancelled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
+            rescheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+            paid: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
+            scheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
+            notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
+          }
+        },
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 20. MONTHLY PAID vs ORGANIC LEADS
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { sourceType: sourceTypeExpr } },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            total: { $sum: 1 },
+            paid: { $sum: { $cond: [{ $eq: ['$sourceType', 'paid'] }, 1, 0] } },
+            organic: { $sum: { $cond: [{ $eq: ['$sourceType', 'organic'] }, 1, 0] } }
+          }
+        },
+        { $sort: { _id: 1 } }
       ])
     ]);
 
@@ -3353,6 +3422,25 @@ export const getLeadsAnalytics = async (req, res) => {
       revenue: r.revenue
     }));
 
+    const monthlyStatus = monthlyStatusResult.map(r => ({
+      month: r._id,
+      total: r.total,
+      completed: r.completed,
+      noShow: r.noShow,
+      cancelled: r.cancelled,
+      rescheduled: r.rescheduled,
+      paid: r.paid,
+      scheduled: r.scheduled,
+      notScheduled: r.notScheduled
+    }));
+
+    const monthlySourceType = monthlySourceTypeResult.map(r => ({
+      month: r._id,
+      total: r.total,
+      paid: r.paid,
+      organic: r.organic
+    }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -3373,7 +3461,9 @@ export const getLeadsAnalytics = async (req, res) => {
         velocity,
         bdaPerformance,
         leadSourceType,
-        monthlyComparison
+        monthlyComparison,
+        monthlyStatus,
+        monthlySourceType
       }
     });
 
