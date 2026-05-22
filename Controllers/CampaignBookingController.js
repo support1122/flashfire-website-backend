@@ -3253,37 +3253,42 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 19. MONTHLY STATUS BREAKDOWN: per-month count of each bookingStatus.
-      // Deduplicated by client (latest booking wins) so totals match the summary
-      // KPIs / funnel / statusBreakdown which also dedupe by client.
+      // 19. MONTHLY STATUS BREAKDOWN — matches the Leads table's per-status filter.
+      // A lead is counted under EVERY status it has had (e.g. a lead that was
+      // rescheduled and later re-booked counts in both "Rescheduled" and
+      // "Scheduled") — exactly what the Leads table shows when you change the
+      // Status filter. We take the latest booking PER (client, status) and bucket
+      // it by meeting date (scheduledEventStartTime), falling back to
+      // bookingCreatedAt — same date field the Leads table filters on.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
         { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         {
+          // one row per (client, status) — the latest booking of that status
           $group: {
-            _id: '$groupKey',
-            bookingStatus: { $first: '$bookingStatus' },
-            bookingCreatedAt: { $first: '$bookingCreatedAt' }
+            _id: { client: '$groupKey', status: '$bookingStatus' },
+            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
           }
         },
         {
           $group: {
-            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            _id: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
             total: { $sum: 1 },
-            completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
-            noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
-            cancelled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
-            rescheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
-            paid: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
-            scheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
-            notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
+            completed: { $sum: { $cond: [{ $eq: ['$_id.status', 'completed'] }, 1, 0] } },
+            noShow: { $sum: { $cond: [{ $eq: ['$_id.status', 'no-show'] }, 1, 0] } },
+            cancelled: { $sum: { $cond: [{ $eq: ['$_id.status', 'canceled'] }, 1, 0] } },
+            rescheduled: { $sum: { $cond: [{ $eq: ['$_id.status', 'rescheduled'] }, 1, 0] } },
+            paid: { $sum: { $cond: [{ $eq: ['$_id.status', 'paid'] }, 1, 0] } },
+            scheduled: { $sum: { $cond: [{ $eq: ['$_id.status', 'scheduled'] }, 1, 0] } },
+            notScheduled: { $sum: { $cond: [{ $eq: ['$_id.status', 'not-scheduled'] }, 1, 0] } }
           }
         },
         { $sort: { _id: 1 } }
       ]),
 
-      // 20. MONTHLY PAID vs ORGANIC LEADS — also deduplicated by client.
+      // 20. MONTHLY PAID vs ORGANIC LEADS — also deduplicated by client,
+      // bucketed by meeting date (same as #19).
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] }, sourceType: sourceTypeExpr } },
@@ -3292,12 +3297,12 @@ export const getLeadsAnalytics = async (req, res) => {
           $group: {
             _id: '$groupKey',
             sourceType: { $first: '$sourceType' },
-            bookingCreatedAt: { $first: '$bookingCreatedAt' }
+            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
           }
         },
         {
           $group: {
-            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            _id: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
             total: { $sum: 1 },
             paid: { $sum: { $cond: [{ $eq: ['$sourceType', 'paid'] }, 1, 0] } },
             organic: { $sum: { $cond: [{ $eq: ['$sourceType', 'organic'] }, 1, 0] } }
