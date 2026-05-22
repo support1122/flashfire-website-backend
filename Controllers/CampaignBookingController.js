@@ -2934,7 +2934,11 @@ export const getLeadsAnalytics = async (req, res) => {
       leadSourceTypeResult,
       monthlyComparisonResult,
       monthlyStatusResult,
-      monthlySourceTypeResult
+      monthlySourceTypeResult,
+      utmSourceMonthlyResult,
+      utmMediumMonthlyResult,
+      utmSourceStatusResult,
+      utmMediumStatusResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3309,6 +3313,110 @@ export const getLeadsAnalytics = async (req, res) => {
           }
         },
         { $sort: { _id: 1 } }
+      ]),
+
+      // 21. MONTHLY BY UTM SOURCE — deduped by client, bucketed by meeting month.
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        {
+          $group: {
+            _id: '$groupKey',
+            utmSource: { $first: { $ifNull: ['$utmSource', 'direct'] } },
+            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
+              source: '$utmSource'
+            },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id.month': 1 } }
+      ]),
+
+      // 22. MONTHLY BY UTM MEDIUM — deduped by client, bucketed by meeting month.
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        {
+          $group: {
+            _id: '$groupKey',
+            utmMedium: { $first: { $ifNull: ['$utmMedium', 'none'] } },
+            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
+          }
+        },
+        {
+          $group: {
+            _id: {
+              month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
+              medium: '$utmMedium'
+            },
+            count: { $sum: 1 }
+          }
+        },
+        { $sort: { '_id.month': 1 } }
+      ]),
+
+      // 23. UTM SOURCE — how many leads + their current status (deduped by client).
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        {
+          $group: {
+            _id: '$groupKey',
+            utmSource: { $first: { $ifNull: ['$utmSource', 'direct'] } },
+            bookingStatus: { $first: '$bookingStatus' }
+          }
+        },
+        {
+          $group: {
+            _id: '$utmSource',
+            total: { $sum: 1 },
+            completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
+            noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+            cancelled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
+            rescheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+            paid: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
+            scheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
+            notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
+          }
+        },
+        { $sort: { total: -1 } }
+      ]),
+
+      // 24. UTM MEDIUM — how many leads + their current status (deduped by client).
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        {
+          $group: {
+            _id: '$groupKey',
+            utmMedium: { $first: { $ifNull: ['$utmMedium', 'none'] } },
+            bookingStatus: { $first: '$bookingStatus' }
+          }
+        },
+        {
+          $group: {
+            _id: '$utmMedium',
+            total: { $sum: 1 },
+            completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
+            noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+            cancelled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
+            rescheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+            paid: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
+            scheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
+            notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
+          }
+        },
+        { $sort: { total: -1 } }
       ])
     ]);
 
@@ -3465,6 +3573,42 @@ export const getLeadsAnalytics = async (req, res) => {
       organic: r.organic
     }));
 
+    const utmSourceMonthly = utmSourceMonthlyResult.map(r => ({
+      month: r._id.month,
+      source: r._id.source,
+      count: r.count
+    }));
+
+    const utmMediumMonthly = utmMediumMonthlyResult.map(r => ({
+      month: r._id.month,
+      medium: r._id.medium,
+      count: r.count
+    }));
+
+    const utmSourceStatus = utmSourceStatusResult.map(r => ({
+      source: r._id,
+      total: r.total,
+      completed: r.completed,
+      noShow: r.noShow,
+      cancelled: r.cancelled,
+      rescheduled: r.rescheduled,
+      paid: r.paid,
+      scheduled: r.scheduled,
+      notScheduled: r.notScheduled
+    }));
+
+    const utmMediumStatus = utmMediumStatusResult.map(r => ({
+      medium: r._id,
+      total: r.total,
+      completed: r.completed,
+      noShow: r.noShow,
+      cancelled: r.cancelled,
+      rescheduled: r.rescheduled,
+      paid: r.paid,
+      scheduled: r.scheduled,
+      notScheduled: r.notScheduled
+    }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -3487,7 +3631,11 @@ export const getLeadsAnalytics = async (req, res) => {
         leadSourceType,
         monthlyComparison,
         monthlyStatus,
-        monthlySourceType
+        monthlySourceType,
+        utmSourceMonthly,
+        utmMediumMonthly,
+        utmSourceStatus,
+        utmMediumStatus
       }
     });
 
