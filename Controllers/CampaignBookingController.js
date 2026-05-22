@@ -3253,9 +3253,20 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 19. MONTHLY STATUS BREAKDOWN: per-month count of each bookingStatus
+      // 19. MONTHLY STATUS BREAKDOWN: per-month count of each bookingStatus.
+      // Deduplicated by client (latest booking wins) so totals match the summary
+      // KPIs / funnel / statusBreakdown which also dedupe by client.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        {
+          $group: {
+            _id: '$groupKey',
+            bookingStatus: { $first: '$bookingStatus' },
+            bookingCreatedAt: { $first: '$bookingCreatedAt' }
+          }
+        },
         {
           $group: {
             _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
@@ -3272,10 +3283,18 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 20. MONTHLY PAID vs ORGANIC LEADS
+      // 20. MONTHLY PAID vs ORGANIC LEADS — also deduplicated by client.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
-        { $addFields: { sourceType: sourceTypeExpr } },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] }, sourceType: sourceTypeExpr } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        {
+          $group: {
+            _id: '$groupKey',
+            sourceType: { $first: '$sourceType' },
+            bookingCreatedAt: { $first: '$bookingCreatedAt' }
+          }
+        },
         {
           $group: {
             _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
