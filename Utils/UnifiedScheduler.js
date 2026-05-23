@@ -17,9 +17,11 @@ import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDis
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { logReminderDrift } from './MeetingReminderUtils.js';
-import { makeCall } from './CallScheduler.js';
-import { sendWhatsAppMessage } from './WhatsAppReminderScheduler.js';
-import { formatMeetingWallTime, headlineForSendTime } from './DiscordMeetReminderScheduler.js';
+import { makeCall, scheduleCall } from './CallScheduler.js';
+import { sendWhatsAppMessage, scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
+import { formatMeetingWallTime, headlineForSendTime, scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
+import { normalizePhoneForReminders } from './MeetingReminderUtils.js';
+import { DateTime } from 'luxon';
 
 dotenv.config();
 
@@ -45,6 +47,7 @@ export class UnifiedScheduler {
     this.pollHandle = null;
     this.bdaPollHandle = null;
     this.jobPollHandle = null;
+    this.healHandle = null;
     this.running = false;
     this.processing = false;
     this.inFlight = 0;
@@ -141,6 +144,11 @@ export class UnifiedScheduler {
       console.warn('[UnifiedScheduler] Job scheduler not available:', e.message);
     }
 
+    // 7. Hourly self-heal: creates missing reminder records for upcoming bookings
+    const runHeal = () => this._healMissingReminders().catch(e => console.error('[UnifiedScheduler] Heal error:', e.message));
+    setTimeout(runHeal, 60000); // first run 1 min after start
+    this.healHandle = setInterval(runHeal, 60 * 60 * 1000); // then every hour
+
     console.log('[UnifiedScheduler] Started — precision timers active, safety poll every 30s');
   }
 
@@ -150,6 +158,7 @@ export class UnifiedScheduler {
     if (this.pollHandle) { clearInterval(this.pollHandle); this.pollHandle = null; }
     if (this.bdaPollHandle) { clearInterval(this.bdaPollHandle); this.bdaPollHandle = null; }
     if (this.jobPollHandle) { clearInterval(this.jobPollHandle); this.jobPollHandle = null; }
+    if (this.healHandle) { clearInterval(this.healHandle); this.healHandle = null; }
 
     for (const [, timer] of this.timers) clearTimeout(timer);
     this.timers.clear();
@@ -427,24 +436,6 @@ export class UnifiedScheduler {
         return;
       }
 
-      // Single-winner claim across backends.
-      const bIdWa = reminder.metadata?.bookingId || reminder.bookingId;
-      if (bIdWa) {
-        const claim = await CampaignBookingModel.findOneAndUpdate(
-          { bookingId: bIdWa, whatsappReminderSentAt: null },
-          { $set: { whatsappReminderSentAt: new Date(), whatsappReminderSentBy: 'main' } },
-          { new: false }
-        );
-        if (!claim) {
-          await ScheduledWhatsAppReminderModel.updateOne(
-            { _id: reminder._id },
-            { status: 'cancelled', errorMessage: 'whatsappReminderSentAt already set (other backend dispatched)' }
-          );
-          console.log(`[UnifiedScheduler] WA skipped — already sent: ${reminder.reminderId}`);
-          return;
-        }
-      }
-
       logReminderDrift('whatsapp', reminder.reminderId, reminder.scheduledFor);
 
       const result = await sendWhatsAppMessage(reminder);
@@ -623,6 +614,151 @@ export class UnifiedScheduler {
     const total = (callRes.modifiedCount || 0) + (waRes.modifiedCount || 0) + (discordRes.modifiedCount || 0);
     if (total > 0) {
       console.warn(`[UnifiedScheduler] Reset ${total} stuck items (call:${callRes.modifiedCount} wa:${waRes.modifiedCount} discord:${discordRes.modifiedCount})`);
+    }
+  }
+
+  // ────────────────────────── Self-heal ──────────────────────────────────
+
+  _buildDisplay(booking) {
+    const tz = booking.inviteeTimezone || 'America/New_York';
+    const s = DateTime.fromJSDate(new Date(booking.scheduledEventStartTime)).setZone(tz);
+    const e = booking.scheduledEventEndTime
+      ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime)).setZone(tz)
+      : s.plus({ minutes: 15 });
+    const fmt = dt => dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase();
+    return {
+      meetingTime: `${fmt(s)} – ${fmt(e)}`,
+      meetingDate: s.toFormat('EEEE MMM d, yyyy'),
+      tzAbbr: s.toFormat('ZZZZ') || 'ET',
+    };
+  }
+
+  async _healMissingReminders() {
+    const now = new Date();
+    const windowEnd = new Date(now.getTime() + 48 * 60 * 60 * 1000);
+
+    const bookings = await CampaignBookingModel.find({
+      bookingStatus: 'scheduled',
+      scheduledEventStartTime: { $gte: now, $lt: windowEnd },
+    }).lean();
+
+    if (!bookings.length) return;
+
+    let created = 0;
+    let flagsCleared = 0;
+
+    for (const booking of bookings) {
+      const meetingStart = new Date(booking.scheduledEventStartTime);
+      const minUntil = (meetingStart.getTime() - now.getTime()) / 60000;
+      if (minUntil < 5) continue;
+
+      const phone = booking.clientPhone ? normalizePhoneForReminders(booking.clientPhone) : null;
+      const phoneOk = phone && /^\+?[1-9]\d{9,14}$/.test(phone);
+
+      const [waRecords, activeCall, activeDisc] = await Promise.all([
+        ScheduledWhatsAppReminderModel.find({ bookingId: booking.bookingId }).lean(),
+        ScheduledCallModel.findOne({ bookingId: booking.bookingId, status: { $in: ['pending', 'processing', 'completed'] } }).lean(),
+        ScheduledDiscordMeetReminderModel.findOne({ bookingId: booking.bookingId, status: { $in: ['pending', 'processing', 'completed'] } }).lean(),
+      ]);
+
+      // Clear stale whatsappReminderSentAt if no completed WA reminder exists
+      const waCompleted = waRecords.some(r => r.status === 'completed');
+      if (booking.whatsappReminderSentAt && !waCompleted) {
+        await CampaignBookingModel.updateOne(
+          { _id: booking._id },
+          { $set: { whatsappReminderSentAt: null, whatsappReminderSentBy: null } }
+        );
+        flagsCleared++;
+      }
+
+      // Check per-type — only create what's actually missing
+      const active = s => ['pending', 'processing', 'completed'].includes(s);
+      const waByType = {};
+      for (const r of waRecords) {
+        const t = r.metadata?.reminderType;
+        if (t && (!waByType[t] || active(r.status))) waByType[t] = r;
+      }
+      const missingImmediate = !waByType.immediate || !active(waByType.immediate.status);
+      const missing3h = (!waByType['3h'] || !active(waByType['3h'].status)) && minUntil > 180;
+      const missing5min = (!waByType['5min'] || !active(waByType['5min'].status)) && minUntil > 5;
+      const needsWa = missingImmediate || missing3h || missing5min;
+
+      if (needsWa && phoneOk) {
+        const disp = this._buildDisplay(booking);
+        try {
+          await scheduleAllWhatsAppReminders({
+            phoneNumber: phone,
+            meetingStartISO: booking.scheduledEventStartTime,
+            meetingTime: disp.meetingTime,
+            meetingDate: disp.meetingDate,
+            clientName: booking.clientName,
+            clientEmail: booking.clientEmail,
+            meetingLink: booking.calendlyMeetLink || booking.googleMeetUrl || null,
+            rescheduleLink: booking.calendlyRescheduleLink || 'https://calendly.com/flashfirejobs',
+            source: 'auto-heal',
+            timezone: disp.tzAbbr,
+            metadata: { bookingId: booking.bookingId, inviteeTimezone: booking.inviteeTimezone },
+          });
+          const newWa = await ScheduledWhatsAppReminderModel.find({
+            bookingId: booking.bookingId, status: 'pending', scheduledFor: { $gt: now },
+          }).select('reminderId scheduledFor').lean();
+          for (const w of newWa) this.scheduleTimer('whatsapp', w.reminderId, w.scheduledFor);
+          created++;
+          console.log(`[UnifiedScheduler] Heal: WA reminders created for ${booking.clientName}`);
+        } catch (err) {
+          console.error(`[UnifiedScheduler] Heal WA error (${booking.clientEmail}): ${err.message}`);
+        }
+      }
+
+      if (!activeCall && phoneOk && minUntil > 12) {
+        try {
+          await scheduleCall({
+            phoneNumber: phone,
+            meetingStartISO: booking.scheduledEventStartTime,
+            meetingTime: DateTime.fromJSDate(meetingStart).setZone(booking.inviteeTimezone || 'America/New_York').toFormat('ff'),
+            inviteeName: booking.clientName,
+            inviteeEmail: booking.clientEmail,
+            source: 'auto-heal',
+            meetingLink: booking.calendlyMeetLink || null,
+            rescheduleLink: booking.calendlyRescheduleLink || 'https://calendly.com/flashfirejobs',
+            skipWhatsAppReminders: true,
+            metadata: { bookingId: booking.bookingId, inviteeTimezone: booking.inviteeTimezone },
+          });
+          const newCall = await ScheduledCallModel.findOne({ bookingId: booking.bookingId, status: 'pending', scheduledFor: { $gt: now } })
+            .select('callId scheduledFor').lean();
+          if (newCall) this.scheduleTimer('call', newCall.callId, newCall.scheduledFor);
+          created++;
+          console.log(`[UnifiedScheduler] Heal: call reminder created for ${booking.clientName}`);
+        } catch (err) {
+          console.error(`[UnifiedScheduler] Heal call error (${booking.clientEmail}): ${err.message}`);
+        }
+      }
+
+      if (!activeDisc && minUntil > 6) {
+        try {
+          await scheduleDiscordMeetReminder({
+            bookingId: booking.bookingId,
+            clientName: booking.clientName,
+            clientEmail: booking.clientEmail,
+            meetingStartISO: booking.scheduledEventStartTime,
+            meetingLink: booking.calendlyMeetLink || null,
+            inviteeTimezone: booking.inviteeTimezone,
+            source: 'auto-heal',
+            metadata: { bookingId: booking.bookingId },
+          });
+          const newDisc = await ScheduledDiscordMeetReminderModel.findOne({ bookingId: booking.bookingId, status: 'pending', scheduledFor: { $gt: now } })
+            .select('reminderId scheduledFor').lean();
+          if (newDisc) this.scheduleTimer('discord', newDisc.reminderId, newDisc.scheduledFor);
+          created++;
+          console.log(`[UnifiedScheduler] Heal: Discord reminder created for ${booking.clientName}`);
+        } catch (err) {
+          console.error(`[UnifiedScheduler] Heal Discord error (${booking.clientEmail}): ${err.message}`);
+        }
+      }
+    }
+
+    if (created > 0 || flagsCleared > 0) {
+      console.log(`[UnifiedScheduler] Heal complete: ${created} reminder(s) created, ${flagsCleared} stale flag(s) cleared`);
     }
   }
 
