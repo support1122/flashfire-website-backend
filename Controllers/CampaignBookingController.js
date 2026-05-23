@@ -2938,7 +2938,8 @@ export const getLeadsAnalytics = async (req, res) => {
       utmSourceMonthlyResult,
       utmMediumMonthlyResult,
       utmSourceStatusResult,
-      utmMediumStatusResult
+      utmMediumStatusResult,
+      metaLeadsMonthlyResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3426,6 +3427,39 @@ export const getLeadsAnalytics = async (req, res) => {
           }
         },
         { $sort: { '_id.month': 1 } }
+      ]),
+
+      // 25. META LEADS — booked a meeting vs not, per month (deduped by client).
+      // Meta lead = has metaLeadId or leadSource 'meta_lead_ad'.
+      // Booked = current status is anything other than 'not-scheduled'.
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        {
+          $match: {
+            $or: [
+              { metaLeadId: { $exists: true, $ne: null } },
+              { leadSource: 'meta_lead_ad' }
+            ]
+          }
+        },
+        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        {
+          $group: {
+            _id: '$groupKey',
+            bookingStatus: { $first: '$bookingStatus' },
+            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
+          }
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
+            total: { $sum: 1 },
+            booked: { $sum: { $cond: [{ $ne: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } },
+            notBooked: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
+          }
+        },
+        { $sort: { _id: 1 } }
       ])
     ]);
 
@@ -3620,6 +3654,13 @@ export const getLeadsAnalytics = async (req, res) => {
       notScheduled: r.notScheduled
     }));
 
+    const metaLeadsMonthly = metaLeadsMonthlyResult.map(r => ({
+      month: r._id,
+      total: r.total,
+      booked: r.booked,
+      notBooked: r.notBooked
+    }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -3646,7 +3687,8 @@ export const getLeadsAnalytics = async (req, res) => {
         utmSourceMonthly,
         utmMediumMonthly,
         utmSourceStatus,
-        utmMediumStatus
+        utmMediumStatus,
+        metaLeadsMonthly
       }
     });
 
