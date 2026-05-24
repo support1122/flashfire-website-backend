@@ -74,6 +74,7 @@ import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhoo
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
 import { handleStripeWebhook } from "./Controllers/StripeWebhookController.js";
 import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController.js";
+import { handleZoomPhoneWebhook } from "./Controllers/ZoomPhoneWebhookController.js";
 import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
 // BDA Attendance Controllers
 import {
@@ -392,6 +393,8 @@ export default function Routes(app) {
   app.post('/api/webhooks/meta-leads', handleMetaLeadWebhook); // Receive Meta Lead Ad submissions (POST)
   app.post('/api/meta-leads/manual', createMetaLeadManually); // Manually create Meta lead (for testing)
   app.post('/meta-leads-from-sheet', upsertMetaLeadFromSheet); // Google Apps Script / Sheets → MongoDB upsert by metaLeadId
+  // Zoom Phone Webhooks
+  app.post('/api/zoom-phone/webhook', handleZoomPhoneWebhook); // Zoom Phone: URL validation + call events (ringing, completed, missed, recordings, transcripts)
   // Fireflies Webhooks (DISABLED - Fireflies integration removed)
   // app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
   //   try {
