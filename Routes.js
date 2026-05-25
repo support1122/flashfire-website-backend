@@ -158,6 +158,7 @@ import {
   getCallsForLead,
   getRecentCalls,
   proxyCallRecording,
+  proxyCallTranscript,
 } from './Controllers/ZoomPhoneController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
@@ -252,6 +253,7 @@ export default function Routes(app) {
   app.get('/api/crm/call-logs', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallsForLead);
   app.get('/api/crm/call-logs/recent', requireCrmUser, requireCrmPermission('phone_calls'), getRecentCalls);
   app.get('/api/crm/call-logs/:callId/recording', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallRecording);
+  app.get('/api/crm/call-logs/:callId/transcript', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallTranscript);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);

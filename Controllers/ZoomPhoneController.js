@@ -240,7 +240,7 @@ export const getRecentCalls = async (req, res) => {
       CallLogModel.find(q)
         .sort({ startedAt: -1, createdAt: -1 })
         .skip(skip).limit(limit)
-        .select('callId direction status salesEmail salesName leadName leadEmail leadNumber bookingId startedAt durationSec recordingUrl transcriptUrl')
+        .select('callId direction status salesEmail salesName leadName leadEmail leadNumber bookingId startedAt durationSec recordingUrl transcriptUrl aiSummary')
         .lean(),
       CallLogModel.countDocuments(q),
     ]);
@@ -266,6 +266,44 @@ export const proxyCallRecording = async (req, res) => {
     upstream.body.pipe(res);
   } catch (error) {
     console.error('[ZoomPhone] proxyCallRecording error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/** Fetch the VTT transcript and return as plain text. */
+export const proxyCallTranscript = async (req, res) => {
+  try {
+    const { callId } = req.params;
+    const log = await CallLogModel.findOne({ callId }).lean();
+    if (!log?.transcriptUrl) return res.status(404).json({ success: false, error: 'No transcript' });
+    const token = await getZoomAccessToken();
+    if (!token) return res.status(503).json({ success: false, error: 'Zoom not configured' });
+    const upstream = await fetch(log.transcriptUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!upstream.ok) {
+      return res.status(upstream.status).json({ success: false, error: 'Upstream fetch failed' });
+    }
+    const raw = await upstream.text();
+    // Strip VTT timing lines for a readable transcript. Keep cues.
+    const lines = raw.split(/\r?\n/);
+    const out = [];
+    let speaker = '';
+    for (const line of lines) {
+      if (!line || /^WEBVTT/i.test(line) || /^NOTE\b/i.test(line)) continue;
+      if (/^\d+$/.test(line)) continue; // cue index
+      if (/-->/.test(line)) continue; // time range
+      // Zoom format: "Speaker Name: text"
+      const m = line.match(/^([^:]{1,60}):\s*(.+)$/);
+      if (m && m[1] !== speaker) {
+        speaker = m[1];
+        out.push(`\n${m[1]}: ${m[2]}`);
+      } else {
+        out.push(line.trim());
+      }
+    }
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    return res.status(200).send(out.join('\n').trim());
+  } catch (error) {
+    console.error('[ZoomPhone] proxyCallTranscript error:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
