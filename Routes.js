@@ -152,6 +152,12 @@ import {
 import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
+import {
+  zoomPhoneWebhook,
+  getCallMinutesByPhone,
+  getCallsForLead,
+  proxyCallRecording,
+} from './Controllers/ZoomPhoneController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
 import {
@@ -237,6 +243,13 @@ export default function Routes(app) {
 
   // Graphs module — paid-client analytics sourced from the clients-tracking DB.
   app.get('/api/crm/paid-clients/analytics', requireCrmUser, requireCrmPermission('lead_analytics'), getPaidClientsAnalytics);
+
+  // Zoom Phone — webhook is public (HMAC-verified inside).
+  app.post('/api/zoom-phone/webhook', zoomPhoneWebhook);
+  // CRM-facing endpoints for the Leads / All-Data tables.
+  app.get('/api/crm/call-logs/minutes-by-phone', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallMinutesByPhone);
+  app.get('/api/crm/call-logs', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallsForLead);
+  app.get('/api/crm/call-logs/:callId/recording', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallRecording);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);

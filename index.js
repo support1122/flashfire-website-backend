@@ -280,7 +280,16 @@ app.options(/.*/, cors({ origin: true, credentials: true }));
 app.use(compression());
 // Stripe webhook must receive raw body for signature verification.
 app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
-app.use(express.json());
+// Capture raw bytes for Zoom Phone webhook HMAC verification.
+app.use(
+  express.json({
+    verify: (req, _res, buf) => {
+      if (req.originalUrl && req.originalUrl.startsWith('/api/zoom-phone/webhook')) {
+        req.rawBody = buf;
+      }
+    },
+  })
+);
 app.use(express.urlencoded({ extended: false }));
 
 // Activity logging — records every mutating CRM/BDA request after it finishes.
