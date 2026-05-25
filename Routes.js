@@ -159,6 +159,7 @@ import {
   getRecentCalls,
   proxyCallRecording,
   proxyCallTranscript,
+  getZoomWebhookEvents,
 } from './Controllers/ZoomPhoneController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
@@ -254,6 +255,10 @@ export default function Routes(app) {
   app.get('/api/crm/call-logs/recent', requireCrmUser, requireCrmPermission('phone_calls'), getRecentCalls);
   app.get('/api/crm/call-logs/:callId/recording', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallRecording);
   app.get('/api/crm/call-logs/:callId/transcript', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallTranscript);
+  // Debug: raw Zoom webhook deliveries — quickest way to see if events arrive at all.
+  app.get('/api/crm/zoom-phone/events', requireCrmUser, requireCrmPermission('phone_calls'), getZoomWebhookEvents);
+  // Same data, admin-token gated — easier for one-off debugging.
+  app.get('/api/crm/admin/zoom-phone/events', requireCrmAdmin, getZoomWebhookEvents);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);
