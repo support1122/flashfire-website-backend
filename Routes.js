@@ -156,6 +156,7 @@ import {
   zoomPhoneWebhook,
   getCallMinutesByPhone,
   getCallsForLead,
+  getRecentCalls,
   proxyCallRecording,
 } from './Controllers/ZoomPhoneController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
@@ -249,6 +250,7 @@ export default function Routes(app) {
   // CRM-facing endpoints for the Leads / All-Data tables.
   app.get('/api/crm/call-logs/minutes-by-phone', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallMinutesByPhone);
   app.get('/api/crm/call-logs', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallsForLead);
+  app.get('/api/crm/call-logs/recent', requireCrmUser, requireCrmPermission('phone_calls'), getRecentCalls);
   app.get('/api/crm/call-logs/:callId/recording', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallRecording);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);

@@ -218,6 +218,39 @@ export const getCallsForLead = async (req, res) => {
  * GET /api/crm/call-logs/:callId/recording
  * Streams the audio bytes with the Zoom S2S OAuth token attached.
  */
+/**
+ * Recent calls feed for the Phone tab. Paginated, newest first.
+ * GET /api/crm/call-logs/recent?limit=50&skip=0&direction=outbound&search=...
+ */
+export const getRecentCalls = async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+    const skip = parseInt(req.query.skip || '0', 10);
+    const { direction, search } = req.query;
+    const q = {};
+    if (direction === 'inbound' || direction === 'outbound') q.direction = direction;
+    if (search) {
+      const re = new RegExp(String(search).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      q.$or = [
+        { leadName: re }, { leadEmail: re }, { salesEmail: re }, { salesName: re },
+        { leadNumber: re }, { leadNumberNormalized: re },
+      ];
+    }
+    const [rows, total] = await Promise.all([
+      CallLogModel.find(q)
+        .sort({ startedAt: -1, createdAt: -1 })
+        .skip(skip).limit(limit)
+        .select('callId direction status salesEmail salesName leadName leadEmail leadNumber bookingId startedAt durationSec recordingUrl transcriptUrl')
+        .lean(),
+      CallLogModel.countDocuments(q),
+    ]);
+    return res.status(200).json({ success: true, data: rows, total });
+  } catch (error) {
+    console.error('[ZoomPhone] getRecentCalls error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 export const proxyCallRecording = async (req, res) => {
   try {
     const { callId } = req.params;
