@@ -1,5 +1,6 @@
 import { CallLogModel } from '../Schema_Models/CallLog.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { ZoomWebhookEventModel } from '../Schema_Models/ZoomWebhookEvent.js';
 import {
   normalizePhone,
   verifyZoomSignature,
@@ -13,22 +14,62 @@ import {
  * HMAC signature against the exact bytes Zoom signed.
  */
 export const zoomPhoneWebhook = async (req, res) => {
+  // Persist every incoming hit so we have a permanent record of what Zoom sent.
+  // Done before any other processing so even crashes leave a row behind.
+  const debug = {
+    event: req.body?.event || null,
+    signatureValid: null,
+    handled: false,
+    handlerNote: null,
+    callId: null,
+    headers: {
+      'x-zm-request-timestamp': req.headers['x-zm-request-timestamp'],
+      'x-zm-signature': req.headers['x-zm-signature'] ? '[present]' : null,
+      'user-agent': req.headers['user-agent'],
+      'x-forwarded-for': req.headers['x-forwarded-for'],
+    },
+    body: req.body,
+  };
+  const persistDebug = async () => {
+    try {
+      await ZoomWebhookEventModel.create(debug);
+    } catch (e) {
+      console.error('[ZoomPhone] Failed to persist debug event:', e.message);
+    }
+  };
+
   try {
     const rawBody = req.rawBody != null ? req.rawBody.toString('utf8') : JSON.stringify(req.body);
     const secret = process.env.ZOOM_WEBHOOK_SECRET_TOKEN;
+
+    // Visibility: log every webhook hit so we can see which events Zoom is firing.
+    console.log(`[ZoomPhone] hit ${req.body?.event || 'unknown'} from ${req.ip}`);
 
     // 1. URL validation handshake — only happens when adding the webhook in Zoom Marketplace.
     if (req.body?.event === 'endpoint.url_validation') {
       const plainToken = req.body?.payload?.plainToken;
       if (!secret || !plainToken) {
+        debug.handlerNote = 'url_validation missing secret or plainToken';
+        await persistDebug();
         return res.status(400).json({ error: 'Missing secret or plainToken' });
       }
+      debug.handled = true;
+      debug.handlerNote = 'url_validation responded';
+      await persistDebug();
       return res.status(200).json(buildUrlValidationResponse(plainToken, secret));
     }
 
     // 2. Signature check (skipped only when no secret set — dev / stub mode).
-    if (secret && !verifyZoomSignature(rawBody, req.headers, secret)) {
-      return res.status(401).json({ error: 'Invalid Zoom signature' });
+    if (secret) {
+      const ok = verifyZoomSignature(rawBody, req.headers, secret);
+      debug.signatureValid = ok;
+      if (!ok) {
+        debug.handlerNote = 'invalid signature';
+        await persistDebug();
+        return res.status(401).json({ error: 'Invalid Zoom signature' });
+      }
+    } else {
+      debug.signatureValid = null;
     }
 
     const event = req.body?.event;
@@ -38,9 +79,14 @@ export const zoomPhoneWebhook = async (req, res) => {
     // payload shapes — we pick the relevant fields and upsert by callId.
     const obj = payload.object || {};
     const callId = obj.call_id || obj.id || obj.call_log_id;
+    debug.callId = callId || null;
     if (!callId) {
+      console.log('[ZoomPhone] no call_id in payload:', JSON.stringify(req.body).slice(0, 800));
+      debug.handlerNote = 'no call_id — event dropped';
+      await persistDebug();
       return res.status(202).json({ ok: true, ignored: 'no call_id' });
     }
+    console.log(`[ZoomPhone] persisting callId=${callId} event=${event}`);
 
     const direction = obj.direction === 'inbound' ? 'inbound'
       : obj.direction === 'outbound' ? 'outbound'
@@ -125,9 +171,14 @@ export const zoomPhoneWebhook = async (req, res) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
+    debug.handled = true;
+    debug.handlerNote = `CallLog upserted (status=${status}, bookingMatched=${!!bookingId})`;
+    await persistDebug();
     return res.status(200).json({ ok: true });
   } catch (error) {
     console.error('[ZoomPhone] Webhook error:', error);
+    debug.handlerNote = `error: ${error.message}`;
+    await persistDebug();
     // Always 200 so Zoom doesn't retry forever; we log the error.
     return res.status(200).json({ ok: false, error: error.message });
   }
@@ -266,6 +317,20 @@ export const proxyCallRecording = async (req, res) => {
     upstream.body.pipe(res);
   } catch (error) {
     console.error('[ZoomPhone] proxyCallRecording error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/** Debug: list the most recent raw Zoom webhook events stored in the DB. */
+export const getZoomWebhookEvents = async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '50', 10), 200);
+    const events = await ZoomWebhookEventModel.find({})
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .lean();
+    return res.status(200).json({ success: true, count: events.length, data: events });
+  } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
