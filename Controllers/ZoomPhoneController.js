@@ -322,6 +322,93 @@ export const proxyCallRecording = async (req, res) => {
   }
 };
 
+/**
+ * No-show leads that never received a phone call.
+ * Deduped by client. Returns each lead + their bookingStatus, last meeting time,
+ * normalized phone. Useful for "who did we forget to call?".
+ *
+ * GET /api/crm/phone-gaps/no-show?limit=200&days=60
+ */
+export const getNoShowLeadsWithoutCalls = async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '200', 10), 1000);
+    const days = Math.min(parseInt(req.query.days || '60', 10), 365);
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+
+    // 1. Pull deduped no-show leads (one row per client, latest booking).
+    const leads = await CampaignBookingModel.aggregate([
+      {
+        $match: {
+          bookingStatus: 'no-show',
+          $or: [
+            { scheduledEventStartTime: { $gte: since } },
+            { bookingCreatedAt: { $gte: since } },
+          ],
+        },
+      },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      {
+        $group: {
+          _id: '$groupKey',
+          bookingId: { $first: '$bookingId' },
+          clientName: { $first: '$clientName' },
+          clientEmail: { $first: '$clientEmail' },
+          clientPhone: { $first: '$clientPhone' },
+          scheduledEventStartTime: { $first: '$scheduledEventStartTime' },
+          bookingCreatedAt: { $first: '$bookingCreatedAt' },
+        },
+      },
+      { $match: { clientPhone: { $ne: null, $ne: '' } } },
+      { $limit: limit * 2 }, // grab a buffer so we have enough after exclusion
+    ]);
+
+    // 2. Compute normalized phones for those leads.
+    const phoneToLead = new Map();
+    for (const l of leads) {
+      const n = normalizePhone(l.clientPhone);
+      if (!n) continue;
+      if (!phoneToLead.has(n)) phoneToLead.set(n, l);
+    }
+    const normalizedList = [...phoneToLead.keys()];
+
+    // 3. Find which of those phones already have a CallLog row.
+    const calledRows = await CallLogModel.find({
+      leadNumberNormalized: { $in: normalizedList },
+    })
+      .select('leadNumberNormalized')
+      .lean();
+    const calledSet = new Set(calledRows.map((r) => r.leadNumberNormalized));
+
+    // 4. Keep only the ones with zero calls.
+    const notCalled = [];
+    for (const [phoneN, l] of phoneToLead.entries()) {
+      if (calledSet.has(phoneN)) continue;
+      notCalled.push({
+        bookingId: l.bookingId,
+        clientName: l.clientName,
+        clientEmail: l.clientEmail,
+        clientPhone: l.clientPhone,
+        clientPhoneNormalized: phoneN,
+        scheduledEventStartTime: l.scheduledEventStartTime,
+        bookingCreatedAt: l.bookingCreatedAt,
+      });
+      if (notCalled.length >= limit) break;
+    }
+
+    return res.status(200).json({
+      success: true,
+      total: notCalled.length,
+      scannedNoShowLeads: phoneToLead.size,
+      data: notCalled,
+    });
+  } catch (error) {
+    console.error('[ZoomPhone] getNoShowLeadsWithoutCalls error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
 /** Manual trigger for the Zoom call-history sync (refresh button in the UI). */
 export const triggerZoomSync = async (req, res) => {
   try {
