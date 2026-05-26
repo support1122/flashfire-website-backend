@@ -1050,6 +1050,16 @@ app.listen(PORT || 4001, async () => {
     console.warn('⚠️ [Server] Failed to seed default campaigns:', error.message);
   }
 
+  // Zoom Phone — poll call_history every 5 min to backfill calls even if
+  // webhook delivery is flaky or recording lags behind the event.
+  try {
+    const { startZoomPhoneSyncer } = await import('./Utils/ZoomPhoneSync.js');
+    startZoomPhoneSyncer(5 * 60 * 1000);
+    console.log('✅ [Server] Zoom Phone call-history syncer started (5m interval)');
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to start Zoom Phone syncer:', error.message);
+  }
+
   // One-time backfill: existing CRM users with a view permission get the matching
   // `_edit` permission so behavior does not regress when per-module view/edit ships.
   // Idempotent — only adds missing edit keys.

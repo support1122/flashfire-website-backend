@@ -37,7 +37,34 @@ const CallLogSchema = new mongoose.Schema(
     transcriptUrl: { type: String, default: null },
     aiSummary: { type: String, default: null },
 
-    // The raw webhook payload, kept for debugging.
+    // Full Zoom call_history metadata
+    callPathId: { type: String, default: null },
+    callType: { type: String, default: null },
+    connectType: { type: String, default: null },
+    callResult: { type: String, default: null },
+    recordingStatus: { type: String, default: null },
+    international: { type: Boolean, default: null },
+    hideCallerId: { type: Boolean, default: null },
+    endToEnd: { type: Boolean, default: null },
+
+    callerExtNumber: { type: String, default: null },
+    callerExtType: { type: String, default: null },
+    callerNumberType: { type: String, default: null },
+    callerDeviceType: { type: String, default: null },
+    callerCountryCode: { type: String, default: null },
+    callerCountryIso: { type: String, default: null },
+
+    calleeName: { type: String, default: null },
+    calleeEmail: { type: String, default: null, lowercase: true, trim: true },
+    calleeExtNumber: { type: String, default: null },
+    calleeNumberType: { type: String, default: null },
+    calleeCountryCode: { type: String, default: null },
+    calleeCountryIso: { type: String, default: null },
+
+    // Source of this row — 'webhook' (pushed) or 'sync' (polled call_history).
+    source: { type: String, enum: ['webhook', 'sync', 'unknown'], default: 'unknown' },
+
+    // The raw webhook / sync payload, kept for debugging.
     raw: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }

@@ -7,6 +7,7 @@ import {
   buildUrlValidationResponse,
   getZoomAccessToken,
 } from '../Utils/ZoomPhone.js';
+import { syncZoomCallHistory } from '../Utils/ZoomPhoneSync.js';
 
 /**
  * Zoom Phone webhook receiver.
@@ -291,7 +292,7 @@ export const getRecentCalls = async (req, res) => {
       CallLogModel.find(q)
         .sort({ startedAt: -1, createdAt: -1 })
         .skip(skip).limit(limit)
-        .select('callId direction status salesEmail salesName leadName leadEmail leadNumber bookingId startedAt durationSec recordingUrl transcriptUrl aiSummary')
+        .select('callId direction status callResult recordingStatus salesEmail salesName salesNumber callerExtNumber callerDeviceType callerCountryIso leadName leadEmail leadNumber calleeExtNumber calleeCountryIso bookingId startedAt answeredAt endedAt durationSec callType connectType international hideCallerId endToEnd source recordingUrl transcriptUrl aiSummary')
         .lean(),
       CallLogModel.countDocuments(q),
     ]);
@@ -317,6 +318,17 @@ export const proxyCallRecording = async (req, res) => {
     upstream.body.pipe(res);
   } catch (error) {
     console.error('[ZoomPhone] proxyCallRecording error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/** Manual trigger for the Zoom call-history sync (refresh button in the UI). */
+export const triggerZoomSync = async (req, res) => {
+  try {
+    const lookbackDays = Math.min(parseInt(req.query.lookbackDays || '30', 10), 180);
+    const result = await syncZoomCallHistory({ lookbackDays });
+    return res.status(result.ok ? 200 : 500).json({ success: result.ok, ...result });
+  } catch (error) {
     return res.status(500).json({ success: false, error: error.message });
   }
 };

@@ -160,6 +160,7 @@ import {
   proxyCallRecording,
   proxyCallTranscript,
   getZoomWebhookEvents,
+  triggerZoomSync,
 } from './Controllers/ZoomPhoneController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
@@ -253,6 +254,7 @@ export default function Routes(app) {
   app.get('/api/crm/call-logs/minutes-by-phone', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallMinutesByPhone);
   app.get('/api/crm/call-logs', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallsForLead);
   app.get('/api/crm/call-logs/recent', requireCrmUser, requireCrmPermission('phone_calls'), getRecentCalls);
+  app.post('/api/crm/call-logs/sync', requireCrmUser, requireCrmPermission('phone_calls'), triggerZoomSync);
   app.get('/api/crm/call-logs/:callId/recording', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallRecording);
   app.get('/api/crm/call-logs/:callId/transcript', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallTranscript);
   // Debug: raw Zoom webhook deliveries — quickest way to see if events arrive at all.
