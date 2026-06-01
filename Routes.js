@@ -153,6 +153,13 @@ import { crmAdminLogin, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUse
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
 import {
+  listDesignedTemplates,
+  getDesignedTemplate,
+  saveDesignedTemplate,
+  deleteDesignedTemplate,
+  sendDesignedTemplate,
+} from './Controllers/DesignedEmailTemplateController.js';
+import {
   zoomPhoneWebhook,
   getCallMinutesByPhone,
   getCallsForLead,
@@ -311,6 +318,13 @@ export default function Routes(app) {
   app.get('/api/email-templates', getEmailTemplates);
   app.put('/api/email-templates/fields', updateEmailTemplateFields);
   app.delete('/api/email-templates/:templateId', deleteEmailTemplate);
+
+  // Designed (in-dashboard, self-hosted HTML) email templates — gated by email_campaign.
+  app.get('/api/crm/email-templates/designed', requireCrmUser, requireCrmPermission('email_campaign'), listDesignedTemplates);
+  app.get('/api/crm/email-templates/designed/:id', requireCrmUser, requireCrmPermission('email_campaign'), getDesignedTemplate);
+  app.post('/api/crm/email-templates/designed', requireCrmUser, requireCrmEdit('email_campaign'), saveDesignedTemplate);
+  app.delete('/api/crm/email-templates/designed/:id', requireCrmUser, requireCrmEdit('email_campaign'), deleteDesignedTemplate);
+  app.post('/api/crm/email-templates/designed/:id/send', requireCrmUser, requireCrmEdit('email_campaign'), sendDesignedTemplate);
   
   // WhatsApp Campaign Routes
   app.get('/api/whatsapp-campaigns/templates', getWatiTemplates);

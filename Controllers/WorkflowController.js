@@ -8,6 +8,8 @@ import { DateTime } from 'luxon';
 import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 import { buildTemplateParameters } from '../Utils/TemplateParameterBuilder.js';
 import { safeErrorDetails } from '../Utils/safeErrorDetails.js';
+import { DesignedEmailTemplateModel } from '../Schema_Models/DesignedEmailTemplate.js';
+import { renderDesignedEmail, buildBookingTokens } from './DesignedEmailTemplateController.js';
 
 function normalizePhoneForMatching(phone) {
   if (!phone) return null;
@@ -979,20 +981,34 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
         throw new Error('Sender email not configured');
       }
 
-      const msg = {
-        to: booking.clientEmail,
-        from: senderEmail,
-        templateId: step.templateId,
-        dynamicTemplateData: {
-          domain: domainName,
-          clientName: booking.clientName,
-          bookingId: booking.bookingId
-        }
-      };
+      // A templateId that is NOT a SendGrid dynamic-template id (d-xxxx) is the
+      // Mongo _id of an in-dashboard DesignedEmailTemplate. Render + send its HTML.
+      const isDesigned = !!step.templateId && !/^d-/i.test(String(step.templateId).trim());
+
+      let msg;
+      if (isDesigned) {
+        const tpl = await DesignedEmailTemplateModel.findById(step.templateId).lean();
+        if (!tpl) throw new Error(`Designed template not found: ${step.templateId}`);
+        const { subject, html, from } = renderDesignedEmail(tpl, buildBookingTokens(booking));
+        // Honour a per-step sender override if one was configured.
+        const sendFrom = step.senderEmail ? { email: step.senderEmail, name: from.name } : from;
+        msg = { to: booking.clientEmail, from: sendFrom, subject, html };
+      } else {
+        msg = {
+          to: booking.clientEmail,
+          from: senderEmail,
+          templateId: step.templateId,
+          dynamicTemplateData: {
+            domain: domainName,
+            clientName: booking.clientName,
+            bookingId: booking.bookingId
+          }
+        };
+      }
 
       const result = await sgMail.send(msg);
       responseData = { statusCode: result[0]?.statusCode, messageId: result[0]?.headers?.['x-message-id'] };
-      console.log(`✅ Email sent via workflow ${workflowId} to ${booking.clientEmail}`);
+      console.log(`✅ Email sent via workflow ${workflowId} to ${booking.clientEmail} (${isDesigned ? 'designed' : 'sendgrid'} template)`);
 
       // Log successful execution
       await logWorkflowExecution({
