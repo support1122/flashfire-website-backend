@@ -12,6 +12,8 @@ import { buildTemplateParameters } from './TemplateParameterBuilder.js';
 import { safeErrorDetails } from './safeErrorDetails.js';
 import { sendgridCircuitBreaker } from './CircuitBreaker.js';
 import { clientHasPaidBooking } from '../Controllers/WorkflowController.js';
+import { DesignedEmailTemplateModel } from '../Schema_Models/DesignedEmailTemplate.js';
+import { renderDesignedEmail, buildBookingTokens } from '../Controllers/DesignedEmailTemplateController.js';
 import { ScheduledWhatsAppReminderModel } from '../Schema_Models/ScheduledWhatsAppReminder.js';
 import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
 import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
@@ -188,16 +190,35 @@ export async function executeWorkflowLog(log) {
         return;
       }
 
-      const msg = {
-        to: booking.clientEmail,
-        from: senderEmail,
-        templateId: log.step.templateId,
-        dynamicTemplateData: {
-          domain: domainName,
-          clientName: booking.clientName,
-          bookingId: booking.bookingId
+      // A templateId without the SendGrid "d-" prefix is the Mongo _id of an
+      // in-dashboard DesignedEmailTemplate -> render its HTML and send directly.
+      const isDesigned = !!log.step.templateId && !/^d-/i.test(String(log.step.templateId).trim());
+
+      let msg;
+      if (isDesigned) {
+        const tpl = await DesignedEmailTemplateModel.findById(log.step.templateId).lean();
+        if (!tpl) {
+          await WorkflowLogModel.updateOne(
+            { logId: log.logId },
+            { $set: { status: 'failed', error: `Designed template not found: ${log.step.templateId}`, executedAt: new Date() } }
+          );
+          return;
         }
-      };
+        const { subject, html, from } = renderDesignedEmail(tpl, buildBookingTokens(booking));
+        const sendFrom = log.step.senderEmail ? { email: log.step.senderEmail, name: from.name } : from;
+        msg = { to: booking.clientEmail, from: sendFrom, subject, html };
+      } else {
+        msg = {
+          to: booking.clientEmail,
+          from: senderEmail,
+          templateId: log.step.templateId,
+          dynamicTemplateData: {
+            domain: domainName,
+            clientName: booking.clientName,
+            bookingId: booking.bookingId
+          }
+        };
+      }
 
       const result = await sendgridCircuitBreaker.execute(() => sgMail.send(msg));
       const responseData = { statusCode: result[0]?.statusCode, messageId: result[0]?.headers?.['x-message-id'] };
