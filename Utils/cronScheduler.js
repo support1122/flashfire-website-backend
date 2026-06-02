@@ -13,7 +13,7 @@ import { safeErrorDetails } from './safeErrorDetails.js';
 import { sendgridCircuitBreaker } from './CircuitBreaker.js';
 import { clientHasPaidBooking } from '../Controllers/WorkflowController.js';
 import { DesignedEmailTemplateModel } from '../Schema_Models/DesignedEmailTemplate.js';
-import { renderDesignedEmail, buildBookingTokens } from '../Controllers/DesignedEmailTemplateController.js';
+import { renderDesignedEmail, buildBookingTokens, unsubscribeAsm } from '../Controllers/DesignedEmailTemplateController.js';
 import { ScheduledWhatsAppReminderModel } from '../Schema_Models/ScheduledWhatsAppReminder.js';
 import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
 import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
@@ -206,7 +206,7 @@ export async function executeWorkflowLog(log) {
         }
         const { subject, html, from } = renderDesignedEmail(tpl, buildBookingTokens(booking));
         const sendFrom = log.step.senderEmail ? { email: log.step.senderEmail, name: from.name } : from;
-        msg = { to: booking.clientEmail, from: sendFrom, subject, html };
+        msg = { to: booking.clientEmail, from: sendFrom, subject, html, ...unsubscribeAsm() };
       } else {
         msg = {
           to: booking.clientEmail,
