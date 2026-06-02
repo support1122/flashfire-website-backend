@@ -118,10 +118,13 @@ export const WorkflowLogSchema = new mongoose.Schema({
     type: Number,
     default: 3
   },
-  // Idempotency key to prevent duplicate scheduling
+  // Idempotency key to prevent duplicate scheduling.
+  // NO `default: null` — a null default makes the field present-with-null on
+  // every doc, which the unique+sparse index treats as a value (only one null
+  // allowed). That silently 11000-blocked all immediate (executed/failed) log
+  // inserts. Leaving it unset keeps the field ABSENT so sparse excludes it.
   idempotencyKey: {
-    type: String,
-    default: null
+    type: String
   },
   // Response details
   responseData: {
