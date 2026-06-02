@@ -9,7 +9,7 @@ import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 import { buildTemplateParameters } from '../Utils/TemplateParameterBuilder.js';
 import { safeErrorDetails } from '../Utils/safeErrorDetails.js';
 import { DesignedEmailTemplateModel } from '../Schema_Models/DesignedEmailTemplate.js';
-import { renderDesignedEmail, buildBookingTokens } from './DesignedEmailTemplateController.js';
+import { renderDesignedEmail, buildBookingTokens, unsubscribeAsm } from './DesignedEmailTemplateController.js';
 
 function normalizePhoneForMatching(phone) {
   if (!phone) return null;
@@ -992,7 +992,7 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
         const { subject, html, from } = renderDesignedEmail(tpl, buildBookingTokens(booking));
         // Honour a per-step sender override if one was configured.
         const sendFrom = step.senderEmail ? { email: step.senderEmail, name: from.name } : from;
-        msg = { to: booking.clientEmail, from: sendFrom, subject, html };
+        msg = { to: booking.clientEmail, from: sendFrom, subject, html, ...unsubscribeAsm() };
       } else {
         msg = {
           to: booking.clientEmail,
