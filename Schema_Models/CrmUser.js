@@ -53,6 +53,11 @@ const CrmUserSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+    // Admins may sign into /admin/dashboard via OTP (mailed to this email).
+    isAdmin: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );
