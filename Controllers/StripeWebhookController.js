@@ -118,7 +118,7 @@ function buildEmailPayloadFallback(normalized) {
     transactionProvider: "Stripe",
     invoiceNumber: buildInvoiceNumber(invoiceId, transactionId),
     paymentDate: paymentDate || new Date(),
-    includePdfInvoice: true,
+    includePdfInvoice: false,
   };
 }
 
@@ -184,7 +184,7 @@ async function sendInvoiceEmailForStripe(normalized, event) {
       transactionProvider: "Stripe",
       invoiceNumber: buildInvoiceNumber(invoiceId, transactionId, event.id),
       paymentDate: paymentRecord.paymentDate || paymentDate || new Date(),
-      includePdfInvoice: true,
+      includePdfInvoice: false,
     };
   } else {
     emailPayload = buildEmailPayloadFallback({

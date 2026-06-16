@@ -22,7 +22,7 @@ export async function sendPaymentConfirmationEmail(paymentData) {
       transactionProvider = 'PayPal',
       paymentDate = new Date(),
       invoiceNumber,
-      includePdfInvoice = true,
+      includePdfInvoice = false,
     } = paymentData;
 
     if (!customerEmail || !customerFirstName || !amount || !planName) {
