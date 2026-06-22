@@ -2939,7 +2939,8 @@ export const getLeadsAnalytics = async (req, res) => {
       utmMediumMonthlyResult,
       utmSourceStatusResult,
       utmMediumStatusResult,
-      metaLeadsMonthlyResult
+      metaLeadsMonthlyResult,
+      leadsVsBookedResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3460,6 +3461,44 @@ export const getLeadsAnalytics = async (req, res) => {
           }
         },
         { $sort: { _id: 1 } }
+      ]),
+
+      // 26. LEADS vs BOOKED A MEETING — per form-fill month, deduped by client.
+      // "Booked" = an actual calendar event exists (scheduledEventStartTime), NOT
+      // just status != not-scheduled. Status alone overcounts: manually-created /
+      // imported leads carry a booked-ish status with no real meeting. Bucketed by
+      // first form-fill (bookingCreatedAt) so it's a clean per-cohort booking rate.
+      // Also splits out the Meta subset and carries completed/paid for the funnel.
+      CampaignBookingModel.aggregate([
+        { $match: matchQuery },
+        {
+          $addFields: {
+            groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] },
+            isMeta: { $cond: [{ $or: [{ $ne: [{ $ifNull: ['$metaLeadId', null] }, null] }, { $eq: ['$leadSource', 'meta_lead_ad'] }] }, 1, 0] },
+          }
+        },
+        {
+          $group: {
+            _id: '$groupKey',
+            isMeta: { $max: '$isMeta' },
+            hasMeeting: { $max: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, 1, 0] } },
+            everCompleted: { $max: { $cond: [{ $in: ['$bookingStatus', ['completed', 'paid']] }, 1, 0] } },
+            everPaid: { $max: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
+            firstSeen: { $min: { $ifNull: ['$bookingCreatedAt', '$scheduledEventStartTime'] } },
+          }
+        },
+        {
+          $group: {
+            _id: { $dateToString: { format: '%Y-%m', date: '$firstSeen' } },
+            leads: { $sum: 1 },
+            booked: { $sum: '$hasMeeting' },
+            metaLeads: { $sum: '$isMeta' },
+            metaBooked: { $sum: { $cond: [{ $eq: ['$isMeta', 1] }, '$hasMeeting', 0] } },
+            completed: { $sum: '$everCompleted' },
+            paid: { $sum: '$everPaid' },
+          }
+        },
+        { $sort: { _id: 1 } }
       ])
     ]);
 
@@ -3661,6 +3700,16 @@ export const getLeadsAnalytics = async (req, res) => {
       notBooked: r.notBooked
     }));
 
+    const leadsVsBooked = leadsVsBookedResult.map(r => ({
+      month: r._id,
+      leads: r.leads,
+      booked: r.booked,
+      metaLeads: r.metaLeads,
+      metaBooked: r.metaBooked,
+      completed: r.completed,
+      paid: r.paid
+    }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -3688,7 +3737,8 @@ export const getLeadsAnalytics = async (req, res) => {
         utmMediumMonthly,
         utmSourceStatus,
         utmMediumStatus,
-        metaLeadsMonthly
+        metaLeadsMonthly,
+        leadsVsBooked
       }
     });
 
