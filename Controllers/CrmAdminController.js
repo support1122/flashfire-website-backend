@@ -139,7 +139,7 @@ export async function listCrmUsers(req, res) {
   try {
     const users = await CrmUserModel.find({})
       .sort({ createdAt: -1 })
-      .select('email name permissions isActive isAdmin role createdAt updatedAt')
+      .select('email name permissions isActive isAdmin createdAt updatedAt')
       .lean();
     return res.status(200).json({ success: true, users });
   } catch (error) {
@@ -162,7 +162,6 @@ export async function createCrmUser(req, res) {
       existing.permissions = permissions;
       existing.isActive = req.body?.isActive === undefined ? existing.isActive : !!req.body?.isActive;
       if (req.body?.isAdmin !== undefined) existing.isAdmin = !!req.body?.isAdmin;
-      if (req.body?.role !== undefined) existing.role = req.body?.role;
       await existing.save();
       return res.status(200).json({ success: true, user: existing });
     }
@@ -173,7 +172,6 @@ export async function createCrmUser(req, res) {
       permissions,
       isActive: req.body?.isActive === undefined ? true : !!req.body?.isActive,
       isAdmin: !!req.body?.isAdmin,
-      role: req.body?.role || 'bda',
     });
     return res.status(201).json({ success: true, user });
   } catch (error) {
@@ -208,9 +206,6 @@ export async function updateCrmUser(req, res) {
     }
     if (req.body?.isAdmin !== undefined) {
       update.isAdmin = !!req.body?.isAdmin;
-    }
-    if (req.body?.role !== undefined) {
-      update.role = req.body?.role;
     }
 
     const user = await CrmUserModel.findByIdAndUpdate(id, update, { new: true });
