@@ -130,6 +130,7 @@ export async function crmMe(req, res) {
         email: user.email,
         name: user.name,
         permissions: user.permissions || [],
+        role: user.role || 'bda',
       },
     });
   } catch (error) {
