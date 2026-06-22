@@ -110,6 +110,7 @@ export async function verifyCrmOtp(req, res) {
         email: user.email,
         name: user.name,
         permissions: user.permissions || [],
+        role: user.role || 'bda',
       },
     });
   } catch (error) {
