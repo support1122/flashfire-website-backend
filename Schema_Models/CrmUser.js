@@ -58,6 +58,11 @@ const CrmUserSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    role: {
+      type: String,
+      enum: ['admin', 'bda'],
+      default: 'bda',
+    },
   },
   { timestamps: true }
 );
