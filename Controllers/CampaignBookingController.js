@@ -3444,12 +3444,12 @@ export const getLeadsAnalytics = async (req, res) => {
           }
         },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
-        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+        { $sort: { bookingCreatedAt: 1 } },
         {
           $group: {
             _id: '$groupKey',
-            bookingStatus: { $first: '$bookingStatus' },
-            monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
+            bookingStatus: { $last: '$bookingStatus' },
+            monthDate: { $first: '$bookingCreatedAt' }
           }
         },
         {
