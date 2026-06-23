@@ -2941,7 +2941,9 @@ export const getLeadsAnalytics = async (req, res) => {
       utmMediumStatusResult,
       metaLeadsMonthlyResult,
       leadsVsBookedResult,
-      weeklyOutcomesResult
+      weeklyOutcomesResult,
+      dailyOutcomesResult,
+      monthlyOutcomesResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3492,6 +3494,7 @@ export const getLeadsAnalytics = async (req, res) => {
       ]),
 
       // 27. WEEKLY MEETING OUTCOMES — completed/no-show/canceled/rescheduled
+      // Bucketed by scheduledEventStartTime week. Splits ALL vs META leads.
       CampaignBookingModel.aggregate([
         { $match: {
           ...matchQuery,
@@ -3504,6 +3507,56 @@ export const getLeadsAnalytics = async (req, res) => {
         }},
         { $group: {
           _id: '$week',
+          completed:       { $sum: { $cond: [{ $in: ['$bookingStatus', ['completed','paid']] }, 1, 0] } },
+          noShow:          { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+          canceled:        { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
+          rescheduled:     { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+          metaCompleted:   { $sum: { $cond: [{ $and: [{ $in: ['$bookingStatus', ['completed','paid']] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaNoShow:      { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'no-show'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaCanceled:    { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'canceled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaRescheduled: { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'rescheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+        }},
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 28. DAILY MEETING OUTCOMES
+      CampaignBookingModel.aggregate([
+        { $match: {
+          ...matchQuery,
+          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled'] },
+          scheduledEventStartTime: { $ne: null }
+        }},
+        { $addFields: {
+          day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } },
+          isMeta: { $cond: [{ $eq: ['$leadSource', 'meta_lead_ad'] }, 1, 0] }
+        }},
+        { $group: {
+          _id: '$day',
+          completed:       { $sum: { $cond: [{ $in: ['$bookingStatus', ['completed','paid']] }, 1, 0] } },
+          noShow:          { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+          canceled:        { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
+          rescheduled:     { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+          metaCompleted:   { $sum: { $cond: [{ $and: [{ $in: ['$bookingStatus', ['completed','paid']] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaNoShow:      { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'no-show'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaCanceled:    { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'canceled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaRescheduled: { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'rescheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+        }},
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 29. MONTHLY MEETING OUTCOMES
+      CampaignBookingModel.aggregate([
+        { $match: {
+          ...matchQuery,
+          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled'] },
+          scheduledEventStartTime: { $ne: null }
+        }},
+        { $addFields: {
+          month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } },
+          isMeta: { $cond: [{ $eq: ['$leadSource', 'meta_lead_ad'] }, 1, 0] }
+        }},
+        { $group: {
+          _id: '$month',
           completed:       { $sum: { $cond: [{ $in: ['$bookingStatus', ['completed','paid']] }, 1, 0] } },
           noShow:          { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
           canceled:        { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
@@ -3725,17 +3778,16 @@ export const getLeadsAnalytics = async (req, res) => {
       paid: r.paid
     }));
 
-    const weeklyOutcomes = weeklyOutcomesResult.map(r => ({
-      week: r._id,
-      completed: r.completed,
-      noShow: r.noShow,
-      canceled: r.canceled,
-      rescheduled: r.rescheduled,
-      metaCompleted: r.metaCompleted,
-      metaNoShow: r.metaNoShow,
-      metaCanceled: r.metaCanceled,
-      metaRescheduled: r.metaRescheduled,
+    const mapOutcomes = (arr, key) => arr.map(r => ({
+      [key]: r._id,
+      completed: r.completed, noShow: r.noShow, canceled: r.canceled, rescheduled: r.rescheduled,
+      metaCompleted: r.metaCompleted, metaNoShow: r.metaNoShow,
+      metaCanceled: r.metaCanceled, metaRescheduled: r.metaRescheduled,
     }));
+
+    const weeklyOutcomes  = mapOutcomes(weeklyOutcomesResult,  'week');
+    const dailyOutcomes   = mapOutcomes(dailyOutcomesResult,   'day');
+    const monthlyOutcomes = mapOutcomes(monthlyOutcomesResult, 'month');
 
     return res.status(200).json({
       success: true,
@@ -3766,7 +3818,9 @@ export const getLeadsAnalytics = async (req, res) => {
         utmMediumStatus,
         metaLeadsMonthly,
         leadsVsBooked,
-        weeklyOutcomes
+        weeklyOutcomes,
+        dailyOutcomes,
+        monthlyOutcomes
       }
     });
 
