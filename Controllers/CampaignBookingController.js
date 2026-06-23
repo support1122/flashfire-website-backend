@@ -2940,7 +2940,8 @@ export const getLeadsAnalytics = async (req, res) => {
       utmSourceStatusResult,
       utmMediumStatusResult,
       metaLeadsMonthlyResult,
-      leadsVsBookedResult
+      leadsVsBookedResult,
+      weeklyOutcomesResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3488,6 +3489,31 @@ export const getLeadsAnalytics = async (req, res) => {
           }
         },
         { $sort: { _id: 1 } }
+      ]),
+
+      // 27. WEEKLY MEETING OUTCOMES — completed/no-show/canceled/rescheduled
+      CampaignBookingModel.aggregate([
+        { $match: {
+          ...matchQuery,
+          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled'] },
+          scheduledEventStartTime: { $ne: null }
+        }},
+        { $addFields: {
+          week: { $dateToString: { format: '%Y-W%V', date: '$scheduledEventStartTime' } },
+          isMeta: { $cond: [{ $eq: ['$leadSource', 'meta_lead_ad'] }, 1, 0] }
+        }},
+        { $group: {
+          _id: '$week',
+          completed:       { $sum: { $cond: [{ $in: ['$bookingStatus', ['completed','paid']] }, 1, 0] } },
+          noShow:          { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+          canceled:        { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
+          rescheduled:     { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+          metaCompleted:   { $sum: { $cond: [{ $and: [{ $in: ['$bookingStatus', ['completed','paid']] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaNoShow:      { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'no-show'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaCanceled:    { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'canceled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaRescheduled: { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'rescheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+        }},
+        { $sort: { _id: 1 } }
       ])
     ]);
 
@@ -3699,6 +3725,18 @@ export const getLeadsAnalytics = async (req, res) => {
       paid: r.paid
     }));
 
+    const weeklyOutcomes = weeklyOutcomesResult.map(r => ({
+      week: r._id,
+      completed: r.completed,
+      noShow: r.noShow,
+      canceled: r.canceled,
+      rescheduled: r.rescheduled,
+      metaCompleted: r.metaCompleted,
+      metaNoShow: r.metaNoShow,
+      metaCanceled: r.metaCanceled,
+      metaRescheduled: r.metaRescheduled,
+    }));
+
     return res.status(200).json({
       success: true,
       data: {
@@ -3727,7 +3765,8 @@ export const getLeadsAnalytics = async (req, res) => {
         utmSourceStatus,
         utmMediumStatus,
         metaLeadsMonthly,
-        leadsVsBooked
+        leadsVsBooked,
+        weeklyOutcomes
       }
     });
 
