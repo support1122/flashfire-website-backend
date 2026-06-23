@@ -3435,26 +3435,15 @@ export const getLeadsAnalytics = async (req, res) => {
       // Booked = current status is anything other than 'not-scheduled'.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $match: { leadSource: 'meta_lead_ad' } },
         {
-          $match: {
-            $or: [
-              { metaLeadId: { $exists: true, $ne: null } },
-              { leadSource: 'meta_lead_ad' }
-            ]
-          }
-        },
-        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
-        { $sort: { bookingCreatedAt: 1 } },
-        {
-          $group: {
-            _id: '$groupKey',
-            bookingStatus: { $last: '$bookingStatus' },
-            monthDate: { $first: '$bookingCreatedAt' }
+          $addFields: {
+            month: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } }
           }
         },
         {
           $group: {
-            _id: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
+            _id: '$month',
             total: { $sum: 1 },
             booked: { $sum: { $cond: [{ $ne: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } },
             notBooked: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
