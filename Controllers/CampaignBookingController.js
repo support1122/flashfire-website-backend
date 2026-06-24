@@ -2943,7 +2943,9 @@ export const getLeadsAnalytics = async (req, res) => {
       leadsVsBookedResult,
       weeklyOutcomesResult,
       dailyOutcomesResult,
-      monthlyOutcomesResult
+      monthlyOutcomesResult,
+      noShowMonthlyResult,
+      noShowDailyResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3567,6 +3569,38 @@ export const getLeadsAnalytics = async (req, res) => {
           metaRescheduled: { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'rescheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
         }},
         { $sort: { _id: 1 } }
+      ]),
+
+      // 30. NO-SHOW MONTHLY — no-shows + total meetings per month
+      CampaignBookingModel.aggregate([
+        { $match: {
+          ...matchQuery,
+          bookingStatus: { $in: ['completed','paid','no-show','canceled','rescheduled','scheduled'] },
+          scheduledEventStartTime: { $ne: null }
+        }},
+        { $addFields: { month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } } } },
+        { $group: {
+          _id: '$month',
+          noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+          total:  { $sum: 1 }
+        }},
+        { $sort: { _id: 1 } }
+      ]),
+
+      // 31. NO-SHOW DAILY — no-shows + total meetings per day
+      CampaignBookingModel.aggregate([
+        { $match: {
+          ...matchQuery,
+          bookingStatus: { $in: ['completed','paid','no-show','canceled','rescheduled','scheduled'] },
+          scheduledEventStartTime: { $ne: null }
+        }},
+        { $addFields: { day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } } } },
+        { $group: {
+          _id: '$day',
+          noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+          total:  { $sum: 1 }
+        }},
+        { $sort: { _id: 1 } }
       ])
     ]);
 
@@ -3785,6 +3819,15 @@ export const getLeadsAnalytics = async (req, res) => {
       metaCanceled: r.metaCanceled, metaRescheduled: r.metaRescheduled,
     }));
 
+    const mapNoShow = (arr) => arr.map(r => ({
+      period: r._id,
+      noShow: r.noShow,
+      total:  r.total,
+      rate:   r.total > 0 ? Math.round(r.noShow / r.total * 1000) / 10 : 0,
+    }));
+    const noShowMonthly = mapNoShow(noShowMonthlyResult);
+    const noShowDaily   = mapNoShow(noShowDailyResult);
+
     const weeklyOutcomes  = mapOutcomes(weeklyOutcomesResult,  'week');
     const dailyOutcomes   = mapOutcomes(dailyOutcomesResult,   'day');
     const monthlyOutcomes = mapOutcomes(monthlyOutcomesResult, 'month');
@@ -3820,7 +3863,9 @@ export const getLeadsAnalytics = async (req, res) => {
         leadsVsBooked,
         weeklyOutcomes,
         dailyOutcomes,
-        monthlyOutcomes
+        monthlyOutcomes,
+        noShowMonthly,
+        noShowDaily
       }
     });
 
