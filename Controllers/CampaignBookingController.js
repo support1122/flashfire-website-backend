@@ -2945,7 +2945,8 @@ export const getLeadsAnalytics = async (req, res) => {
       dailyOutcomesResult,
       monthlyOutcomesResult,
       noShowMonthlyResult,
-      noShowDailyResult
+      noShowDailyResult,
+      noShowCallsResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3601,6 +3602,35 @@ export const getLeadsAnalytics = async (req, res) => {
           total:  { $sum: 1 }
         }},
         { $sort: { _id: 1 } }
+      ]),
+
+      // 32. NO-SHOW vs CALLS — daily (May 2026 onwards, from calllogs + no-show bookings)
+      // Join no-show bookings with calllogs on bookingId, group by meeting date
+      CampaignBookingModel.aggregate([
+        { $match: {
+          bookingStatus: 'no-show',
+          scheduledEventStartTime: { $gte: new Date('2026-05-01') }
+        }},
+        { $lookup: {
+          from: 'calllogs',
+          localField: 'bookingId',
+          foreignField: 'bookingId',
+          as: 'calls'
+        }},
+        { $addFields: {
+          day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } },
+          callCount: { $size: '$calls' },
+          wasCalled: { $gt: [{ $size: '$calls' }, 0] },
+          connected:  { $gt: [{ $size: { $filter: { input: '$calls', as: 'c', cond: { $eq: ['$$c.callResult', 'connected'] } } } }, 0] }
+        }},
+        { $group: {
+          _id: '$day',
+          noShow:      { $sum: 1 },
+          called:      { $sum: { $cond: ['$wasCalled', 1, 0] } },
+          notCalled:   { $sum: { $cond: ['$wasCalled', 0, 1] } },
+          connected:   { $sum: { $cond: ['$connected', 1, 0] } },
+        }},
+        { $sort: { _id: 1 } }
       ])
     ]);
 
@@ -3828,6 +3858,14 @@ export const getLeadsAnalytics = async (req, res) => {
     const noShowMonthly = mapNoShow(noShowMonthlyResult);
     const noShowDaily   = mapNoShow(noShowDailyResult);
 
+    const noShowCalls = noShowCallsResult.map(r => ({
+      day: r._id,
+      noShow: r.noShow,
+      called: r.called,
+      notCalled: r.notCalled,
+      connected: r.connected,
+    }));
+
     const weeklyOutcomes  = mapOutcomes(weeklyOutcomesResult,  'week');
     const dailyOutcomes   = mapOutcomes(dailyOutcomesResult,   'day');
     const monthlyOutcomes = mapOutcomes(monthlyOutcomesResult, 'month');
@@ -3865,7 +3903,8 @@ export const getLeadsAnalytics = async (req, res) => {
         dailyOutcomes,
         monthlyOutcomes,
         noShowMonthly,
-        noShowDaily
+        noShowDaily,
+        noShowCalls
       }
     });
 
