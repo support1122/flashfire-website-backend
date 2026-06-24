@@ -3608,7 +3608,7 @@ export const getLeadsAnalytics = async (req, res) => {
       CampaignBookingModel.aggregate([
         { $match: {
           bookingStatus: 'no-show',
-          scheduledEventStartTime: { $gte: new Date('2026-05-01') }
+          scheduledEventStartTime: { $gte: new Date('2026-05-22') }
         }},
         { $lookup: {
           from: 'calllogs',
