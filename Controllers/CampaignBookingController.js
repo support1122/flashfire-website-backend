@@ -3604,16 +3604,24 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 32. NO-SHOW vs CALLS MONTHLY — May 2026 onwards (call logs only exist from then)
+      // 32. NO-SHOW vs CALLS MONTHLY — May 2026 onwards
+      // Join on phone number (leadNumberNormalized) to match leads tab behaviour
       CampaignBookingModel.aggregate([
         { $match: {
           bookingStatus: 'no-show',
-          scheduledEventStartTime: { $gte: new Date('2026-05-22') }
+          scheduledEventStartTime: { $gte: new Date('2026-05-22') },
+          clientPhone: { $ne: null }
+        }},
+        { $addFields: {
+          phoneStripped: { $replaceAll: { input: '$clientPhone', find: '+', replacement: '' } }
+        }},
+        { $addFields: {
+          phoneNorm: { $substr: ['$phoneStripped', { $subtract: [{ $strLenCP: '$phoneStripped' }, 10] }, 10] }
         }},
         { $lookup: {
           from: 'calllogs',
-          localField: 'bookingId',
-          foreignField: 'bookingId',
+          localField: 'phoneNorm',
+          foreignField: 'leadNumberNormalized',
           as: 'calls'
         }},
         { $addFields: {
