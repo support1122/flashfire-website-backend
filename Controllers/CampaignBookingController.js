@@ -2946,7 +2946,8 @@ export const getLeadsAnalytics = async (req, res) => {
       monthlyOutcomesResult,
       noShowMonthlyResult,
       noShowDailyResult,
-      noShowCallsResult
+      noShowCallsResult,
+      noShowCallsDailyResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -3635,6 +3636,40 @@ export const getLeadsAnalytics = async (req, res) => {
           total:     { $sum: 1 }
         }},
         { $sort: { _id: 1 } }
+      ]),
+
+      // 33. NO-SHOW vs CALLS DAILY — last 10 days
+      CampaignBookingModel.aggregate([
+        { $match: {
+          bookingStatus: 'no-show',
+          scheduledEventStartTime: { $gte: new Date('2026-05-22') },
+          clientPhone: { $ne: null }
+        }},
+        { $addFields: {
+          phoneStripped: { $replaceAll: { input: '$clientPhone', find: '+', replacement: '' } }
+        }},
+        { $addFields: {
+          phoneNorm: { $substr: ['$phoneStripped', { $subtract: [{ $strLenCP: '$phoneStripped' }, 10] }, 10] }
+        }},
+        { $lookup: {
+          from: 'calllogs',
+          localField: 'phoneNorm',
+          foreignField: 'leadNumberNormalized',
+          as: 'calls'
+        }},
+        { $addFields: {
+          day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } },
+          wasCalled: { $gt: [{ $size: '$calls' }, 0] }
+        }},
+        { $group: {
+          _id: '$day',
+          called:    { $sum: { $cond: ['$wasCalled', 1, 0] } },
+          notCalled: { $sum: { $cond: ['$wasCalled', 0, 1] } },
+          total:     { $sum: 1 }
+        }},
+        { $sort: { _id: -1 } },
+        { $limit: 10 },
+        { $sort: { _id: 1 } }
       ])
     ]);
 
@@ -3869,6 +3904,13 @@ export const getLeadsAnalytics = async (req, res) => {
       total: r.total,
     }));
 
+    const noShowCallsDaily = noShowCallsDailyResult.map(r => ({
+      day: r._id,
+      called: r.called,
+      notCalled: r.notCalled,
+      total: r.total,
+    }));
+
     const weeklyOutcomes  = mapOutcomes(weeklyOutcomesResult,  'week');
     const dailyOutcomes   = mapOutcomes(dailyOutcomesResult,   'day');
     const monthlyOutcomes = mapOutcomes(monthlyOutcomesResult, 'month');
@@ -3907,7 +3949,8 @@ export const getLeadsAnalytics = async (req, res) => {
         monthlyOutcomes,
         noShowMonthly,
         noShowDaily,
-        noShowCalls
+        noShowCalls,
+        noShowCallsDaily
       }
     });
 
