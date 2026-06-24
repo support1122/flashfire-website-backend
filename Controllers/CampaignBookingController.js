@@ -2898,18 +2898,14 @@ export const getLeadsAnalytics = async (req, res) => {
       ]
     };
 
-    // Paid vs organic source-type expression (reusable). Paid = explicit ad markers.
+    // Paid vs organic source-type expression.
+    // Organic = known direct/website/tool sources. Everything else (any new source) = paid.
+    const ORGANIC_SOURCES = ['WEBSITE', 'direct', 'webpage_visit', 'google', 'chatgpt.com', 'copilot.com'];
     const sourceTypeExpr = {
       $cond: [
-        {
-          $or: [
-            { $eq: ['$metaIsOrganic', false] },
-            { $in: [{ $toLower: { $ifNull: ['$utmMedium', ''] } }, ['cpc', 'ppc', 'paid', 'paid_social', 'paid-social', 'paidsocial']] },
-            { $and: [{ $ne: [{ $ifNull: ['$metaAdId', null] }, null] }, { $ne: ['$metaAdId', ''] }] },
-          ],
-        },
-        'paid',
+        { $in: [{ $ifNull: ['$utmSource', ''] }, ORGANIC_SOURCES] },
         'organic',
+        'paid',
       ],
     };
 
