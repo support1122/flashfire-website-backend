@@ -3604,8 +3604,7 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 32. NO-SHOW vs CALLS — daily (May 2026 onwards, call logs only exist from then)
-      // Always uses May 2026 floor regardless of matchQuery date filter
+      // 32. NO-SHOW vs CALLS MONTHLY — May 2026 onwards (call logs only exist from then)
       CampaignBookingModel.aggregate([
         { $match: {
           bookingStatus: 'no-show',
@@ -3618,17 +3617,14 @@ export const getLeadsAnalytics = async (req, res) => {
           as: 'calls'
         }},
         { $addFields: {
-          day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } },
-          callCount: { $size: '$calls' },
-          wasCalled: { $gt: [{ $size: '$calls' }, 0] },
-          connected:  { $gt: [{ $size: { $filter: { input: '$calls', as: 'c', cond: { $eq: ['$$c.callResult', 'connected'] } } } }, 0] }
+          month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } },
+          wasCalled: { $gt: [{ $size: '$calls' }, 0] }
         }},
         { $group: {
-          _id: '$day',
-          noShow:      { $sum: 1 },
-          called:      { $sum: { $cond: ['$wasCalled', 1, 0] } },
-          notCalled:   { $sum: { $cond: ['$wasCalled', 0, 1] } },
-          connected:   { $sum: { $cond: ['$connected', 1, 0] } },
+          _id: '$month',
+          called:    { $sum: { $cond: ['$wasCalled', 1, 0] } },
+          notCalled: { $sum: { $cond: ['$wasCalled', 0, 1] } },
+          total:     { $sum: 1 }
         }},
         { $sort: { _id: 1 } }
       ])
@@ -3859,11 +3855,10 @@ export const getLeadsAnalytics = async (req, res) => {
     const noShowDaily   = mapNoShow(noShowDailyResult);
 
     const noShowCalls = noShowCallsResult.map(r => ({
-      day: r._id,
-      noShow: r.noShow,
+      month: r._id,
       called: r.called,
       notCalled: r.notCalled,
-      connected: r.connected,
+      total: r.total,
     }));
 
     const weeklyOutcomes  = mapOutcomes(weeklyOutcomesResult,  'week');
