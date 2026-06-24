@@ -3604,8 +3604,8 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 32. NO-SHOW vs CALLS — daily (May 2026 onwards, from calllogs + no-show bookings)
-      // Join no-show bookings with calllogs on bookingId, group by meeting date
+      // 32. NO-SHOW vs CALLS — daily (May 2026 onwards, call logs only exist from then)
+      // Always uses May 2026 floor regardless of matchQuery date filter
       CampaignBookingModel.aggregate([
         { $match: {
           bookingStatus: 'no-show',
