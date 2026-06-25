@@ -133,6 +133,13 @@ const builders = {
     ];
   },
 
+  // plan_followup_123: single variable {{1}} = client name.
+  plan_followup_123: ({ booking }) => {
+    return [
+      booking.clientName || 'Valued Client'
+    ];
+  },
+
   plan_followup_utility_01dd: ({ booking, step }) => {
     const DEFAULT_PLAN_PRICE = 349;
     const rawPlanPrice = booking.paymentPlan?.price ?? step?.templateConfig?.planAmount;
