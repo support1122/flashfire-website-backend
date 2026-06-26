@@ -2195,39 +2195,22 @@ export const getLeadsPaginated = async (req, res) => {
     }
 
     // Monthly breakdown by status for bar chart
-    // Logic: for each status, filter that status first then dedup by client within month
-    // This matches the table behaviour: selecting 'Cancelled' filter shows N unique clients = same N in graph bar
-    const statuses = ['completed', 'canceled', 'no-show', 'rescheduled', 'scheduled', 'not-scheduled', 'ignored', 'paid'];
-    const baseMonthlyMatch = { ...matchQuery, scheduledEventStartTime: { $ne: null, $exists: true } };
-    delete baseMonthlyMatch.bookingStatus; // remove status filter — we apply per-status below
-
-    const monthlyStatusCounts = {}; // { '2026-06': { canceled: 67, completed: 80, ... } }
-
-    await Promise.all(statuses.map(async (status) => {
-      const rows = await CampaignBookingModel.aggregate([
-        { $match: { ...baseMonthlyMatch, bookingStatus: status } },
-        { $addFields: {
-          groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] },
-          month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } }
-        }},
-        { $group: { _id: { groupKey: '$groupKey', month: '$month' } } },
-        { $group: { _id: '$_id.month', count: { $sum: 1 } } }
-      ]);
-      for (const row of rows) {
-        if (!monthlyStatusCounts[row._id]) monthlyStatusCounts[row._id] = {};
-        monthlyStatusCounts[row._id][status] = row.count;
-      }
-    }));
-
-    const monthlyStatusResult = Object.entries(monthlyStatusCounts).map(([month, counts]) => ({
-      _id: { month },
-      ...Object.entries(counts).map(([status, count]) => ({ _id: { month, bookingStatus: status }, count }))
-    }));
-
-    // Flatten into same format as before
-    const flatMonthlyStatusResult = Object.entries(monthlyStatusCounts).flatMap(([month, counts]) =>
-      Object.entries(counts).map(([status, count]) => ({ _id: { month, bookingStatus: status }, count }))
-    ).sort((a, b) => a._id.month.localeCompare(b._id.month));
+    // Global dedup: each client appears once with their latest status, bucketed by scheduledEventStartTime month
+    // This matches the table exactly — same logic as the client list
+    const monthlyStatusPipeline = [
+      { $match: matchQuery },
+      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
+      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
+      { $group: {
+        _id: '$groupKey',
+        bookingStatus: { $first: '$bookingStatus' },
+        monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
+      }},
+      { $addFields: { month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } } } },
+      { $group: { _id: { month: '$month', bookingStatus: '$bookingStatus' }, count: { $sum: 1 } } },
+      { $sort: { '_id.month': 1 } }
+    ];
+    const flatMonthlyStatusResult = await CampaignBookingModel.aggregate(monthlyStatusPipeline);
     const monthMap = new Map();
     for (const row of flatMonthlyStatusResult) {
       const { month, bookingStatus } = row._id;
