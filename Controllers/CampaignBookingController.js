@@ -3264,22 +3264,25 @@ export const getLeadsAnalytics = async (req, res) => {
 
       // 19. MONTHLY STATUS BREAKDOWN — matches the Leads table exactly.
       // One row per client (deduplicated by phone/email), latest booking wins.
-      // Bucketed by bookingCreatedAt month — same field Leads tab uses.
+      // Bucketed by scheduledEventStartTime month (fallback: bookingCreatedAt) — matches leads tab.
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery } },
-        { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
-        { $sort: { bookingCreatedAt: -1 } },
+        { $addFields: {
+          groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] },
+          monthDate: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] }
+        }},
+        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         {
-          // one row per client — latest booking's status and created date
+          // one row per client — latest booking's status and meeting date
           $group: {
             _id: '$groupKey',
             bookingStatus: { $first: '$bookingStatus' },
-            bookingCreatedAt: { $first: '$bookingCreatedAt' }
+            monthDate: { $first: '$monthDate' }
           }
         },
         {
           $group: {
-            _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
+            _id: { $dateToString: { format: '%Y-%m', date: '$monthDate' } },
             total: { $sum: 1 },
             completed: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'completed'] }, 1, 0] } },
             noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
