@@ -3573,7 +3573,7 @@ export const getLeadsAnalytics = async (req, res) => {
       CampaignBookingModel.aggregate([
         { $match: {
           ...matchQuery,
-          bookingStatus: { $in: ['completed','paid','no-show','canceled','rescheduled','scheduled'] },
+          bookingStatus: { $in: ['completed','paid','no-show','canceled'] },
           scheduledEventStartTime: { $ne: null }
         }},
         { $addFields: { month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } } } },
@@ -3589,7 +3589,7 @@ export const getLeadsAnalytics = async (req, res) => {
       CampaignBookingModel.aggregate([
         { $match: {
           ...matchQuery,
-          bookingStatus: { $in: ['completed','paid','no-show','canceled','rescheduled','scheduled'] },
+          bookingStatus: { $in: ['completed','paid','no-show','canceled'] },
           scheduledEventStartTime: { $ne: null }
         }},
         { $addFields: { day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } } } },
