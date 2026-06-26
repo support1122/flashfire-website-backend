@@ -2194,23 +2194,42 @@ export const getLeadsPaginated = async (req, res) => {
       statusBreakdown[row._id] = row.count;
     }
 
-    // Monthly breakdown by status for bar chart (deduplicated by client)
-    const monthlyStatusPipeline = [
-      { $match: matchQuery },
-      { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
-      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
-      { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' }, monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } } } },
-      {
-        $addFields: {
-          month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } }
-        }
-      },
-      { $group: { _id: { month: '$month', bookingStatus: '$bookingStatus' }, count: { $sum: 1 } } },
-      { $sort: { '_id.month': 1 } }
-    ];
-    const monthlyStatusResult = await CampaignBookingModel.aggregate(monthlyStatusPipeline);
+    // Monthly breakdown by status for bar chart
+    // Logic: for each status, filter that status first then dedup by client within month
+    // This matches the table behaviour: selecting 'Cancelled' filter shows N unique clients = same N in graph bar
+    const statuses = ['completed', 'canceled', 'no-show', 'rescheduled', 'scheduled', 'not-scheduled', 'ignored', 'paid'];
+    const baseMonthlyMatch = { ...matchQuery, scheduledEventStartTime: { $ne: null, $exists: true } };
+    delete baseMonthlyMatch.bookingStatus; // remove status filter — we apply per-status below
+
+    const monthlyStatusCounts = {}; // { '2026-06': { canceled: 67, completed: 80, ... } }
+
+    await Promise.all(statuses.map(async (status) => {
+      const rows = await CampaignBookingModel.aggregate([
+        { $match: { ...baseMonthlyMatch, bookingStatus: status } },
+        { $addFields: {
+          groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] },
+          month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } }
+        }},
+        { $group: { _id: { groupKey: '$groupKey', month: '$month' } } },
+        { $group: { _id: '$_id.month', count: { $sum: 1 } } }
+      ]);
+      for (const row of rows) {
+        if (!monthlyStatusCounts[row._id]) monthlyStatusCounts[row._id] = {};
+        monthlyStatusCounts[row._id][status] = row.count;
+      }
+    }));
+
+    const monthlyStatusResult = Object.entries(monthlyStatusCounts).map(([month, counts]) => ({
+      _id: { month },
+      ...Object.entries(counts).map(([status, count]) => ({ _id: { month, bookingStatus: status }, count }))
+    }));
+
+    // Flatten into same format as before
+    const flatMonthlyStatusResult = Object.entries(monthlyStatusCounts).flatMap(([month, counts]) =>
+      Object.entries(counts).map(([status, count]) => ({ _id: { month, bookingStatus: status }, count }))
+    ).sort((a, b) => a._id.month.localeCompare(b._id.month));
     const monthMap = new Map();
-    for (const row of monthlyStatusResult) {
+    for (const row of flatMonthlyStatusResult) {
       const { month, bookingStatus } = row._id;
       if (!monthMap.has(month)) {
         monthMap.set(month, { month, 'not-scheduled': 0, scheduled: 0, completed: 0, canceled: 0, 'no-show': 0, rescheduled: 0, ignored: 0, paid: 0 });
@@ -3290,7 +3309,8 @@ export const getLeadsAnalytics = async (req, res) => {
             rescheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
             paid: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
             scheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
-            notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } }
+            notScheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'not-scheduled'] }, 1, 0] } },
+            ignored: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'ignored'] }, 1, 0] } }
           }
         },
         { $sort: { _id: 1 } }
@@ -3812,7 +3832,8 @@ export const getLeadsAnalytics = async (req, res) => {
       rescheduled: r.rescheduled,
       paid: r.paid,
       scheduled: r.scheduled,
-      notScheduled: r.notScheduled
+      notScheduled: r.notScheduled,
+      ignored: r.ignored ?? 0
     }));
 
     const monthlySourceType = monthlySourceTypeResult.map(r => ({
