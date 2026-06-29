@@ -256,7 +256,7 @@ export default function Routes(app) {
   app.get('/api/crm/activity-logs/filters', requireCrmUser, requireCrmPermission('activity_logs'), getActivityFilters);
 
   // Graphs module — paid-client analytics sourced from the clients-tracking DB.
-  app.get('/api/crm/paid-clients/analytics', requireCrmUser, requireCrmPermission('lead_analytics'), getPaidClientsAnalytics);
+  app.get('/api/crm/paid-clients/analytics', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics']), getPaidClientsAnalytics);
 
   // Zoom Phone — webhook is public (HMAC-verified inside).
   app.post('/api/zoom-phone/webhook', zoomPhoneWebhook);
