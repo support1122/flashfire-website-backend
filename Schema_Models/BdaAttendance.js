@@ -40,6 +40,14 @@ const BdaAttendanceSchema = new mongoose.Schema(
       default: null,
     },
 
+    // First-ever join time for this meeting. Unlike `joinedAt` (which is cleared
+    // when a session closes), this is set once and never overwritten, so the
+    // "In time" survives leave/rejoin and post-meeting review.
+    firstJoinedAt: {
+      type: Date,
+      default: null,
+    },
+
     leftAt: {
       type: Date,
       default: null,
