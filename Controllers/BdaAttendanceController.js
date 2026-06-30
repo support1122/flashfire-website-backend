@@ -222,11 +222,15 @@ function meetLinksRoughMatch(booking, meetLink) {
  * Close an open in-meet session (joinedAt set, leftAt cleared).
  * @returns {{ closed: boolean, attendance: object|null, leaveTime: Date|null, durationMs: number|null }}
  */
+/** Hard ceiling on a single in-meet segment (guards corrupt joinedAt / clock skew). */
+const MAX_SEGMENT_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 async function closeBdaAttendanceSession({
   bookingId,
   bdaEmail,
   bdaName,
   leftAt,
+  clientDurationMs = null,
   sendDurationNotification = true,
 }) {
   const attendance = await BdaAttendanceModel.findOne({ bookingId, bdaEmail });
@@ -248,10 +252,20 @@ async function closeBdaAttendanceSession({
   }
 
   const leaveTime = leftAt ? new Date(leftAt) : new Date();
-  const segmentMs = Math.max(
+  const serverSegmentMs = Math.max(
     0,
     leaveTime.getTime() - new Date(attendance.joinedAt).getTime()
   );
+  // Prefer the client-measured duration when present and sane: it is a single-clock
+  // delta (join→leave on the same machine), so it is immune to client/server clock
+  // skew and to a stale joinedAt. Fall back to the server compute otherwise.
+  const cd = Number(clientDurationMs);
+  let segmentMs;
+  if (Number.isFinite(cd) && cd >= 0 && cd <= MAX_SEGMENT_MS) {
+    segmentMs = cd;
+  } else {
+    segmentMs = Math.min(serverSegmentMs, MAX_SEGMENT_MS);
+  }
   attendance.cumulativeDurationMs = (attendance.cumulativeDurationMs || 0) + segmentMs;
   attendance.durationMs = attendance.cumulativeDurationMs;
   attendance.leftAt = leaveTime;
@@ -446,6 +460,7 @@ async function processReportEndEventCore({
       bdaEmail: emailNorm,
       bdaName: name,
       leftAt: endedAt,
+      clientDurationMs: durationMsSnapshot,
       sendDurationNotification: true,
     });
     sessionClosed =
@@ -741,6 +756,12 @@ export async function getMyMeetings(req, res) {
         {
           status: a.status,
           source: a.source,
+          bdaName: a.bdaName || null,
+          bdaEmail: a.bdaEmail || null,
+          // In time survives session close via firstJoinedAt; fall back for old rows.
+          joinedAt: a.firstJoinedAt || a.joinedAt || a.markedAt || null,
+          leftAt: a.leftAt || null,
+          durationMs: a.durationMs ?? a.cumulativeDurationMs ?? null,
         },
       ])
     );
@@ -879,6 +900,7 @@ export async function reportJoin(req, res) {
         bookingId,
         meetLink: meetLink || null,
         joinedAt: joinDate,
+        firstJoinedAt: joinDate,
         leftAt: null,
         status: 'present',
         source: 'auto',
@@ -893,6 +915,7 @@ export async function reportJoin(req, res) {
         doc.leftAt = null;
         notifyJoin = true;
       }
+      if (!doc.firstJoinedAt) doc.firstJoinedAt = joinDate;
       doc.bdaName = name;
       doc.bdaEmail = emailNorm;
       doc.meetLink = meetLink || doc.meetLink;
@@ -941,7 +964,7 @@ export async function reportLeave(req, res) {
   try {
     const { email, name } = req.bdaUser;
     const emailNorm = normalizeEmail(email);
-    const { bookingId, leftAt } = req.body;
+    const { bookingId, leftAt, durationMs } = req.body;
 
     if (!bookingId) {
       return res.status(400).json({ success: false, error: 'bookingId is required' });
@@ -957,6 +980,7 @@ export async function reportLeave(req, res) {
       bdaEmail: emailNorm,
       bdaName: name,
       leftAt,
+      clientDurationMs: durationMs,
       sendDurationNotification: true,
     });
 
@@ -1374,6 +1398,7 @@ export async function beaconLeave(req, res) {
       bdaEmail: emailNorm,
       bdaName: name,
       leftAt,
+      clientDurationMs: durationMsSnapshot,
       sendDurationNotification: true,
     });
 

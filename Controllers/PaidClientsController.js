@@ -19,8 +19,10 @@ export const getPaidClientsAnalytics = async (req, res) => {
 
     const { fromDate, toDate } = req.query;
 
-    // Paid = planType exists and is not Free Trial
-    const match = { planType: { $exists: true, $nin: [null, '', 'Free Trial'] } };
+    // Paid = a dashboard exists. Every user in the dashboard `users` collection
+    // counts as a paying client (a created dashboard = a paid client), so no
+    // planType filter. byPlan below still breaks them down by plan.
+    const match = {};
     if (fromDate || toDate) {
       match.createdAt = {};
       if (fromDate) {
