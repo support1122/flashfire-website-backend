@@ -3,11 +3,9 @@ import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 
 const DEFAULT_SCHEDULING_LINK = 'https://calendly.com/feedback-flashfire/15min';
 
-// Fixed base of the "Reschedule" / "I'll Join" dynamic URL buttons on the
-// flashfire_appointment_reminder template. The button URL is
-// `https://calendly.com/{{6}}` and `https://calendly.com/{{7}}`, so we only send
-// the path that comes AFTER this base.
-const CALENDLY_BUTTON_BASE = 'https://calendly.com/';
+// Fixed base of the "Reschedule" dynamic URL button on the
+// flashfire_appointment_reminder_b template. The button URL is
+// `https://calendly.com/{{6}}`, so we only send the path that comes AFTER this base.
 const DEFAULT_BUTTON_TAIL = 'feedback-flashfire/15min';
 
 /**
@@ -266,13 +264,13 @@ const builders = {
     ];
   },
 
-  // Same body as flashfire_appointment_reminder plus two dynamic URL button vars:
-  // {{6}} = "Reschedule" button URL tail, {{7}} = "I'll Join" button URL tail.
-  // Button base is https://calendly.com/, so we send only the path after it.
-  // {{6}} uses the booking's real reschedule link so reschedule/cancel tracking is preserved.
-  flashfire_appointment_reminder_d: async ({ booking }) => {
+  // Same body as flashfire_appointment_reminder plus one dynamic URL button var:
+  // {{6}} = "Reschedule" button URL tail. Button base is https://calendly.com/, so we
+  // send only the path after it. {{6}} uses the booking's real reschedule link so
+  // reschedule/cancel tracking is preserved. ("I'll join" is a static quick-reply — no var.)
+  flashfire_appointment_reminder_b: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
-      throw new Error('Meeting date/time not available for flashfire_appointment_reminder_d template');
+      throw new Error('Meeting date/time not available for flashfire_appointment_reminder_b template');
     }
 
     const { meetingDateFormatted, meetingTimeWithTimezone } = buildMeetingTimeParams(booking);
@@ -285,8 +283,7 @@ const builders = {
       meetingTimeWithTimezone,
       meetingLink,
       rescheduleLink,
-      calendlyButtonTail(rescheduleLink), // {{6}} → "Reschedule" button URL tail
-      calendlyButtonTail(meetingLink)     // {{7}} → "I'll Join" button URL tail
+      calendlyButtonTail(rescheduleLink) // {{6}} → "Reschedule" button URL tail
     ];
   }
 };
