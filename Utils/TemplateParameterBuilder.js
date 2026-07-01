@@ -3,6 +3,38 @@ import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 
 const DEFAULT_SCHEDULING_LINK = 'https://calendly.com/feedback-flashfire/15min';
 
+// Fixed base of the "Reschedule" / "I'll Join" dynamic URL buttons on the
+// flashfire_appointment_reminder template. The button URL is
+// `https://calendly.com/{{6}}` and `https://calendly.com/{{7}}`, so we only send
+// the path that comes AFTER this base.
+const CALENDLY_BUTTON_BASE = 'https://calendly.com/';
+const DEFAULT_BUTTON_TAIL = 'feedback-flashfire/15min';
+
+/**
+ * Extracts the path after https://calendly.com/ for a dynamic URL button whose
+ * fixed base is https://calendly.com/. Unwraps Google-redirect links of the form
+ * https://www.google.com/url?q=<encoded calendly url>&... first. Falls back to the
+ * default scheduling path when no calendly.com URL is found (e.g. a raw Google
+ * Meet link), so the button always resolves to a valid page even though the body
+ * link may differ.
+ */
+export function calendlyButtonTail(link) {
+  if (typeof link !== 'string') return DEFAULT_BUTTON_TAIL;
+
+  let s = link.trim();
+
+  // Unwrap Google redirect wrappers: .../url?q=<url-encoded calendly link>&sa=...
+  const q = s.match(/[?&]q=([^&]+)/i);
+  if (q) {
+    try { s = decodeURIComponent(q[1]); } catch { /* keep original */ }
+  }
+
+  const match = s.match(/https?:\/\/calendly\.com\/(.+)$/i);
+  if (match) return match[1];
+
+  return DEFAULT_BUTTON_TAIL;
+}
+
 /**
  * Resolves timezone abbreviation from IANA timezone name.
  */
@@ -231,6 +263,30 @@ const builders = {
       meetingTimeWithTimezone,
       meetingLink,
       rescheduleLink
+    ];
+  },
+
+  // Same body as flashfire_appointment_reminder plus two dynamic URL button vars:
+  // {{6}} = "Reschedule" button URL tail, {{7}} = "I'll Join" button URL tail.
+  // Button base is https://calendly.com/, so we send only the path after it.
+  // {{6}} uses the booking's real reschedule link so reschedule/cancel tracking is preserved.
+  flashfire_appointment_reminder_d: async ({ booking }) => {
+    if (!booking.scheduledEventStartTime) {
+      throw new Error('Meeting date/time not available for flashfire_appointment_reminder_d template');
+    }
+
+    const { meetingDateFormatted, meetingTimeWithTimezone } = buildMeetingTimeParams(booking);
+    const meetingLink = booking.calendlyMeetLink || booking.googleMeetUrl || booking.meetingVideoUrl || 'Not Provided';
+    const rescheduleLink = await resolveRescheduleLink(booking);
+
+    return [
+      booking.clientName || 'Valued Client',
+      meetingDateFormatted,
+      meetingTimeWithTimezone,
+      meetingLink,
+      rescheduleLink,
+      calendlyButtonTail(rescheduleLink), // {{6}} → "Reschedule" button URL tail
+      calendlyButtonTail(meetingLink)     // {{7}} → "I'll Join" button URL tail
     ];
   }
 };
