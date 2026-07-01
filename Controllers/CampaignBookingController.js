@@ -3501,7 +3501,7 @@ export const getLeadsAnalytics = async (req, res) => {
       CampaignBookingModel.aggregate([
         { $match: {
           ...matchQuery,
-          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled'] },
+          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled', 'scheduled'] },
           scheduledEventStartTime: { $ne: null }
         }},
         { $addFields: {
@@ -3514,10 +3514,12 @@ export const getLeadsAnalytics = async (req, res) => {
           noShow:          { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
           canceled:        { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
           rescheduled:     { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+          scheduled:       { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
           metaCompleted:   { $sum: { $cond: [{ $and: [{ $in: ['$bookingStatus', ['completed','paid']] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaNoShow:      { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'no-show'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaCanceled:    { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'canceled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaRescheduled: { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'rescheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaScheduled:   { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'scheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
         }},
         { $sort: { _id: 1 } }
       ]),
@@ -3526,7 +3528,7 @@ export const getLeadsAnalytics = async (req, res) => {
       CampaignBookingModel.aggregate([
         { $match: {
           ...matchQuery,
-          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled'] },
+          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled', 'scheduled'] },
           scheduledEventStartTime: { $ne: null }
         }},
         { $addFields: {
@@ -3539,10 +3541,12 @@ export const getLeadsAnalytics = async (req, res) => {
           noShow:          { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
           canceled:        { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
           rescheduled:     { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+          scheduled:       { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
           metaCompleted:   { $sum: { $cond: [{ $and: [{ $in: ['$bookingStatus', ['completed','paid']] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaNoShow:      { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'no-show'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaCanceled:    { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'canceled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaRescheduled: { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'rescheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaScheduled:   { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'scheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
         }},
         { $sort: { _id: 1 } }
       ]),
@@ -3551,7 +3555,7 @@ export const getLeadsAnalytics = async (req, res) => {
       CampaignBookingModel.aggregate([
         { $match: {
           ...matchQuery,
-          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled'] },
+          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled', 'scheduled'] },
           scheduledEventStartTime: { $ne: null }
         }},
         { $addFields: {
@@ -3564,10 +3568,12 @@ export const getLeadsAnalytics = async (req, res) => {
           noShow:          { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
           canceled:        { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
           rescheduled:     { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+          scheduled:       { $sum: { $cond: [{ $eq: ['$bookingStatus', 'scheduled'] }, 1, 0] } },
           metaCompleted:   { $sum: { $cond: [{ $and: [{ $in: ['$bookingStatus', ['completed','paid']] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaNoShow:      { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'no-show'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaCanceled:    { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'canceled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
           metaRescheduled: { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'rescheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
+          metaScheduled:   { $sum: { $cond: [{ $and: [{ $eq: ['$bookingStatus', 'scheduled'] }, { $eq: ['$isMeta', 1] }] }, 1, 0] } },
         }},
         { $sort: { _id: 1 } }
       ]),
@@ -3883,9 +3889,9 @@ export const getLeadsAnalytics = async (req, res) => {
 
     const mapOutcomes = (arr, key) => arr.map(r => ({
       [key]: r._id,
-      completed: r.completed, noShow: r.noShow, canceled: r.canceled, rescheduled: r.rescheduled,
+      completed: r.completed, noShow: r.noShow, canceled: r.canceled, rescheduled: r.rescheduled, scheduled: r.scheduled,
       metaCompleted: r.metaCompleted, metaNoShow: r.metaNoShow,
-      metaCanceled: r.metaCanceled, metaRescheduled: r.metaRescheduled,
+      metaCanceled: r.metaCanceled, metaRescheduled: r.metaRescheduled, metaScheduled: r.metaScheduled,
     }));
 
     const mapNoShow = (arr) => arr.map(r => ({
