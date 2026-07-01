@@ -761,7 +761,9 @@ export async function getMyMeetings(req, res) {
           // In time survives session close via firstJoinedAt; fall back for old rows.
           joinedAt: a.firstJoinedAt || a.joinedAt || a.markedAt || null,
           leftAt: a.leftAt || null,
-          durationMs: a.durationMs ?? a.cumulativeDurationMs ?? null,
+          // Null while in-progress (no completed segment yet) so the UI shows "—"
+          // instead of a misleading "0 min"; cumulative default 0 must not surface.
+          durationMs: a.durationMs ?? (a.cumulativeDurationMs > 0 ? a.cumulativeDurationMs : null),
         },
       ])
     );

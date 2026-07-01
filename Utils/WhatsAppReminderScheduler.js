@@ -12,6 +12,7 @@ import {
   buildWhatsAppReminderId,
   logReminderDrift,
 } from './MeetingReminderUtils.js';
+import { calendlyButtonTail } from './TemplateParameterBuilder.js';
 
 dotenv.config();
 
@@ -718,9 +719,17 @@ export async function sendWhatsAppMessage(scheduledReminder) {
       throw new Error('WATI service not initialized');
     }
 
-    // Template name
-    const templateName = 'flashfire_appointment_reminder';
-    
+    // Template routing:
+    //   1st message  (immediate confirmation) → old template, no buttons (5 params)
+    //   2nd/3rd (3h & 5min reminders)         → _b template: Reschedule URL button (6 params).
+    //     "I'll join" is a static Quick-reply button, so it needs no send-time variable.
+    const reminderType = scheduledReminder.metadata?.reminderType ?? scheduledReminder.reminderType ?? 'immediate';
+    const isImmediate = reminderType === 'immediate' || scheduledReminder.metadata?.isImmediateReminder === true;
+    const useButtons = !isImmediate;
+    const templateName = useButtons
+      ? 'flashfire_appointment_reminder_b'
+      : 'flashfire_appointment_reminder';
+
     // Format meeting time with timezone: "4pm - 4:15pm ET" or "4pm - 4:15pm PST"
     // If meetingTime is missing/Unknown, use meetingStartISO or scheduledFor + metadata offset
     const meta = scheduledReminder.metadata || {};
@@ -765,14 +774,24 @@ export async function sendWhatsAppMessage(scheduledReminder) {
       }
     }
 
-    // Template parameters: {{1}} = name, {{2}} = date, {{3}} = time with timezone, {{4}} = meeting link, {{5}} = reschedule link
+    // Template parameters: {{1}} = name, {{2}} = date, {{3}} = time with timezone,
+    // {{4}} = meeting link, {{5}} = reschedule link,
+    // {{6}} = "Reschedule" button URL tail (button base is https://calendly.com/, so we
+    // send only the path after it). Only present on the _b template (2nd/3rd reminders).
+    const finalRescheduleLink = rescheduleLink || DEFAULT_RESCHEDULE_LINK;
+    const finalMeetingLink = meetingLink || 'Not Provided';
     const parameters = [
       clientName || 'Valued Client', // {{1}}
       resolvedMeetingDate || '', // {{2}}
       meetingTimeWithTimezone, // {{3}} - now includes timezone (e.g., "4pm - 4:15pm ET")
-      meetingLink || 'Not Provided', // {{4}}
-      rescheduleLink || DEFAULT_RESCHEDULE_LINK // {{5}}
+      finalMeetingLink, // {{4}}
+      finalRescheduleLink // {{5}}
     ];
+    // Only the _b template (2nd/3rd reminders) has a dynamic URL button.
+    // {{6}} = "Reschedule" button URL tail. ("I'll join" is a static quick-reply — no variable.)
+    if (useButtons) {
+      parameters.push(calendlyButtonTail(finalRescheduleLink)); // {{6}}
+    }
 
     // Send template message via WATI
     const result = await watiService.sendTemplateMessage({
