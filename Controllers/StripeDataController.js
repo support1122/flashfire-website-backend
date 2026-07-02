@@ -36,6 +36,51 @@ async function getPlanNameForCharge(charge) {
  * plan name (e.g. "Professional Plan – Mid-Level Professionals").
  * Query params: month=YYYY-MM (required)
  */
+/**
+ * All-months summary for the Stripe Revenue chart in Graph 02.
+ * Returns one entry per month that has at least one succeeded charge,
+ * with USD and CAD totals.
+ */
+export const getStripeAllMonthsSummary = async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({ success: false, error: "Stripe not configured." });
+    }
+
+    // Fetch all succeeded charges (paginated)
+    let charges = [];
+    let startingAfter;
+    while (true) {
+      const page = await stripe.charges.list({ limit: 100, starting_after: startingAfter });
+      const succeeded = page.data.filter((c) => c.status === "succeeded");
+      charges = charges.concat(succeeded);
+      if (!page.has_more) break;
+      startingAfter = page.data[page.data.length - 1].id;
+    }
+
+    // Group by YYYY-MM
+    const byMonth = {};
+    for (const c of charges) {
+      const d = new Date(c.created * 1000);
+      const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+      if (!byMonth[ym]) byMonth[ym] = { usd: 0, cad: 0, count: 0 };
+      const currency = c.currency.toUpperCase();
+      const amount = c.amount / 100;
+      if (currency === "USD") byMonth[ym].usd += amount;
+      else if (currency === "CAD") byMonth[ym].cad += amount;
+      byMonth[ym].count += 1;
+    }
+
+    const months = Object.keys(byMonth).sort();
+    const rows = months.map((m) => ({ month: m, ...byMonth[m] }));
+
+    return res.status(200).json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Error fetching Stripe all-months summary:", error);
+    return res.status(500).json({ success: false, error: error.message || "Failed to fetch summary" });
+  }
+};
+
 export const getStripePaymentsByMonth = async (req, res) => {
   try {
     if (!stripe) {
