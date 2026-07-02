@@ -152,7 +152,7 @@ import {
 import { crmAdminLogin, crmAdminRequestOtp, crmAdminVerifyOtp, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
-import { getStripePaymentsByMonth } from './Controllers/StripeDataController.js';
+import { getStripePaymentsByMonth, getStripeAllMonthsSummary } from './Controllers/StripeDataController.js';
 import {
   listDesignedTemplates,
   getDesignedTemplate,
@@ -261,6 +261,7 @@ export default function Routes(app) {
 
   // Stripe Data tab — month-wise succeeded charges enriched with Checkout line-item plan name.
   app.get('/api/crm/stripe/payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaymentsByMonth);
+  app.get('/api/crm/stripe/summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeAllMonthsSummary);
 
   // Zoom Phone — webhook is public (HMAC-verified inside).
   app.post('/api/zoom-phone/webhook', zoomPhoneWebhook);
