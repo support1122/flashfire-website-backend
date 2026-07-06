@@ -149,10 +149,11 @@ import {
   deleteAllWorkflowsForBookingByStatus
 } from "./Controllers/WorkflowLogController.js";
 // Redis/BullBoard removed — scheduling handled by MongoDB-based JobScheduler + UnifiedScheduler
-import { crmAdminLogin, crmAdminRequestOtp, crmAdminVerifyOtp, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser, backfillCalendlyHosts } from './Controllers/CrmAdminController.js';
+import { crmAdminLogin, crmAdminRequestOtp, crmAdminVerifyOtp, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
 import { getStripePaymentsByMonth, getStripeAllMonthsSummary } from './Controllers/StripeDataController.js';
+import { getManualPaymentsByMonth, createManualPayment, updateManualPayment, deleteManualPayment } from './Controllers/ManualPaymentController.js';
 import {
   listDesignedTemplates,
   getDesignedTemplate,
@@ -249,7 +250,6 @@ export default function Routes(app) {
   app.post('/api/crm/admin/otp/verify', crmAdminVerifyOtp);
   app.get('/api/crm/admin/users', requireCrmAdmin, listCrmUsers);
   app.post('/api/crm/admin/users', requireCrmAdmin, createCrmUser);
-  app.post('/api/crm/admin/backfill-calendly-hosts', requireCrmAdmin, backfillCalendlyHosts);
   app.put('/api/crm/admin/users/:id', requireCrmAdmin, updateCrmUser);
   app.delete('/api/crm/admin/users/:id', requireCrmAdmin, deleteCrmUser);
 
@@ -263,6 +263,12 @@ export default function Routes(app) {
   // Stripe Data tab — month-wise succeeded charges enriched with Checkout line-item plan name.
   app.get('/api/crm/stripe/payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaymentsByMonth);
   app.get('/api/crm/stripe/summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeAllMonthsSummary);
+
+  // Manual INR payment entries — merged into the Stripe Data tab alongside Stripe charges.
+  app.get('/api/crm/stripe/manual-payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getManualPaymentsByMonth);
+  app.post('/api/crm/stripe/manual-payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), createManualPayment);
+  app.put('/api/crm/stripe/manual-payments/:id', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), updateManualPayment);
+  app.delete('/api/crm/stripe/manual-payments/:id', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), deleteManualPayment);
 
   // Zoom Phone — webhook is public (HMAC-verified inside).
   app.post('/api/zoom-phone/webhook', zoomPhoneWebhook);
