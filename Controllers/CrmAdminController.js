@@ -1,6 +1,8 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { CrmUserModel, CRM_PERMISSION_KEYS_ALLOWED } from '../Schema_Models/CrmUser.js';
+import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { resolveCalendlyHostByEventUri } from '../Utils/CalendlyAPIHelper.js';
 import { getCrmJwtSecret } from '../Middlewares/CrmAuth.js';
 import { sendCrmOtpEmail } from '../Utils/SendGridHelper.js';
 import { deleteOtp, decrementAttempts, getOtp, setOtp } from '../Utils/CrmOtpCache.js';
@@ -236,6 +238,77 @@ export async function deleteCrmUser(req, res) {
     if (!deleted) return res.status(404).json({ success: false, error: 'User not found' });
     return res.status(200).json({ success: true });
   } catch (error) {
+    return res.status(500).json({ success: false, error: 'Server error' });
+  }
+}
+
+/**
+ * One-time backfill: populate calendlyHost on bookings created before host capture
+ * existed. For each booking that has a calendlyEventUri but no calendlyHost email,
+ * fetch its scheduled event from the Calendly API, resolve the round-robin host, and
+ * match it to a CRM user. Idempotent — re-running only touches still-missing rows.
+ *
+ * POST /api/crm/admin/backfill-calendly-hosts?limit=100
+ */
+export async function backfillCalendlyHosts(req, res) {
+  try {
+    const limit = Math.min(500, Math.max(1, parseInt(req.query?.limit, 10) || 100));
+
+    const bookings = await CampaignBookingModel.find({
+      calendlyEventUri: { $ne: null },
+      $or: [
+        { 'calendlyHost.email': { $in: [null, ''] } },
+        { calendlyHost: { $exists: false } },
+      ],
+    })
+      .select('bookingId calendlyEventUri')
+      .sort({ bookingCreatedAt: -1 })
+      .limit(limit)
+      .lean();
+
+    let updated = 0;
+    let unresolved = 0;
+    const failures = [];
+
+    for (const b of bookings) {
+      const host = await resolveCalendlyHostByEventUri(b.calendlyEventUri);
+      if (!host?.email) {
+        unresolved++;
+        continue;
+      }
+      const crmUser = await CrmUserModel.findOne({ email: host.email }).select('name email').lean();
+      try {
+        await CampaignBookingModel.updateOne(
+          { bookingId: b.bookingId },
+          {
+            $set: {
+              calendlyHost: {
+                email: host.email,
+                name: crmUser?.name || host.name || null,
+                calendlyUserUri: host.calendlyUserUri || null,
+                matchedCrmUser: Boolean(crmUser),
+              },
+            },
+          }
+        );
+        updated++;
+      } catch (updateErr) {
+        failures.push({ bookingId: b.bookingId, error: updateErr.message });
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      scanned: bookings.length,
+      updated,
+      unresolved,
+      failures,
+      hint: bookings.length === limit
+        ? 'Reached the limit — run again to process the next batch.'
+        : 'No more bookings need backfilling.',
+    });
+  } catch (error) {
+    console.error('backfillCalendlyHosts error:', error?.message || error);
     return res.status(500).json({ success: false, error: 'Server error' });
   }
 }

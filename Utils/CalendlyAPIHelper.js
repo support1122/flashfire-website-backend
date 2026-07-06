@@ -182,9 +182,47 @@ export async function resolveCalendlyHost(payload) {
   };
 }
 
+/**
+ * Fetch a scheduled event from the Calendly API and resolve its assigned host,
+ * for backfilling calendlyHost on bookings created before host capture existed.
+ *
+ * @param {string} eventUri - Calendly scheduled_event URI (stored as calendlyEventUri)
+ * @returns {Promise<{ email: string, name: string|null, calendlyUserUri: string|null }|null>}
+ */
+export async function resolveCalendlyHostByEventUri(eventUri) {
+  if (!eventUri || !CALENDLY_API_TOKEN) return null;
+  try {
+    const res = await fetch(eventUri, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${CALENDLY_API_TOKEN}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    if (!res.ok) {
+      Logger.warn('[CalendlyAPIHelper] Failed to fetch scheduled event for host backfill', {
+        eventUri,
+        status: res.status
+      });
+      return null;
+    }
+    const data = await res.json();
+    const memberships = data?.resource?.event_memberships;
+    // Reuse the same extraction path as the webhook.
+    return await resolveCalendlyHost({ scheduled_event: { event_memberships: memberships } });
+  } catch (error) {
+    Logger.warn('[CalendlyAPIHelper] Error resolving host by event URI', {
+      eventUri,
+      error: error.message
+    });
+    return null;
+  }
+}
+
 export default {
   fetchRescheduleLinkFromCalendly,
   getRescheduleLinkForBooking,
-  resolveCalendlyHost
+  resolveCalendlyHost,
+  resolveCalendlyHostByEventUri
 };
 

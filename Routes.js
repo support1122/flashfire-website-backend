@@ -149,7 +149,7 @@ import {
   deleteAllWorkflowsForBookingByStatus
 } from "./Controllers/WorkflowLogController.js";
 // Redis/BullBoard removed — scheduling handled by MongoDB-based JobScheduler + UnifiedScheduler
-import { crmAdminLogin, crmAdminRequestOtp, crmAdminVerifyOtp, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
+import { crmAdminLogin, crmAdminRequestOtp, crmAdminVerifyOtp, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser, backfillCalendlyHosts } from './Controllers/CrmAdminController.js';
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
 import { getStripePaymentsByMonth, getStripeAllMonthsSummary } from './Controllers/StripeDataController.js';
@@ -249,6 +249,7 @@ export default function Routes(app) {
   app.post('/api/crm/admin/otp/verify', crmAdminVerifyOtp);
   app.get('/api/crm/admin/users', requireCrmAdmin, listCrmUsers);
   app.post('/api/crm/admin/users', requireCrmAdmin, createCrmUser);
+  app.post('/api/crm/admin/backfill-calendly-hosts', requireCrmAdmin, backfillCalendlyHosts);
   app.put('/api/crm/admin/users/:id', requireCrmAdmin, updateCrmUser);
   app.delete('/api/crm/admin/users/:id', requireCrmAdmin, deleteCrmUser);
 
