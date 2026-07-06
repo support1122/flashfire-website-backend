@@ -90,6 +90,7 @@ export function notifyBdaSSE(bdaEmail, event, data) {
   for (const res of connections) {
     try {
       res.write(payload);
+      if (typeof res.flush === 'function') res.flush();
     } catch (err) {
       connections.delete(res);
     }
@@ -740,7 +741,7 @@ export async function getMyMeetings(req, res) {
     })
       .sort({ scheduledEventStartTime: 1 })
       .select(
-        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy'
+        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy calendlyHost'
       )
       .limit(100)
       .lean();
@@ -783,6 +784,10 @@ export async function getMyMeetings(req, res) {
         googleMeetCode: b.googleMeetCode,
         calendlyMeetLink: b.calendlyMeetLink,
         claimedBy: b.claimedBy ? { name: b.claimedBy.name, email: b.claimedBy.email } : null,
+        // Calendly round-robin host — the BDA this meeting is assigned to.
+        calendlyHost: b.calendlyHost && (b.calendlyHost.name || b.calendlyHost.email)
+          ? { name: b.calendlyHost.name, email: b.calendlyHost.email }
+          : null,
         attendance: attendanceByBooking[b.bookingId] || null,
       };
       if (start && start >= now) {
@@ -1323,8 +1328,11 @@ export async function sseConnection(req, res) {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.flushHeaders();
 
-    // Initial keepalive to confirm connection (some clients need an initial push)
+    // Initial keepalive to confirm connection (some clients need an initial push).
+    // res.flush() forces bytes past any lingering buffer (belt-and-suspenders now
+    // that compression is disabled for this route).
     res.write(':ok\n\n');
+    if (typeof res.flush === 'function') res.flush();
 
     // Register connection
     if (!sseConnections.has(email)) {
@@ -1334,11 +1342,13 @@ export async function sseConnection(req, res) {
 
     // Send connected event
     res.write(`event: connected\ndata: ${JSON.stringify({ email, serverTime: new Date().toISOString() })}\n\n`);
+    if (typeof res.flush === 'function') res.flush();
 
     // Heartbeat every 30s
     const heartbeatInterval = setInterval(() => {
       try {
         res.write(`event: heartbeat\ndata: ${JSON.stringify({ serverTime: new Date().toISOString() })}\n\n`);
+        if (typeof res.flush === 'function') res.flush();
       } catch (err) {
         clearInterval(heartbeatInterval);
       }

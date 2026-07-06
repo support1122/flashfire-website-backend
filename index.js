@@ -277,7 +277,24 @@ app.use(
 // Handle preflight for any path (Express 5: avoid "*" pattern)
 app.options(/.*/, cors({ origin: true, credentials: true }));
 // app.use(cors());
-app.use(compression());
+// NOTE: Server-Sent Events (the BDA attendance panel live feed) must NOT be
+// compressed. compression() buffers the response body and only flushes past a
+// size threshold; an SSE stream sends tiny events and never ends, so the initial
+// `connected` bytes get stuck in the buffer and the client's EventSource hangs in
+// CONNECTING forever. Skip compression for the SSE endpoint.
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (
+        req.path === '/api/bda-attendance/sse' ||
+        res.getHeader('Content-Type') === 'text/event-stream'
+      ) {
+        return false;
+      }
+      return compression.filter(req, res);
+    },
+  })
+);
 // Stripe webhook must receive raw body for signature verification.
 app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 // Capture raw bytes for Zoom Phone webhook HMAC verification.

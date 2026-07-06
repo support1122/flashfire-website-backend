@@ -20,6 +20,7 @@ import { logReminderDrift } from './MeetingReminderUtils.js';
 import { makeCall, scheduleCall } from './CallScheduler.js';
 import { sendWhatsAppMessage, scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
 import { formatMeetingWallTime, headlineForSendTime, scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
+import { resolveCalendlyHostByEventUri } from './CalendlyAPIHelper.js';
 import { normalizePhoneForReminders } from './MeetingReminderUtils.js';
 import { DateTime } from 'luxon';
 
@@ -40,6 +41,13 @@ const DISCORD_MEET_WEBHOOK =
   process.env.DISCORD_MEET_WEB_HOOK_URL ||
   process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL ||
   null;
+
+// Meetings assigned to a BDA whose name starts with "Kalpataru" route to a
+// dedicated Discord channel. Env can override; the hardcoded URL is the default
+// so the channel keeps working even when the env var is missing on a deploy.
+const DISCORD_MEET_KALPATARU_WEBHOOK =
+  process.env.DISCORD_MEET_KALPATARU_WEBHOOK_URL ||
+  'https://discord.com/api/webhooks/1523575499454939307/i_ESYLBr2ADfKJlB_Owb0aFub1LRivpN1us8Xrbf0vIFKB-TsK8RQefcG3PTDRjojgat';
 
 export class UnifiedScheduler {
   constructor() {
@@ -277,7 +285,9 @@ export class UnifiedScheduler {
 
     const bookings = await CampaignBookingModel.find({ $or: orClauses })
       .sort({ bookingCreatedAt: -1 })
-      .select('bookingId clientEmail bookingStatus scheduledEventStartTime')
+      // calendlyHost + claimedBy are needed to route Kalpataru-assigned meetings
+      // to their dedicated Discord channel in _processOneDiscord.
+      .select('bookingId clientEmail bookingStatus scheduledEventStartTime calendlyHost claimedBy')
       .lean();
 
     const byId = new Map();
@@ -567,7 +577,26 @@ export class UnifiedScheduler {
 
       logReminderDrift('discord_bda', reminder.reminderId, reminder.scheduledFor);
 
-      await DiscordConnect(DISCORD_MEET_WEBHOOK, content, false);
+      // Route to the Kalpataru channel when the assigned BDA's name starts with
+      // "Kalpataru" (Calendly round-robin host, else manual CRM claim); otherwise
+      // use the shared channel. Mirrors the legacy DiscordMeetReminderScheduler
+      // routing — this precision path is the one that actually wins the claim.
+      const bookingForRoute =
+        (bIdDisc && bookingMap.byId.get(bIdDisc)) ||
+        ((reminder.clientEmail || '') && bookingMap.byEmail.get(String(reminder.clientEmail).toLowerCase().trim())) ||
+        null;
+      const assignedBdaName = (
+        bookingForRoute?.calendlyHost?.name ||
+        bookingForRoute?.claimedBy?.name ||
+        ''
+      ).trim();
+      const isKalpataru = /^kalpataru/i.test(assignedBdaName);
+      const targetWebhook =
+        isKalpataru && DISCORD_MEET_KALPATARU_WEBHOOK
+          ? DISCORD_MEET_KALPATARU_WEBHOOK
+          : DISCORD_MEET_WEBHOOK;
+
+      await DiscordConnect(targetWebhook, content, false);
 
       const driftMs = Date.now() - new Date(reminder.scheduledFor).getTime();
       await ScheduledDiscordMeetReminderModel.updateOne(
@@ -646,6 +675,39 @@ export class UnifiedScheduler {
 
     let created = 0;
     let flagsCleared = 0;
+
+    // Heal missing calendlyHost on upcoming bookings (sync-created rows often lack
+    // it). Required for BDA channel routing (Kalpataru) at reminder send time.
+    // resolveCalendlyHostByEventUri no-ops when CALENDLY_API_TOKEN is absent.
+    // Capped per run to stay gentle on the Calendly API.
+    let hostsHealed = 0;
+    const HOST_HEAL_CAP = 20;
+    for (const booking of bookings) {
+      if (hostsHealed >= HOST_HEAL_CAP) break;
+      if (booking.calendlyHost?.email || !booking.calendlyEventUri) continue;
+      try {
+        const host = await resolveCalendlyHostByEventUri(booking.calendlyEventUri);
+        if (!host?.email) continue;
+        await CampaignBookingModel.updateOne(
+          { bookingId: booking.bookingId },
+          {
+            $set: {
+              calendlyHost: {
+                email: host.email,
+                name: host.name || null,
+                calendlyUserUri: host.calendlyUserUri || null,
+                matchedCrmUser: false,
+              },
+            },
+          }
+        );
+        booking.calendlyHost = { email: host.email, name: host.name || null };
+        hostsHealed++;
+        console.log(`[UnifiedScheduler] Heal: calendlyHost set for ${booking.clientName} → ${host.name || host.email}`);
+      } catch (err) {
+        console.error(`[UnifiedScheduler] Heal host error (${booking.bookingId}): ${err.message}`);
+      }
+    }
 
     for (const booking of bookings) {
       const meetingStart = new Date(booking.scheduledEventStartTime);

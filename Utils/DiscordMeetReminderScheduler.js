@@ -36,8 +36,11 @@ const DISCORD_MEET_2MIN_WEBHOOK_URL =
 // Meetings assigned to a BDA whose name starts with "Kalpataru" get their
 // confirm-attendance reminder routed to a dedicated Discord channel instead of
 // the shared one. Falls back to the shared webhook if not configured.
+// Env can override; hardcoded default keeps the dedicated channel working even
+// when the env var is missing on a deploy.
 const DISCORD_MEET_KALPATARU_WEBHOOK_URL =
-  process.env.DISCORD_MEET_KALPATARU_WEBHOOK_URL || null;
+  process.env.DISCORD_MEET_KALPATARU_WEBHOOK_URL ||
+  'https://discord.com/api/webhooks/1523575499454939307/i_ESYLBr2ADfKJlB_Owb0aFub1LRivpN1us8Xrbf0vIFKB-TsK8RQefcG3PTDRjojgat';
 
 let isRunning = false;
 let pollInterval = null;
