@@ -219,6 +219,23 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String, // email or identifier of who changed it
     default: null
   },
+  statusChangedByName: {
+    type: String, // display name of who changed it last (for the CRM table)
+    default: null
+  },
+  // Append-only trail of every status change, oldest first. Powers the Status timeline.
+  statusHistory: [{
+    status: { type: String },
+    previousStatus: { type: String, default: null },
+    changedByEmail: { type: String, default: null },
+    changedByName: { type: String, default: null },
+    source: {
+      type: String,
+      enum: ['admin', 'calendly', 'system', 'bda', 'microservice'],
+      default: null
+    },
+    changedAt: { type: Date, default: Date.now }
+  }],
   paymentPlan: {
     name: {
       type: String,
@@ -424,6 +441,30 @@ export const CampaignBookingSchema = new mongoose.Schema({
       default: null
     }
   },
+  // Calendly round-robin host — the BDA this meeting is assigned to. Captured from
+  // scheduled_event.event_memberships on invitee.created and matched to a CRM user by
+  // email. Distinct from claimedBy (which drives the manual claim + approval flow).
+  calendlyHost: {
+    email: {
+      type: String,
+      default: null,
+      lowercase: true,
+      trim: true,
+      index: true
+    },
+    name: {
+      type: String,
+      default: null
+    },
+    calendlyUserUri: {
+      type: String,
+      default: null
+    },
+    matchedCrmUser: {
+      type: Boolean,
+      default: false
+    }
+  },
   attachedCustomWorkflowIds: {
     type: [String],
     default: []
@@ -482,6 +523,50 @@ CampaignBookingSchema.pre('save', function (next) {
     this.normalizedClientPhone = null;
   }
   trimUtmObject(this);
+  next();
+});
+
+// Default human-readable actor name when an automated flow doesn't provide one.
+function defaultActorName(source) {
+  switch (source) {
+    case 'calendly': return 'Calendly';
+    case 'bda': return 'BDA';
+    case 'admin': return 'Admin';
+    case 'microservice':
+    case 'system':
+    default: return 'System';
+  }
+}
+
+// Append-only status history for every `.save()`-based transition (Calendly no-show /
+// reschedule / cancel, creation genesis, etc.). Manual CRM edits go through
+// findOneAndUpdate (which bypasses save hooks) and push their own richer entry there.
+// Callers may set a transient `this._statusActor = { email, name, source, previousStatus }`
+// before saving to attribute the change; otherwise it defaults to a system actor.
+CampaignBookingSchema.pre('save', function (next) {
+  if (this.isModified('bookingStatus') && this.bookingStatus) {
+    const actor = this._statusActor || {};
+    const source = actor.source || 'system';
+    const changedAt = new Date();
+    const changedByEmail = actor.email || null;
+    const changedByName = actor.name || defaultActorName(source);
+    const previousStatus = actor.previousStatus ?? null;
+
+    this.statusChangedAt = changedAt;
+    this.statusChangeSource = source;
+    this.statusChangedBy = changedByEmail || this.statusChangedBy || null;
+    this.statusChangedByName = changedByName;
+
+    if (!Array.isArray(this.statusHistory)) this.statusHistory = [];
+    this.statusHistory.push({
+      status: this.bookingStatus,
+      previousStatus,
+      changedByEmail,
+      changedByName,
+      source,
+      changedAt,
+    });
+  }
   next();
 });
 

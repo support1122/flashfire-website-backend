@@ -96,7 +96,14 @@ export async function crmAdminVerifyOtp(req, res) {
       deleteOtp(adminOtpKey(email));
     }
 
-    const token = jwt.sign({ role: 'crm_admin', email }, getCrmJwtSecret(), { expiresIn: '30d' });
+    // Include the admin's name so status-change attribution shows a real person,
+    // not a generic "Admin", in the CRM timeline.
+    const adminUser = await CrmUserModel.findOne({ email }).select('name').lean();
+    const token = jwt.sign(
+      { role: 'crm_admin', email, name: adminUser?.name || null },
+      getCrmJwtSecret(),
+      { expiresIn: '30d' }
+    );
     return res.status(200).json({ success: true, token });
   } catch (error) {
     console.error('CRM admin OTP verify error:', error?.message || error);

@@ -121,8 +121,70 @@ export async function getRescheduleLinkForBooking(booking) {
   return null;
 }
 
+/**
+ * Resolve the assigned host (BDA) for a Calendly scheduled event from an
+ * invitee.created / invitee.canceled webhook payload.
+ *
+ * For a round-robin event type the `scheduled_event.event_memberships` array
+ * contains the single host who received the booking. Each membership carries the
+ * host's `user` URI and (in the current API) `user_email` / `user_name`. When the
+ * email is missing we resolve it from the user URI via the Calendly API.
+ *
+ * @param {Object} payload - Calendly webhook payload (must contain scheduled_event)
+ * @returns {Promise<{ email: string, name: string|null, calendlyUserUri: string|null }|null>}
+ */
+export async function resolveCalendlyHost(payload) {
+  const memberships = payload?.scheduled_event?.event_memberships;
+  if (!Array.isArray(memberships) || memberships.length === 0) {
+    return null;
+  }
+
+  // Round-robin assigns exactly one host. Prefer the first membership that already
+  // carries an email; otherwise fall back to the first and resolve via the API.
+  const membership = memberships.find((m) => m?.user_email) || memberships[0];
+  let email = membership?.user_email || null;
+  let name = membership?.user_name || null;
+  const calendlyUserUri = membership?.user || null;
+
+  if ((!email || !name) && calendlyUserUri && CALENDLY_API_TOKEN) {
+    try {
+      const res = await fetch(calendlyUserUri, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${CALENDLY_API_TOKEN}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        email = email || data?.resource?.email || null;
+        name = name || data?.resource?.name || null;
+      } else {
+        Logger.warn('[CalendlyAPIHelper] Failed to resolve host user', {
+          calendlyUserUri,
+          status: res.status
+        });
+      }
+    } catch (error) {
+      Logger.warn('[CalendlyAPIHelper] Error resolving host user', {
+        calendlyUserUri,
+        error: error.message
+      });
+    }
+  }
+
+  if (!email) return null;
+
+  return {
+    email: String(email).toLowerCase().trim(),
+    name: name || null,
+    calendlyUserUri: calendlyUserUri || null
+  };
+}
+
 export default {
   fetchRescheduleLinkFromCalendly,
-  getRescheduleLinkForBooking
+  getRescheduleLinkForBooking,
+  resolveCalendlyHost
 };
 
