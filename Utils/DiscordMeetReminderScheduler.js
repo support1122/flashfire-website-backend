@@ -411,7 +411,14 @@ export async function processDueDiscordMeetReminders() {
               ? rawStart
               : null;
         const headline = headlineForSendTime(headlineStart);
-        const claimedBda = booking?.claimedBy?.name || booking?.claimedBy?.email || null;
+        // Prefer the Calendly round-robin host (who the meeting is assigned to);
+        // fall back to a manual claim if a BDA has claimed it in the CRM.
+        const claimedBda =
+          booking?.calendlyHost?.name ||
+          booking?.calendlyHost?.email ||
+          booking?.claimedBy?.name ||
+          booking?.claimedBy?.email ||
+          null;
 
         const messageLines = [
           headline,

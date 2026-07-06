@@ -314,7 +314,10 @@ export default function Routes(app) {
   app.post('/api/bda-attendance/warn-absent', requireBdaExtension, warnAbsent);
   app.post('/api/bda-attendance/beacon-leave', beaconLeave); // No middleware — token verified in body
   app.post('/api/bda-attendance/beacon-end-event', beaconReportEndEvent); // token in body; meet-link-only fallback
-  app.post('/api/bda-attendance/create-test-meeting', createTestMeeting); // No auth — for testing only
+  // Test-only meeting creator. Never exposed in production; admin-gated elsewhere.
+  if (process.env.NODE_ENV !== 'production') {
+    app.post('/api/bda-attendance/create-test-meeting', requireCrmAdmin, createTestMeeting);
+  }
   app.get('/api/bda-attendance/sse', sseConnection);
   app.get('/api/bda-attendance/by-booking/:bookingId', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceByBooking);
   app.get('/api/bda-attendance/bulk', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceBulk);

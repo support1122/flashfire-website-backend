@@ -13,7 +13,23 @@ import {
   parseMeetingStartToDate,
 } from '../Utils/MeetingReminderUtils.js';
 import { cancelDiscordMeetRemindersForMeeting, scheduleDiscordMeetReminder } from '../Utils/DiscordMeetReminderScheduler.js';
-import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
+import { getRescheduleLinkForBooking, resolveCalendlyHost } from '../Utils/CalendlyAPIHelper.js';
+import { CrmUserModel } from '../Schema_Models/CrmUser.js';
+
+/**
+ * One-line "Assigned BDA" label for Discord messages. Prefers the Calendly
+ * round-robin host (who the meeting is assigned to); falls back to a manual CRM
+ * claim, then to "Not assigned".
+ */
+function assignedBdaLabel(booking) {
+  return (
+    booking?.calendlyHost?.name ||
+    booking?.calendlyHost?.email ||
+    booking?.claimedBy?.name ||
+    booking?.claimedBy?.email ||
+    'Not assigned'
+  );
+}
 import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 import { DateTime } from 'luxon';
@@ -206,6 +222,30 @@ async function handleCreatedEvent(req, res, payload) {
   const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
   const bookedAt = new Date(payload?.created_at || new Date()).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
+  // Resolve the Calendly round-robin host (the BDA this meeting is assigned to) and
+  // match it to a CRM user by email so downstream views can show "Assigned BDA".
+  let calendlyHost = null;
+  try {
+    const host = await resolveCalendlyHost(payload);
+    if (host?.email) {
+      const crmUser = await CrmUserModel.findOne({ email: host.email }).select('name email').lean();
+      calendlyHost = {
+        email: host.email,
+        name: crmUser?.name || host.name || null,
+        calendlyUserUri: host.calendlyUserUri || null,
+        matchedCrmUser: Boolean(crmUser),
+      };
+      Logger.info('📌 Calendly host resolved for booking', {
+        hostEmail: calendlyHost.email,
+        matchedCrmUser: calendlyHost.matchedCrmUser,
+        inviteeEmail,
+      });
+    }
+  } catch (hostErr) {
+    Logger.warn('Failed to resolve Calendly host', { error: hostErr.message, inviteeEmail });
+  }
+  const bdaEmailForNotification = calendlyHost?.email || 'Not assigned';
+
   // Store raw webhook payload for debugging/audit (fire-and-forget)
   const webhookLogId = payload?.invitee?.uri
     ? `wh_${crypto.createHash('md5').update(payload.invitee.uri + (rawStartTime || '')).digest('hex')}`
@@ -386,6 +426,7 @@ async function handleCreatedEvent(req, res, payload) {
           utmContent: utmContent ?? existingBooking.utmContent,
           utmTerm: utmTerm ?? existingBooking.utmTerm,
           bookingStatus: 'scheduled',
+          ...(calendlyHost ? { calendlyHost } : {}),
         }
       },
       { new: true }
@@ -452,7 +493,8 @@ async function handleCreatedEvent(req, res, payload) {
           anythingToKnow: anythingToKnow || existingMetaLead.anythingToKnow,
           questionsAndAnswers: payload?.questions_and_answers || null,
           userAgent: req.headers['user-agent'],
-          ipAddress: req.ip || req.connection.remoteAddress
+          ipAddress: req.ip || req.connection.remoteAddress,
+          ...(calendlyHost ? { calendlyHost } : {})
         }
       },
       { new: true }
@@ -531,6 +573,8 @@ async function handleCreatedEvent(req, res, payload) {
       "Booked At": bookedAt,
       "UTM Source": mergedBooking.utmSource || utmSource,
       "Lead Source": 'meta_lead_ad (synced)',
+      "BDA Email": bdaEmailForNotification,
+      "Assigned BDA": calendlyHost?.name || (calendlyHost?.email ? calendlyHost.email : 'Not assigned'),
       "Database Status": "\u2705 META SYNCED \u2192 SCHEDULED"
     };
 
@@ -692,7 +736,8 @@ async function handleCreatedEvent(req, res, payload) {
     visitorId: null,
     userAgent: req.headers['user-agent'],
     ipAddress: req.ip || req.connection.remoteAddress,
-    bookingStatus: 'scheduled'
+    bookingStatus: 'scheduled',
+    ...(calendlyHost ? { calendlyHost } : {})
   });
 
   await newBooking.save();
@@ -803,6 +848,8 @@ async function handleCreatedEvent(req, res, payload) {
     "UTM Source": utmSource,
     "UTM Medium": utmMedium || 'N/A',
     "UTM Campaign": utmCampaign || 'N/A',
+    "BDA Email": bdaEmailForNotification,
+    "Assigned BDA": calendlyHost?.name || (calendlyHost?.email ? calendlyHost.email : 'Not assigned'),
     "Database Status": "\u2705 SAVED"
   };
 
@@ -1089,10 +1136,10 @@ async function handleNoShowEvent(req, res, payload) {
   // Send Discord notification
   try {
     if (allowNoShowSideEffects) {
-      await DiscordConnectForMeet(`🚨 No-Show Alert: ${clientName} (${clientEmail}) missed their meeting. UTM Source: ${bookingData.utmSource || 'Unknown'}`);
+      await DiscordConnectForMeet(`🚨 No-Show Alert: ${clientName} (${clientEmail}) missed their meeting. Assigned BDA: ${assignedBdaLabel(bookingRecord)}. UTM Source: ${bookingData.utmSource || 'Unknown'}`);
     } else {
       await DiscordConnectForMeet(
-        `⚠ Calendly invitee_no_show for ${clientName} (${clientEmail}) — CRM status not updated (${noShowEligibility.message}). UTM: ${bookingData.utmSource || 'Unknown'}`
+        `⚠ Calendly invitee_no_show for ${clientName} (${clientEmail}) — CRM status not updated (${noShowEligibility.message}). Assigned BDA: ${assignedBdaLabel(bookingRecord)}. UTM: ${bookingData.utmSource || 'Unknown'}`
       );
       Logger.warn('Calendly no-show webhook: skipped notifications and DB update until meeting + 5m', {
         clientEmail,
@@ -1142,6 +1189,7 @@ async function handleNoShowEvent(req, res, payload) {
           clientEmail,
         });
       } else {
+        bookingRecord._statusActor = { source: 'calendly', name: 'Calendly', email: 'calendly_webhook', previousStatus: bookingRecord.bookingStatus };
         bookingRecord.bookingStatus = 'no-show';
         bookingRecord.statusChangedAt = new Date();
         bookingRecord.statusChangeSource = 'calendly';
@@ -1401,6 +1449,7 @@ async function handleRescheduledEvent(req, res, payload) {
     // Update booking record with reschedule information
     if (bookingRecord) {
       try {
+        bookingRecord._statusActor = { source: 'calendly', name: 'Calendly', email: 'calendly_webhook', previousStatus: bookingRecord.bookingStatus };
         bookingRecord.bookingStatus = 'rescheduled';
         bookingRecord.statusChangedAt = new Date();
         bookingRecord.statusChangeSource = 'calendly';
@@ -1549,6 +1598,7 @@ async function handleRescheduledEvent(req, res, payload) {
 
       await DiscordConnectForMeet(
         `🔄 Meeting Rescheduled: ${clientName} (${clientEmail})\n` +
+        `👤 Assigned BDA: ${assignedBdaLabel(bookingRecord)}\n` +
         `📅 Old Time: ${(() => { const d = DateTime.fromISO(oldStartTime); return d.isValid ? d.toFormat('ff') : (oldStartTime || 'Unknown'); })()}\n` +
         `📅 New Time: ${(() => { const d = DateTime.fromISO(newStartTime); return d.isValid ? d.toFormat('ff') : (newStartTime || 'Unknown'); })()}\n` +
         `🔗 Reschedule URL: ${rescheduleUrl || 'NOT PROVIDED BY CALENDLY'}\n` +
@@ -1782,6 +1832,7 @@ async function handleCanceledEvent(req, res, payload) {
     // Update booking record status to canceled
     if (bookingRecord && !staleCancelForRebookedEvent) {
       try {
+        bookingRecord._statusActor = { source: 'calendly', name: 'Calendly', email: 'calendly_webhook', previousStatus: bookingRecord.bookingStatus };
         bookingRecord.bookingStatus = 'canceled';
         bookingRecord.statusChangedAt = new Date();
         bookingRecord.statusChangeSource = 'calendly';
@@ -1825,6 +1876,7 @@ async function handleCanceledEvent(req, res, payload) {
       `👤 **Name:** ${clientName}\n` +
       `📧 **Email:** ${clientEmail}\n` +
       `📞 **Phone:** ${clientPhone || 'Not Provided'}\n` +
+      `👤 **Assigned BDA:** ${assignedBdaLabel(bookingRecord)}\n` +
       `📅 **Meeting Time:** ${meetingTimeFormatted}\n` +
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
       `✅ **Call Reminder:** ${callCancelled ? 'Cancelled' : 'Not Found'}\n` +

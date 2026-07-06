@@ -1011,11 +1011,21 @@ export const updateBookingStatus = async (req, res) => {
       }
     }
 
+    // Who is making this change. Prefer the authenticated CRM user when the route
+    // carries one; otherwise trust the actor fields the CRM sends in the body
+    // (this route is unauthenticated, matching the existing pattern).
+    const statusChangedAt = new Date();
+    const actorEmail = req.crmUser?.email || req.body.changedBy || req.headers['x-user-email'] || 'admin';
+    const actorName = req.crmUser?.name || req.body.changedByName || 'Admin';
+    const statusSource = req.body.source || (req.crmUser?.role === 'admin' ? 'admin' : (req.crmUser ? 'bda' : 'admin'));
+    const previousStatus = existingBooking.bookingStatus || null;
+
     const updatePayload = {
       bookingStatus: status,
-      statusChangedAt: new Date(),
-      statusChangeSource: req.body.source || 'admin',
-      statusChangedBy: req.body.changedBy || req.headers['x-user-email'] || 'admin',
+      statusChangedAt,
+      statusChangeSource: statusSource,
+      statusChangedBy: actorEmail,
+      statusChangedByName: actorName,
     };
 
     if (paymentPlanUpdate) {
@@ -1045,10 +1055,24 @@ export const updateBookingStatus = async (req, res) => {
       }
     }
 
-    // Update booking status
+    // Update booking status. Append an append-only history entry whenever the status
+    // actually changes so the CRM timeline records who/when for every transition.
+    const updateOps = { $set: updatePayload };
+    if (status !== previousStatus) {
+      updateOps.$push = {
+        statusHistory: {
+          status,
+          previousStatus,
+          changedByEmail: actorEmail,
+          changedByName: actorName,
+          source: statusSource,
+          changedAt: statusChangedAt,
+        },
+      };
+    }
     const booking = await CampaignBookingModel.findOneAndUpdate(
       { bookingId },
-      { $set: updatePayload },
+      updateOps,
       { new: true }
     );
 
