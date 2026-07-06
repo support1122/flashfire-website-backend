@@ -33,6 +33,12 @@ const DISCORD_MEET_2MIN_WEBHOOK_URL =
   process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL ||
   null;
 
+// Meetings assigned to a BDA whose name starts with "Kalpataru" get their
+// confirm-attendance reminder routed to a dedicated Discord channel instead of
+// the shared one. Falls back to the shared webhook if not configured.
+const DISCORD_MEET_KALPATARU_WEBHOOK_URL =
+  process.env.DISCORD_MEET_KALPATARU_WEBHOOK_URL || null;
+
 let isRunning = false;
 let pollInterval = null;
 
@@ -436,7 +442,16 @@ export async function processDueDiscordMeetReminders() {
 
         logReminderDrift('discord_bda', reminder.reminderId, reminder.scheduledFor);
 
-        const sendResult = await DiscordConnect(DISCORD_MEET_2MIN_WEBHOOK_URL, content, false);
+        // Route to the Kalpataru channel when the assigned BDA's name starts with
+        // "Kalpataru"; otherwise use the shared channel. Match on name only.
+        const assignedBdaName = (booking?.calendlyHost?.name || booking?.claimedBy?.name || '').trim();
+        const isKalpataru = /^kalpataru/i.test(assignedBdaName);
+        const targetWebhookUrl =
+          isKalpataru && DISCORD_MEET_KALPATARU_WEBHOOK_URL
+            ? DISCORD_MEET_KALPATARU_WEBHOOK_URL
+            : DISCORD_MEET_2MIN_WEBHOOK_URL;
+
+        const sendResult = await DiscordConnect(targetWebhookUrl, content, false);
         if (!sendResult.ok) {
           throw new Error(`Discord send failed: ${sendResult.error || 'unknown'}`);
         }
