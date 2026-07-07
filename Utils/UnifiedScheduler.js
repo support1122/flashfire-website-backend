@@ -565,18 +565,9 @@ export class UnifiedScheduler {
       const meetingTimeWall = formatMeetingWallTime(meetingStart, reminder.inviteeTimezone);
       const headline = headlineForSendTime(meetingStart);
 
-      const content = [
-        headline,
-        '',
-        `Client: ${reminder.clientName}`,
-        `Time: ${meetingTimeWall}`,
-        `Link: ${reminder.meetingLink || 'Not provided'}`,
-        '',
-        "BDA team, confirm attendance by typing **\"I'm in.\"** Let's close this.",
-      ].join('\n');
-
-      logReminderDrift('discord_bda', reminder.reminderId, reminder.scheduledFor);
-
+      // Resolve the assigned BDA up front — it both drives channel routing below
+      // and is shown in the message so the team can verify at a glance which BDA
+      // (and therefore which channel) a reminder belongs to.
       // Route to the Kalpataru channel when the assigned BDA's name starts with
       // "Kalpataru" (Calendly round-robin host, else manual CRM claim); otherwise
       // use the shared channel. Mirrors the legacy DiscordMeetReminderScheduler
@@ -590,11 +581,29 @@ export class UnifiedScheduler {
         bookingForRoute?.claimedBy?.name ||
         ''
       ).trim();
+      const assignedBdaLabel =
+        assignedBdaName ||
+        bookingForRoute?.calendlyHost?.email ||
+        bookingForRoute?.claimedBy?.email ||
+        'Not assigned';
       const isKalpataru = /^kalpataru/i.test(assignedBdaName);
       const targetWebhook =
         isKalpataru && DISCORD_MEET_KALPATARU_WEBHOOK
           ? DISCORD_MEET_KALPATARU_WEBHOOK
           : DISCORD_MEET_WEBHOOK;
+
+      const content = [
+        headline,
+        '',
+        `Client: ${reminder.clientName}`,
+        `Time: ${meetingTimeWall}`,
+        `Link: ${reminder.meetingLink || 'Not provided'}`,
+        `Assigned BDA: ${assignedBdaLabel}`,
+        '',
+        "BDA team, confirm attendance by typing **\"I'm in.\"** Let's close this.",
+      ].join('\n');
+
+      logReminderDrift('discord_bda', reminder.reminderId, reminder.scheduledFor);
 
       await DiscordConnect(targetWebhook, content, false);
 
