@@ -151,7 +151,7 @@ export async function pollForAbsentBDAs() {
             `**BDA:** ${bdaName} (${bdaEmail})\n` +
             `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
             `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
-            `_No response 60s after start. NOT marked absent — BDA may have forgotten. Needs review._`
+            `_No response 60s after start. Not marked absent yet — attendance will be auto-verified from Google Meet records after the meeting._`
           : `🚨 **NO BDA ASSIGNED — Meeting Started!**\n` +
             `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
             `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +

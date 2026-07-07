@@ -142,6 +142,18 @@ export class UnifiedScheduler {
       console.warn('[UnifiedScheduler] BDA absent scheduler not available:', e.message);
     }
 
+    // 5b. Meet API attendance sync (60s) — official join/leave data from
+    // Google's conference records; env-gated until DWD is authorized.
+    try {
+      const { pollMeetApiAttendance } = await import('./MeetAttendanceScheduler.js');
+      pollMeetApiAttendance().catch(() => {});
+      this.meetApiPollHandle = setInterval(() => {
+        pollMeetApiAttendance().catch(e => console.error('[UnifiedScheduler] Meet API poll error:', e.message));
+      }, 60000);
+    } catch (e) {
+      console.warn('[UnifiedScheduler] Meet attendance scheduler not available:', e.message);
+    }
+
     // 6. Campaign job processing (30s) — lower priority than reminders
     try {
       const { processDueJobs } = await import('./JobScheduler.js');
@@ -165,6 +177,7 @@ export class UnifiedScheduler {
 
     if (this.pollHandle) { clearInterval(this.pollHandle); this.pollHandle = null; }
     if (this.bdaPollHandle) { clearInterval(this.bdaPollHandle); this.bdaPollHandle = null; }
+    if (this.meetApiPollHandle) { clearInterval(this.meetApiPollHandle); this.meetApiPollHandle = null; }
     if (this.jobPollHandle) { clearInterval(this.jobPollHandle); this.jobPollHandle = null; }
     if (this.healHandle) { clearInterval(this.healHandle); this.healHandle = null; }
 

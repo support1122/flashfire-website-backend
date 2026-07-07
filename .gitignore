@@ -10,3 +10,6 @@ google-service-key.json
 env
 .env.o
 /.omc
+
+# Google service account keys — never commit
+flashfire-466710-*.json
