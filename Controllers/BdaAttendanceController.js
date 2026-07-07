@@ -281,7 +281,8 @@ async function closeBdaAttendanceSession({
       `**BDA:** ${bdaName} (${bdaEmail})\n` +
       `**Client:** ${booking?.clientName || 'Unknown'}\n` +
       `**Duration (total):** ${durationMin} min\n` +
-      `**Left At:** ${formatIST(leaveTime)}`;
+      `**Left At:** ${formatIST(leaveTime)}\n` +
+      `_Source: extension (live detection) — final times verified from Google Meet records after the meeting_`;
 
     await sendDurationDiscord(message);
   }
@@ -613,7 +614,7 @@ export async function verifyBdaOtp(req, res) {
     const emailLocalPart = email.split('@')[0];
     const needsName = isNewUser || !user.name || user.name === emailLocalPart;
 
-    // Issue 90-day JWT for BDA extension
+    // Issue 30-day JWT for BDA extension
     const token = jwt.sign(
       {
         role: 'bda_extension',
@@ -621,13 +622,13 @@ export async function verifyBdaOtp(req, res) {
         name: displayName,
       },
       getCrmJwtSecret(),
-      { expiresIn: '90d' }
+      { expiresIn: '30d' }
     );
 
     return res.status(200).json({
       success: true,
       token,
-      expiresIn: '90d',
+      expiresIn: '30d',
       bda: { name: displayName, email: user.email },
       needsName,
     });
@@ -663,7 +664,7 @@ export async function updateBdaName(req, res) {
     const newToken = jwt.sign(
       { role: 'bda_extension', email: user.email, name },
       getCrmJwtSecret(),
-      { expiresIn: '90d' }
+      { expiresIn: '30d' }
     );
 
     return res.status(200).json({
@@ -765,6 +766,11 @@ export async function getMyMeetings(req, res) {
           // Null while in-progress (no completed segment yet) so the UI shows "—"
           // instead of a misleading "0 min"; cumulative default 0 must not surface.
           durationMs: a.durationMs ?? (a.cumulativeDurationMs > 0 ? a.cumulativeDurationMs : null),
+          // ---- Meet REST API fields (present when source === 'meet_api') ----
+          lateByMs: a.lateByMs ?? null,
+          sessions: Array.isArray(a.sessions) ? a.sessions : [],
+          participantsAtJoin: Array.isArray(a.participantsAtJoin) ? a.participantsAtJoin : [],
+          meetApiFinalized: Boolean(a.meetApiFinalizedAt),
         },
       ])
     );
@@ -942,7 +948,8 @@ export async function reportJoin(req, res) {
         `**Client:** ${booking.clientName}\n` +
         `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
         `**Meet Link:** ${meetLink || 'N/A'}\n` +
-        `**Joined At:** ${formatIST(joinDate)}`;
+        `**Joined At:** ${formatIST(joinDate)}\n` +
+        `_Source: extension (live detection) — final times verified from Google Meet records after the meeting_`;
 
       await sendPresentDiscord(message);
       await BdaAttendanceModel.updateOne({ _id: doc._id }, { discordNotified: true });

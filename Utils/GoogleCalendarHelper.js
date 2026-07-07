@@ -1,20 +1,45 @@
+import fs from 'fs';
 import { google } from 'googleapis';
 import { Logger } from './Logger.js';
 
 function getJwtClient() {
-  const clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
+  let clientEmail = process.env.GOOGLE_CLIENT_EMAIL;
   let privateKey = process.env.GOOGLE_PRIVATE_KEY;
+
+  // Preferred: whole JSON key in one env var, or a key file path
+  // (same credential sources as MeetApiHelper).
+  const inlineJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_JSON;
+  const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE;
+  if (inlineJson) {
+    try {
+      const parsed = JSON.parse(inlineJson);
+      clientEmail = parsed.client_email;
+      privateKey = parsed.private_key;
+    } catch (e) {
+      Logger.warn('GOOGLE_SERVICE_ACCOUNT_KEY_JSON is not valid JSON', { error: e?.message });
+    }
+  } else if (keyFile && fs.existsSync(keyFile)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(keyFile, 'utf8'));
+      clientEmail = parsed.client_email;
+      privateKey = parsed.private_key;
+    } catch (e) {
+      Logger.warn('Failed to read GOOGLE_SERVICE_ACCOUNT_KEY_FILE', { error: e?.message });
+    }
+  }
+
   if (!clientEmail || !privateKey) {
     return null;
   }
   // Replace escaped newlines if present
   privateKey = privateKey.replace(/\\n/g, '\n');
-  return new google.auth.JWT(
-    clientEmail,
-    null,
-    privateKey,
-    ['https://www.googleapis.com/auth/calendar.readonly']
-  );
+  // NOTE: positional JWT args are broken in this google-auth-library version
+  // ("No key or keyFile set") — always use the options object.
+  return new google.auth.JWT({
+    email: clientEmail,
+    key: privateKey,
+    scopes: ['https://www.googleapis.com/auth/calendar.readonly'],
+  });
 }
 
 export async function isEventPresent({ calendarId, eventStartISO, inviteeEmail, windowMinutes = 15 }) {

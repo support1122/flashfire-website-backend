@@ -250,6 +250,7 @@ import { scheduleCall, cancelCall, getSchedulerStats, getUpcomingCalls } from '.
 import { scheduleDiscordMeetReminder } from './Utils/DiscordMeetReminderScheduler.js';
 import { getRescheduleLinkForBooking } from './Utils/CalendlyAPIHelper.js';
 import watiService from './Utils/WatiService.js';
+import { APP_VERSION, APP_VERSION_NOTE } from './config/version.js';
 
 // -------------------- Express Setup --------------------
 const app = express();
@@ -992,6 +993,16 @@ app.post('/send/temp', async (req, res) => {
 // -------------------- Base Route --------------------
 app.get("/", (req, res) => {
   res.send("FlashFire API is up and running 🚀");
+});
+
+// -------------------- Build Version --------------------
+// Bump config/version.js on every deploy; hit this to confirm which build is live.
+app.get('/api/get-version', (req, res) => {
+  res.status(200).json({
+    success: true,
+    version: APP_VERSION,
+    note: APP_VERSION_NOTE,
+  });
 });
 
 // -------------------- GeoIP Route --------------------

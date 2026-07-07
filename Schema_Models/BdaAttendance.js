@@ -64,8 +64,10 @@ const BdaAttendanceSchema = new mongoose.Schema(
     },
 
     source: {
+      // "meet_api" = written from Google's Meet REST API conference records
+      // (server-side, authoritative). Wins over extension DOM detection.
       type: String,
-      enum: ["auto", "manual", "scheduler"],
+      enum: ["auto", "manual", "scheduler", "meet_api"],
       required: true,
     },
 
@@ -125,6 +127,57 @@ const BdaAttendanceSchema = new mongoose.Schema(
 
     lastEndMeetLink: {
       type: String,
+      default: null,
+    },
+
+    // ---- Google Meet REST API fields (source: meet_api) ----
+
+    /** conferenceRecords/{id} this attendance was reconciled against */
+    conferenceRecordName: {
+      type: String,
+      default: null,
+    },
+
+    /** firstJoinedAt - scheduledStart (negative = joined early) */
+    lateByMs: {
+      type: Number,
+      default: null,
+    },
+
+    /** Every join/leave segment from participantSessions (authoritative) */
+    sessions: {
+      type: [
+        {
+          _id: false,
+          startTime: { type: Date, default: null },
+          endTime: { type: Date, default: null },
+          durationMs: { type: Number, default: 0 },
+        },
+      ],
+      default: [],
+    },
+
+    /** Who was already in the call when the BDA first joined */
+    participantsAtJoin: {
+      type: [
+        {
+          _id: false,
+          displayName: { type: String, default: null },
+          kind: { type: String, default: null }, // signedin | anonymous | phone
+        },
+      ],
+      default: [],
+    },
+
+    /** Last successful Meet API sync for this row */
+    meetApiSyncedAt: {
+      type: Date,
+      default: null,
+    },
+
+    /** Set once the conference ended and final numbers were written */
+    meetApiFinalizedAt: {
+      type: Date,
       default: null,
     },
   },
