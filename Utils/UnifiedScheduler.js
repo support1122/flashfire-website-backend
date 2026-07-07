@@ -42,13 +42,6 @@ const DISCORD_MEET_WEBHOOK =
   process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL ||
   null;
 
-// Meetings assigned to a BDA whose name starts with "Kalpataru" route to a
-// dedicated Discord channel. Env can override; the hardcoded URL is the default
-// so the channel keeps working even when the env var is missing on a deploy.
-const DISCORD_MEET_KALPATARU_WEBHOOK =
-  process.env.DISCORD_MEET_KALPATARU_WEBHOOK_URL ||
-  'https://discord.com/api/webhooks/1523575499454939307/i_ESYLBr2ADfKJlB_Owb0aFub1LRivpN1us8Xrbf0vIFKB-TsK8RQefcG3PTDRjojgat';
-
 export class UnifiedScheduler {
   constructor() {
     this.timers = new Map();
@@ -578,13 +571,8 @@ export class UnifiedScheduler {
       const meetingTimeWall = formatMeetingWallTime(meetingStart, reminder.inviteeTimezone);
       const headline = headlineForSendTime(meetingStart);
 
-      // Resolve the assigned BDA up front — it both drives channel routing below
-      // and is shown in the message so the team can verify at a glance which BDA
-      // (and therefore which channel) a reminder belongs to.
-      // Route to the Kalpataru channel when the assigned BDA's name starts with
-      // "Kalpataru" (Calendly round-robin host, else manual CRM claim); otherwise
-      // use the shared channel. Mirrors the legacy DiscordMeetReminderScheduler
-      // routing — this precision path is the one that actually wins the claim.
+      // Resolve the assigned BDA so the message can show who this meeting belongs
+      // to — every reminder goes to the one shared channel (DISCORD_MEET_WEBHOOK).
       const bookingForRoute =
         (bIdDisc && bookingMap.byId.get(bIdDisc)) ||
         ((reminder.clientEmail || '') && bookingMap.byEmail.get(String(reminder.clientEmail).toLowerCase().trim())) ||
@@ -599,11 +587,7 @@ export class UnifiedScheduler {
         bookingForRoute?.calendlyHost?.email ||
         bookingForRoute?.claimedBy?.email ||
         'Not assigned';
-      const isKalpataru = /^kalpataru/i.test(assignedBdaName);
-      const targetWebhook =
-        isKalpataru && DISCORD_MEET_KALPATARU_WEBHOOK
-          ? DISCORD_MEET_KALPATARU_WEBHOOK
-          : DISCORD_MEET_WEBHOOK;
+      const targetWebhook = DISCORD_MEET_WEBHOOK;
 
       const content = [
         headline,
