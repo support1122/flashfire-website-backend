@@ -12,6 +12,7 @@ import { CrmTrustedDeviceModel } from '../Schema_Models/CrmTrustedDeviceModel.js
 import { computeDeviceKey } from '../Utils/DeviceKey.js';
 import { requestCrmOtp, verifyCrmOtp, getLoginApprovalStatus } from '../Controllers/CrmAuthController.js';
 import { listPendingLoginApprovals, approveLoginApproval, denyLoginApproval } from '../Controllers/CrmLoginApprovalController.js';
+import { adminRevokeSession } from '../Controllers/CrmSessionController.js';
 import { setOtp, getOtp } from '../Utils/CrmOtpCache.js';
 import crypto from 'crypto';
 
@@ -69,6 +70,7 @@ before(async () => {
   app.get('/api/crm/admin/login-approvals', requireCrmAdmin, listPendingLoginApprovals);
   app.post('/api/crm/admin/login-approvals/:approvalId/approve', requireCrmAdmin, approveLoginApproval);
   app.post('/api/crm/admin/login-approvals/:approvalId/deny', requireCrmAdmin, denyLoginApproval);
+  app.post('/api/crm/admin/sessions/:sessionId/revoke', requireCrmAdmin, adminRevokeSession);
 
   await new Promise((resolve) => { server = app.listen(0, resolve); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
@@ -388,5 +390,83 @@ describe('Admin role bypasses the approval gate entirely', () => {
     const body = await res.json();
     assert.equal(body.pendingApproval, undefined);
     assert.ok(body.token, 'admin-role users must never be gated by device approval');
+  });
+});
+
+describe('Revoking a session also un-trusts the device', () => {
+  it('after an admin revokes a BDA session, the same device must go through approval again on next login', async () => {
+    // First login + approval — establishes trust.
+    seedOtp(TEST_BDA_EMAIL, '818181');
+    const firstVerify = await fetch(`${baseUrl}/api/crm/auth/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': CHROME_MAC_UA, 'X-Forwarded-For': '6.6.6.6' },
+      body: JSON.stringify({ email: TEST_BDA_EMAIL, otp: '818181' }),
+    });
+    const { approvalId } = await firstVerify.json();
+    const adminToken = signAdminToken();
+    await fetch(`${baseUrl}/api/crm/admin/login-approvals/${approvalId}/approve`, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}` } });
+
+    const deviceKey = computeDeviceKey(CHROME_MAC_UA, '6.6.6.6');
+    const trustedBefore = await CrmTrustedDeviceModel.findOne({ email: TEST_BDA_EMAIL, deviceKey });
+    assert.ok(trustedBefore, 'sanity check: device should be trusted after approval');
+
+    // Confirm the session created by approval carries the same deviceKey.
+    const session = await CrmSessionModel.findOne({ email: TEST_BDA_EMAIL }).sort({ createdAt: -1 });
+    assert.equal(session.deviceKey, deviceKey);
+
+    // Admin revokes that session.
+    const revokeRes = await fetch(`${baseUrl}/api/crm/admin/sessions/${session.sessionId}/revoke`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    assert.equal(revokeRes.status, 200);
+
+    // Trust should now be gone.
+    const trustedAfter = await CrmTrustedDeviceModel.findOne({ email: TEST_BDA_EMAIL, deviceKey });
+    assert.equal(trustedAfter, null, 'revoking the session must remove device trust');
+
+    // Logging in again from the exact same device must be gated again, not instant.
+    seedOtp(TEST_BDA_EMAIL, '818182');
+    const secondVerify = await fetch(`${baseUrl}/api/crm/auth/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': CHROME_MAC_UA, 'X-Forwarded-For': '6.6.6.6' },
+      body: JSON.stringify({ email: TEST_BDA_EMAIL, otp: '818182' }),
+    });
+    const secondBody = await secondVerify.json();
+    assert.equal(secondBody.pendingApproval, true, 'device must require fresh approval after its trust was revoked');
+  });
+
+  it('revoking one session does not untrust a different device for the same BDA', async () => {
+    // Device A: login + approve.
+    seedOtp(TEST_BDA_EMAIL, '919191');
+    const verifyA = await fetch(`${baseUrl}/api/crm/auth/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': CHROME_MAC_UA, 'X-Forwarded-For': '7.7.7.7' },
+      body: JSON.stringify({ email: TEST_BDA_EMAIL, otp: '919191' }),
+    });
+    const { approvalId: approvalA } = await verifyA.json();
+    const adminToken = signAdminToken();
+    await fetch(`${baseUrl}/api/crm/admin/login-approvals/${approvalA}/approve`, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}` } });
+
+    // Device B (different browser): login + approve.
+    seedOtp(TEST_BDA_EMAIL, '929292');
+    const verifyB = await fetch(`${baseUrl}/api/crm/auth/verify-otp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': FIREFOX_WIN_UA, 'X-Forwarded-For': '7.7.7.7' },
+      body: JSON.stringify({ email: TEST_BDA_EMAIL, otp: '929292' }),
+    });
+    const { approvalId: approvalB } = await verifyB.json();
+    await fetch(`${baseUrl}/api/crm/admin/login-approvals/${approvalB}/approve`, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}` } });
+
+    const deviceKeyA = computeDeviceKey(CHROME_MAC_UA, '7.7.7.7');
+    const deviceKeyB = computeDeviceKey(FIREFOX_WIN_UA, '7.7.7.7');
+
+    const sessionA = await CrmSessionModel.findOne({ email: TEST_BDA_EMAIL, deviceKey: deviceKeyA });
+    await fetch(`${baseUrl}/api/crm/admin/sessions/${sessionA.sessionId}/revoke`, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}` } });
+
+    const trustedA = await CrmTrustedDeviceModel.findOne({ email: TEST_BDA_EMAIL, deviceKey: deviceKeyA });
+    const trustedB = await CrmTrustedDeviceModel.findOne({ email: TEST_BDA_EMAIL, deviceKey: deviceKeyB });
+    assert.equal(trustedA, null, 'revoked device should be untrusted');
+    assert.ok(trustedB, 'the other, unrevoked device should remain trusted');
   });
 });

@@ -1,4 +1,12 @@
 import { CrmSessionModel } from "../Schema_Models/CrmSessionModel.js";
+import { CrmTrustedDeviceModel } from "../Schema_Models/CrmTrustedDeviceModel.js";
+
+// Revoking a session also un-trusts the device it came from, so the next login
+// from that device requires fresh admin approval rather than logging back in instantly.
+async function untrustDeviceForSession(doc) {
+  if (!doc.deviceKey) return;
+  await CrmTrustedDeviceModel.deleteOne({ email: doc.email, deviceKey: doc.deviceKey });
+}
 
 function toSessionView(doc, currentSessionId) {
   return {
@@ -46,6 +54,7 @@ export const revokeMySession = async (req, res) => {
     doc.revoked = true;
     doc.revokedAt = new Date();
     await doc.save();
+    await untrustDeviceForSession(doc);
 
     return res.status(200).json({ success: true });
   } catch (error) {
@@ -75,6 +84,7 @@ export const adminRevokeSession = async (req, res) => {
     doc.revoked = true;
     doc.revokedAt = new Date();
     await doc.save();
+    await untrustDeviceForSession(doc);
 
     return res.status(200).json({ success: true });
   } catch (error) {
