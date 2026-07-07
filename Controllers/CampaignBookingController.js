@@ -18,7 +18,29 @@ import { sendScheduleEvent } from '../Services/FacebookConversionAPI.js';
 import { sendScheduleEvent as sendGoogleAdsScheduleEvent } from '../Services/GoogleAdsConversionAPI.js';
 import { sendScheduleEvent as sendLinkedInScheduleEvent } from '../Services/LinkedInConversionAPI.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
-import { crmUserMetaLeadsOnly } from '../Middlewares/CrmAuth.js';
+import { crmUserMetaLeadsOnly, crmUserBdaOwnEmailScope } from '../Middlewares/CrmAuth.js';
+
+/**
+ * Restricts a leads query to the requesting BDA's own assigned leads, while still
+ * showing leads with no resolved calendlyHost (so nothing becomes invisible to
+ * everyone just because it predates round-robin Calendly scheduling, or came in
+ * as a Meta lead that never got a host resolved).
+ * No-op (returns matchQuery unchanged) for admins.
+ */
+function applyBdaOwnLeadScope(matchQuery, req) {
+  const ownEmail = crmUserBdaOwnEmailScope(req);
+  if (!ownEmail) return matchQuery;
+
+  matchQuery.$and = matchQuery.$and || [];
+  matchQuery.$and.push({
+    $or: [
+      { 'calendlyHost.email': caseInsensitiveExact(ownEmail) },
+      { 'calendlyHost.email': { $in: [null, ''] } },
+      { calendlyHost: { $exists: false } },
+    ],
+  });
+  return matchQuery;
+}
 
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibility.js';
@@ -2076,10 +2098,12 @@ export const getLeadsPaginated = async (req, res) => {
       });
     }
 
+    applyBdaOwnLeadScope(matchQuery, req);
+
     // For Meta leads (meta_lead_ad), show ALL leads including duplicates
     // For other leads, group by email/phone to show unique leads only
     const isMetaLeadsOnly = utmSource === 'meta_lead_ad';
-    
+
     const pipeline = [
       { $match: matchQuery },
       {
@@ -2415,6 +2439,8 @@ export const getLeadsIds = async (req, res) => {
         ]
       });
     }
+
+    applyBdaOwnLeadScope(matchQuery, req);
 
     const idsPipeline = [
       { $match: matchQuery },
@@ -2914,6 +2940,8 @@ export const getLeadsAnalytics = async (req, res) => {
         ]
       });
     }
+
+    applyBdaOwnLeadScope(matchQuery, req);
 
     // Qualification add-fields expression (reusable)
     const qualExpr = {
