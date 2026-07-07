@@ -38,6 +38,7 @@ export async function issueCrmSessionAndToken({ user, ip, countryCode, country, 
     await CrmSessionModel.create({
       sessionId,
       email: user.email,
+      deviceKey: computeDeviceKey(userAgent, ip),
       ip: ip || '',
       countryCode,
       country,

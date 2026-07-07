@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 const CrmSessionSchema = new mongoose.Schema({
   sessionId: { type: String, required: true, unique: true, index: true },
   email: { type: String, required: true, index: true },
+  deviceKey: { type: String },
   ip: { type: String },
   countryCode: { type: String },
   country: { type: String },
