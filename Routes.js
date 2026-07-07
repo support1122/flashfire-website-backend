@@ -74,7 +74,6 @@ import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhoo
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
 import { handleStripeWebhook } from "./Controllers/StripeWebhookController.js";
 import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController.js";
-import { handleZoomPhoneWebhook } from "./Controllers/ZoomPhoneWebhookController.js";
 import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
 // BDA Attendance Controllers
 import {
@@ -170,6 +169,9 @@ import {
   getZoomWebhookEvents,
   triggerZoomSync,
   getNoShowLeadsWithoutCalls,
+  getCallerNumbers,
+  getLiveCallForLead,
+  getAgentPresence,
 } from './Controllers/ZoomPhoneController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
@@ -271,6 +273,12 @@ export default function Routes(app) {
   app.get('/api/crm/call-logs', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallsForLead);
   app.get('/api/crm/call-logs/recent', requireCrmUser, requireCrmPermission('phone_calls'), getRecentCalls);
   app.post('/api/crm/call-logs/sync', requireCrmUser, requireCrmPermission('phone_calls'), triggerZoomSync);
+  // Outbound "call from which number" picker: the agent's allowed caller-IDs + live status.
+  app.get('/api/crm/zoom-phone/numbers', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getCallerNumbers);
+  // Live call status right after dialing (polled by the CRM call button).
+  app.get('/api/crm/call-logs/live', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getLiveCallForLead);
+  // Agent availability (cached Zoom presence / on-call state).
+  app.get('/api/crm/agents/:email/presence', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'all_data', 'phone_calls']), getAgentPresence);
   app.get('/api/crm/phone-gaps/no-show', requireCrmUser, requireCrmAnyPermission(['leads', 'phone_calls', 'meta_leads']), getNoShowLeadsWithoutCalls);
   app.get('/api/crm/call-logs/:callId/recording', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallRecording);
   app.get('/api/crm/call-logs/:callId/transcript', requireCrmUser, requireCrmPermission('phone_calls'), proxyCallTranscript);
@@ -444,8 +452,8 @@ export default function Routes(app) {
   app.post('/api/webhooks/meta-leads', handleMetaLeadWebhook); // Receive Meta Lead Ad submissions (POST)
   app.post('/api/meta-leads/manual', createMetaLeadManually); // Manually create Meta lead (for testing)
   app.post('/meta-leads-from-sheet', upsertMetaLeadFromSheet); // Google Apps Script / Sheets → MongoDB upsert by metaLeadId
-  // Zoom Phone Webhooks
-  app.post('/api/zoom-phone/webhook', handleZoomPhoneWebhook); // Zoom Phone: URL validation + call events (ringing, completed, missed, recordings, transcripts)
+  // Zoom Phone webhook is registered once above (zoomPhoneWebhook) — the duplicate
+  // stub handler that previously lived here was dead code (never reached) and was removed.
   // Fireflies Webhooks (DISABLED - Fireflies integration removed)
   // app.post('/api/webhooks/fireflies', express.raw({ type: 'application/json' }), (req, res, next) => {
   //   try {

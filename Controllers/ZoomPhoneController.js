@@ -1,11 +1,13 @@
 import { CallLogModel } from '../Schema_Models/CallLog.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { ZoomWebhookEventModel } from '../Schema_Models/ZoomWebhookEvent.js';
+import { ZoomUserPresenceModel } from '../Schema_Models/ZoomUserPresence.js';
 import {
   normalizePhone,
   verifyZoomSignature,
   buildUrlValidationResponse,
   getZoomAccessToken,
+  getAllowedCallerNumbersForAgent,
 } from '../Utils/ZoomPhone.js';
 import { syncZoomCallHistory } from '../Utils/ZoomPhoneSync.js';
 
@@ -76,6 +78,24 @@ export const zoomPhoneWebhook = async (req, res) => {
     const event = req.body?.event;
     const payload = req.body?.payload || {};
 
+    // 2b. Presence updates carry no call_id — handle and return early.
+    if (event === 'user.presence_status_updated') {
+      const pobj = payload.object || {};
+      const pEmail = pobj.email || pobj.user_email || null;
+      const pStatus = pobj.presence_status || pobj.status || null;
+      if (pEmail) {
+        await ZoomUserPresenceModel.updateOne(
+          { email: String(pEmail).toLowerCase() },
+          { $set: { presenceStatus: pStatus, lastPresenceEventAt: new Date() } },
+          { upsert: true }
+        );
+      }
+      debug.handled = true;
+      debug.handlerNote = `presence updated (${pEmail}=${pStatus})`;
+      await persistDebug();
+      return res.status(200).json({ ok: true });
+    }
+
     // 3. Persist the call event. Different Zoom events use slightly different
     // payload shapes — we pick the relevant fields and upsert by callId.
     const obj = payload.object || {};
@@ -107,10 +127,11 @@ export const zoomPhoneWebhook = async (req, res) => {
     // Map Zoom event types to our internal status.
     let status = 'unknown';
     if (event?.includes('ringing')) status = 'ringing';
-    else if (event?.includes('answered')) status = 'answered';
+    else if (event?.includes('answered') || event?.includes('connected')) status = 'answered';
     else if (event?.includes('missed')) status = 'missed';
     else if (event?.includes('voicemail')) status = 'voicemail';
     else if (event?.includes('call_log_completed')) status = obj.result === 'No Answer' ? 'missed' : 'completed';
+    else if (event?.includes('_ended')) status = 'completed';
 
     const durationSec = Number(obj.duration ?? obj.call_duration ?? 0) || 0;
     const startedAt = obj.start_time ? new Date(obj.start_time) : (obj.date_time ? new Date(obj.date_time) : null);
@@ -171,6 +192,27 @@ export const zoomPhoneWebhook = async (req, res) => {
       { $set: update, $setOnInsert: { callId } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    // Keep the agent's on-call state in sync from the connected/ended events.
+    // "connected" (or ringing) => on a call; ended/completed/missed => free.
+    if (salesEmail) {
+      const emailLc = String(salesEmail).toLowerCase();
+      if (event?.includes('connected') || status === 'answered' || status === 'ringing') {
+        await ZoomUserPresenceModel.updateOne(
+          { email: emailLc },
+          { $set: { onCall: true, activeCallId: callId, lastCallEventAt: new Date() } },
+          { upsert: true }
+        );
+      } else if (event?.includes('_ended') || ['completed', 'missed', 'voicemail', 'cancelled', 'busy'].includes(status)) {
+        // Only clear if this is the call we think is active (avoid a late ended
+        // event for an old call wiping a freshly-started one).
+        await ZoomUserPresenceModel.updateOne(
+          { email: emailLc, $or: [{ activeCallId: callId }, { activeCallId: null }] },
+          { $set: { onCall: false, activeCallId: null, lastCallEventAt: new Date() } },
+          { upsert: true }
+        );
+      }
+    }
 
     debug.handled = true;
     debug.handlerNote = `CallLog upserted (status=${status}, bookingMatched=${!!bookingId})`;
@@ -468,6 +510,107 @@ export const proxyCallTranscript = async (req, res) => {
     return res.status(200).send(out.join('\n').trim());
   } catch (error) {
     console.error('[ZoomPhone] proxyCallTranscript error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * List the phone numbers the current agent may place calls from (their outbound
+ * caller-ID options), each annotated with whether the line is live/assigned.
+ * Resolves via the live Zoom API with a static config fallback.
+ *
+ * GET /api/crm/zoom-phone/numbers
+ */
+export const getCallerNumbers = async (req, res) => {
+  try {
+    // Prefer the authenticated agent's email; allow an explicit override for admins/testing.
+    const email = req.crmUser?.email || req.query.agentEmail || null;
+    const result = await getAllowedCallerNumbersForAgent(email);
+    return res.status(200).json({ success: true, ...result });
+  } catch (error) {
+    console.error('[ZoomPhone] getCallerNumbers error:', error);
+    // Never hard-fail the picker — return empty so the UI can still dial without a caller ID.
+    return res.status(200).json({ success: true, numbers: [], source: 'none', error: error.message });
+  }
+};
+
+/**
+ * The most recent in-flight call for a lead phone (optionally scoped to the
+ * calling agent), used by the CRM to show live call status right after dialing.
+ * "In flight" = started within the last few minutes and not yet ended.
+ *
+ * GET /api/crm/call-logs/live?phone=+1...&agentEmail=...&windowSec=180
+ */
+export const getLiveCallForLead = async (req, res) => {
+  try {
+    const { phone, agentEmail } = req.query;
+    const n = normalizePhone(phone);
+    if (!n) return res.status(400).json({ success: false, error: 'phone required' });
+
+    const windowSec = Math.min(parseInt(req.query.windowSec || '180', 10), 900);
+    const since = new Date(Date.now() - windowSec * 1000);
+
+    const q = {
+      leadNumberNormalized: n,
+      // Match rows created or started within the window (webhook rows may set
+      // startedAt slightly after createdAt).
+      $or: [{ startedAt: { $gte: since } }, { createdAt: { $gte: since } }],
+    };
+    if (agentEmail) q.salesEmail = String(agentEmail).toLowerCase();
+
+    const call = await CallLogModel.findOne(q)
+      .sort({ startedAt: -1, createdAt: -1 })
+      .select('callId direction status startedAt answeredAt endedAt durationSec salesEmail leadNumber')
+      .lean();
+
+    if (!call) return res.status(200).json({ success: true, active: false, call: null });
+
+    const ended = ['completed', 'missed', 'voicemail', 'cancelled', 'busy'].includes(call.status);
+    return res.status(200).json({ success: true, active: !ended, call });
+  } catch (error) {
+    console.error('[ZoomPhone] getLiveCallForLead error:', error);
+    return res.status(500).json({ success: false, error: error.message });
+  }
+};
+
+/**
+ * Cached Zoom presence / on-call state for an agent.
+ * GET /api/crm/agents/:email/presence
+ * Returns { status: 'available'|'busy'|'on_call'|'away'|'offline'|'unknown', onCall, presenceStatus }.
+ */
+export const getAgentPresence = async (req, res) => {
+  try {
+    const email = String(req.params.email || '').toLowerCase().trim();
+    if (!email) return res.status(400).json({ success: false, error: 'email required' });
+
+    const row = await ZoomUserPresenceModel.findOne({ email }).lean();
+    if (!row) {
+      return res.status(200).json({ success: true, email, status: 'unknown', onCall: false, presenceStatus: null });
+    }
+
+    // Derive a simple status. On-call (from phone webhooks) always wins.
+    let status = 'unknown';
+    if (row.onCall) status = 'on_call';
+    else {
+      const p = String(row.presenceStatus || '').toLowerCase();
+      if (p.includes('do_not_disturb') || p.includes('busy') || p.includes('presenting') || p.includes('in_meeting') || p.includes('phone')) status = 'busy';
+      else if (p.includes('available')) status = 'available';
+      else if (p.includes('away')) status = 'away';
+      else if (p.includes('offline')) status = 'offline';
+      else if (p) status = 'available';
+    }
+
+    return res.status(200).json({
+      success: true,
+      email,
+      status,
+      onCall: !!row.onCall,
+      presenceStatus: row.presenceStatus || null,
+      activeCallId: row.activeCallId || null,
+      updatedAt: row.updatedAt,
+    });
+  } catch (error) {
+    console.error('[ZoomPhone] getAgentPresence error:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
