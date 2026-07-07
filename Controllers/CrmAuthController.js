@@ -25,6 +25,10 @@ export async function issueCrmSessionAndToken({ user, ip, countryCode, country, 
   const token = jwt.sign(
     {
       role: 'crm_user',
+      // Distinct from the `role` claim above (which is the auth-role used by
+      // requireCrmUser/requireCrmAdmin) — this carries the CrmUser.role value
+      // (admin/bda) so per-request BDA scoping can read it without a DB lookup.
+      bdaRole: user.role || 'bda',
       email: user.email,
       name: user.name,
       permissions: user.permissions || [],
