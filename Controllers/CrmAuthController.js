@@ -1,9 +1,68 @@
 import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
+import { CrmSessionModel } from '../Schema_Models/CrmSessionModel.js';
+import { CrmLoginApprovalModel } from '../Schema_Models/CrmLoginApprovalModel.js';
+import { CrmTrustedDeviceModel } from '../Schema_Models/CrmTrustedDeviceModel.js';
 import { sendCrmOtpEmail } from '../Utils/SendGridHelper.js';
 import { deleteOtp, decrementAttempts, getOtp, setOtp, getOtpCacheStats } from '../Utils/CrmOtpCache.js';
 import { getCrmJwtSecret } from '../Middlewares/CrmAuth.js';
+import { getClientIp, detectCountryFromIp } from '../Utils/GeoIP.js';
+import { parseUserAgent } from '../Utils/UserAgentParser.js';
+import { computeDeviceKey } from '../Utils/DeviceKey.js';
+
+/**
+ * Issues a CRM JWT + session record for a fully-authenticated user (OTP verified,
+ * and — for BDAs — device already trusted or just approved by an admin).
+ * Shared by the direct-login path and the "approval just granted" path so both
+ * produce an identical session record.
+ */
+export async function issueCrmSessionAndToken({ user, ip, countryCode, country, browser, os, deviceType, userAgent, rememberMe }) {
+  const expiresIn = rememberMe ? '30d' : '7d';
+  const expiresMs = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 7 * 24 * 60 * 60 * 1000;
+  const sessionId = crypto.randomUUID();
+
+  const token = jwt.sign(
+    {
+      role: 'crm_user',
+      email: user.email,
+      name: user.name,
+      permissions: user.permissions || [],
+      sessionId,
+    },
+    getCrmJwtSecret(),
+    { expiresIn }
+  );
+
+  try {
+    await CrmSessionModel.create({
+      sessionId,
+      email: user.email,
+      ip: ip || '',
+      countryCode,
+      country,
+      browser,
+      os,
+      deviceType,
+      userAgent: userAgent || '',
+      lastSeenAt: new Date(),
+      expiresAt: new Date(Date.now() + expiresMs),
+    });
+  } catch (sessionError) {
+    // Session bookkeeping must never block a successful login.
+    console.error('CRM session creation error:', sessionError?.message || sessionError);
+  }
+
+  return {
+    token,
+    user: {
+      email: user.email,
+      name: user.name,
+      permissions: user.permissions || [],
+      role: user.role || 'bda',
+    },
+  };
+}
 
 function normalizeEmail(email) {
   return String(email || '').trim().toLowerCase();
@@ -90,31 +149,91 @@ export async function verifyCrmOtp(req, res) {
       return res.status(403).json({ success: false, error: 'User not authorized' });
     }
 
-    const expiresIn = rememberMe ? '30d' : '7d';
+    const ip = getClientIp(req);
+    const { countryCode, country } = detectCountryFromIp(ip);
+    const { browser, os, deviceType } = parseUserAgent(req.headers['user-agent']);
+    const userAgent = req.headers['user-agent'] || '';
 
-    const token = jwt.sign(
-      {
-        role: 'crm_user',
-        email: user.email,
-        name: user.name,
-        permissions: user.permissions || [],
-      },
-      getCrmJwtSecret(),
-      { expiresIn }
-    );
+    // Admins bypass the device-approval gate entirely; only BDAs are gated.
+    if (user.role === 'bda') {
+      const deviceKey = computeDeviceKey(userAgent, ip);
+      const trusted = await CrmTrustedDeviceModel.findOne({ email: user.email, deviceKey }).lean();
 
-    return res.status(200).json({
-      success: true,
-      token,
-      user: {
-        email: user.email,
-        name: user.name,
-        permissions: user.permissions || [],
-        role: user.role || 'bda',
-      },
+      if (!trusted) {
+        const sessionId = crypto.randomUUID();
+        await CrmLoginApprovalModel.create({
+          email: user.email,
+          name: user.name,
+          deviceKey,
+          sessionId,
+          ip: ip || '',
+          countryCode,
+          country,
+          browser,
+          os,
+          deviceType,
+          userAgent,
+          status: 'pending',
+          expiresIn: rememberMe ? '30d' : '7d',
+        });
+
+        return res.status(200).json({
+          success: true,
+          pendingApproval: true,
+          approvalId: sessionId,
+          message: 'New device detected. Waiting for admin approval.',
+        });
+      }
+    }
+
+    const result = await issueCrmSessionAndToken({
+      user, ip, countryCode, country, browser, os, deviceType, userAgent, rememberMe,
     });
+
+    return res.status(200).json({ success: true, ...result });
   } catch (error) {
     console.error('CRM OTP verify error:', error?.message || error);
+    return res.status(500).json({ success: false, error: 'Server error' });
+  }
+}
+
+export async function getLoginApprovalStatus(req, res) {
+  try {
+    const { approvalId } = req.params;
+    const approval = await CrmLoginApprovalModel.findOne({ sessionId: approvalId });
+    if (!approval) return res.status(404).json({ success: false, error: 'Approval request not found' });
+
+    if (approval.status === 'pending') {
+      return res.status(200).json({ success: true, status: 'pending' });
+    }
+
+    if (approval.status === 'denied') {
+      return res.status(200).json({ success: true, status: 'denied' });
+    }
+
+    // approved — but only hand out the token once; approval doc is consumed on first poll hit.
+    if (approval.status === 'approved' && approval.issuedToken) {
+      const token = approval.issuedToken;
+      approval.issuedToken = undefined;
+      await approval.save();
+
+      const user = await CrmUserModel.findOne({ email: approval.email }).lean();
+      return res.status(200).json({
+        success: true,
+        status: 'approved',
+        token,
+        user: {
+          email: user.email,
+          name: user.name,
+          permissions: user.permissions || [],
+          role: user.role || 'bda',
+        },
+      });
+    }
+
+    return res.status(200).json({ success: true, status: 'approved' });
+  } catch (error) {
+    console.error('CRM login approval status error:', error?.message || error);
     return res.status(500).json({ success: false, error: 'Server error' });
   }
 }

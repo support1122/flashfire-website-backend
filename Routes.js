@@ -153,6 +153,7 @@ import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogCo
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
 import { getStripePaymentsByMonth, getStripeAllMonthsSummary } from './Controllers/StripeDataController.js';
 import { getManualPaymentsByMonth, createManualPayment, updateManualPayment, deleteManualPayment } from './Controllers/ManualPaymentController.js';
+import { listMySessions, revokeMySession, listAllSessions, adminRevokeSession } from './Controllers/CrmSessionController.js';
 import {
   listDesignedTemplates,
   getDesignedTemplate,
@@ -174,7 +175,8 @@ import {
   getLiveCallForLead,
   getAgentPresence,
 } from './Controllers/ZoomPhoneController.js';
-import { requestCrmOtp, verifyCrmOtp, crmMe } from './Controllers/CrmAuthController.js';
+import { requestCrmOtp, verifyCrmOtp, crmMe, getLoginApprovalStatus } from './Controllers/CrmAuthController.js';
+import { listPendingLoginApprovals, approveLoginApproval, denyLoginApproval } from './Controllers/CrmLoginApprovalController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
 import {
   getAvailableLeads,
@@ -296,7 +298,19 @@ export default function Routes(app) {
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);
   app.get('/api/crm/auth/me', requireCrmUser, crmMe);
-  
+  app.get('/api/crm/auth/login-approval/:approvalId/status', getLoginApprovalStatus);
+
+  // BDA login approval — admin reviews new-device login attempts before the BDA can sign in.
+  app.get('/api/crm/admin/login-approvals', requireCrmAdmin, listPendingLoginApprovals);
+  app.post('/api/crm/admin/login-approvals/:approvalId/approve', requireCrmAdmin, approveLoginApproval);
+  app.post('/api/crm/admin/login-approvals/:approvalId/deny', requireCrmAdmin, denyLoginApproval);
+
+  // Active Sessions — device/IP/location tracking for CRM logins.
+  app.get('/api/crm/sessions', requireCrmUser, listMySessions);
+  app.post('/api/crm/sessions/:sessionId/revoke', requireCrmUser, revokeMySession);
+  app.get('/api/crm/admin/sessions', requireCrmAdmin, listAllSessions);
+  app.post('/api/crm/admin/sessions/:sessionId/revoke', requireCrmAdmin, adminRevokeSession);
+
   app.get('/api/bda/available-leads', requireCrmUser, getAvailableLeads);
   app.get('/api/bda/lead-by-email/:email', requireCrmUser, getLeadByEmail);
   app.post('/api/bda/claim-lead/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), claimLead);
