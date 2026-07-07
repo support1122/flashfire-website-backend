@@ -1,4 +1,5 @@
 import jwt from 'jsonwebtoken';
+import { CrmSessionModel } from '../Schema_Models/CrmSessionModel.js';
 
 export function getCrmJwtSecret() {
   // Prefer a dedicated secret; fall back to existing long-lived secret in this repo if present.
@@ -32,7 +33,7 @@ export function requireCrmAdmin(req, res, next) {
   }
 }
 
-export function requireCrmUser(req, res, next) {
+export async function requireCrmUser(req, res, next) {
   try {
     const token = readBearerToken(req);
     if (!token) return res.status(401).json({ success: false, error: 'Missing Authorization bearer token' });
@@ -40,6 +41,20 @@ export function requireCrmUser(req, res, next) {
     if (payload?.role !== 'crm_user') {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
+
+    // Tokens issued before session tracking was added have no sessionId — let them through
+    // unchecked rather than force-logging-out everyone on deploy.
+    if (payload.sessionId) {
+      const session = await CrmSessionModel.findOneAndUpdate(
+        { sessionId: payload.sessionId },
+        { lastSeenAt: new Date() },
+        { new: true }
+      );
+      if (session && session.revoked) {
+        return res.status(401).json({ success: false, error: 'Session revoked. Please log in again.' });
+      }
+    }
+
     req.crmUser = payload;
     return next();
   } catch (error) {
