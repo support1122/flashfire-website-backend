@@ -139,8 +139,12 @@ function overlapsWindow(sessions, windowStart, windowEnd, now) {
  * carry only the "calendly.com/events/{id}/google_meet" join URL — the real
  * meet.google.com link is behind its 302 redirect. Resolve it once and cache
  * the code back onto the booking so every later poll is free.
+ *
+ * Exported: the Calendly webhook and getMyMeetings also call this so bookings
+ * carry a real meet code BEFORE the meeting — the extension's tab matching
+ * (and therefore live join detection at the true join moment) depends on it.
  */
-async function resolveBookingMeetCode(booking) {
+export async function resolveBookingMeetCode(booking) {
   const direct = extractMeetCode(
     booking.googleMeetCode || booking.googleMeetUrl || booking.calendlyMeetLink
   );
@@ -272,7 +276,13 @@ export async function processBooking(booking, now) {
       set.durationMs = durationMs;
       set.leftAt = bda.latestEndTime || null;
       set.meetApiFinalizedAt = now;
-      if (!present && (!existing || !['present', 'manual'].includes(existing.status))) {
+      // Never auto-absent a canceled booking — skipping a canceled meeting
+      // is correct behavior, not an absence.
+      if (
+        !present &&
+        booking.bookingStatus !== 'canceled' &&
+        (!existing || !['present', 'manual'].includes(existing.status))
+      ) {
         set.status = 'absent';
         set.notes = `${existing?.notes || ''} [meet_api: joined outside the ±1 min window]`.trim();
       }
@@ -322,6 +332,8 @@ export async function processBooking(booking, now) {
 
   // BDA not identified among participants.
   if (finalize) {
+    // Canceled booking + BDA not in the call = correct behavior, not absence.
+    if (booking.bookingStatus === 'canceled') return;
     // Conference happened and ended without the BDA — real absence, unless the
     // extension fallback proved presence (identity match can fail if the BDA
     // joined signed-out; the DOM detection is authoritative for "was there").
@@ -399,12 +411,16 @@ export async function pollMeetApiAttendance() {
     const lookback = new Date(now.getTime() - 3 * 60 * 60 * 1000);
     const lead = new Date(now.getTime() + WINDOW_LEAD_MS);
 
+    // 'canceled' included on purpose: a Calendly reschedule/cancel can land
+    // after the meeting already happened on that link — attendance still
+    // counts. Canceled bookings are present-only (never auto-absent, see
+    // processBooking) since not joining a canceled meeting is correct.
     const bookings = await CampaignBookingModel.find({
-      bookingStatus: { $in: ['scheduled', 'completed'] },
+      bookingStatus: { $in: ['scheduled', 'completed', 'canceled'] },
       scheduledEventStartTime: { $gte: lookback, $lte: lead },
     })
       .select(
-        'bookingId clientName scheduledEventStartTime scheduledEventEndTime googleMeetCode googleMeetUrl calendlyMeetLink calendlyHost claimedBy'
+        'bookingId clientName bookingStatus scheduledEventStartTime scheduledEventEndTime googleMeetCode googleMeetUrl calendlyMeetLink calendlyHost claimedBy'
       )
       .lean();
 

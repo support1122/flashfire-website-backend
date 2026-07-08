@@ -741,6 +741,15 @@ async function handleCreatedEvent(req, res, payload) {
   });
 
   await newBooking.save();
+
+  // Resolve the real meet.google.com code behind Calendly's join_url redirect
+  // NOW, so the extension can match the Meet tab the moment the BDA joins
+  // (without a code, live join detection can't attribute the tab to a booking
+  // and the join time falls back to the ~5-min recovery check — wrong by
+  // minutes). Fire-and-forget: must never delay or fail the webhook.
+  import('../Utils/MeetAttendanceScheduler.js')
+    .then(({ resolveBookingMeetCode }) => resolveBookingMeetCode(newBooking))
+    .catch((e) => Logger.warn('Meet code resolution failed (will retry lazily)', { error: e?.message }));
   } // end if (!shouldMergeIntoExisting) — campaign + new booking
 
   // Mark user as booked

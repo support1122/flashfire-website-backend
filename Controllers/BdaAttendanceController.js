@@ -747,6 +747,19 @@ export async function getMyMeetings(req, res) {
       .limit(100)
       .lean();
 
+    // Backfill missing meet codes (Calendly bookings only carry a redirect
+    // URL). Fire-and-forget, capped — the extension polls this endpoint, so
+    // codes appear within a refresh cycle without slowing this response.
+    // Live join detection needs the code to match the Meet tab to the booking.
+    const missingCode = bookings.filter((b) => !b.googleMeetCode && b.calendlyMeetLink).slice(0, 10);
+    if (missingCode.length > 0) {
+      import('../Utils/MeetAttendanceScheduler.js')
+        .then(({ resolveBookingMeetCode }) =>
+          Promise.allSettled(missingCode.map((b) => resolveBookingMeetCode(b)))
+        )
+        .catch(() => {});
+    }
+
     const ids = bookings.map((b) => b.bookingId);
     const attendanceRecords = await BdaAttendanceModel.find({
       bookingId: { $in: ids },
@@ -1575,10 +1588,15 @@ export async function getMissedMeetingLogs(req, res) {
             source: 1,
             notes: 1,
             markedAt: 1,
-            joinedAt: 1,
+            // In time survives session close via firstJoinedAt.
+            joinedAt: { $ifNull: ['$firstJoinedAt', '$joinedAt'] },
             leftAt: 1,
             durationMs: 1,
             cumulativeDurationMs: 1,
+            lateByMs: 1,
+            verified: {
+              $or: [{ $eq: ['$source', 'meet_api'] }, { $ne: ['$meetApiFinalizedAt', null] }],
+            },
             meetLink: 1,
             meetingScheduledStart: 1,
             meetingScheduledEnd: 1,
@@ -1593,9 +1611,22 @@ export async function getMissedMeetingLogs(req, res) {
       BdaAttendanceModel.countDocuments(attendanceMatch),
     ]);
 
+    // Drop "no response" rows for bookings where another row proves presence
+    // (e.g. the scheduler's "unassigned" row sitting next to the BDA's real
+    // present row) — they would falsely appear as missed meetings.
+    const pageIds = rows.map((r) => r.bookingId);
+    const presentRows = await BdaAttendanceModel.find({
+      bookingId: { $in: pageIds },
+      status: { $in: ['present', 'manual'] },
+    })
+      .select('bookingId')
+      .lean();
+    const presentSet = new Set(presentRows.map((r) => r.bookingId));
+    const data = rows.filter((r) => !(r.status === 'unmarked' && presentSet.has(r.bookingId)));
+
     return res.status(200).json({
       success: true,
-      data: rows,
+      data,
       pagination: {
         page: pageNum,
         limit: limitNum,
@@ -1625,12 +1656,16 @@ export async function getAttendanceByBooking(req, res) {
             source: attendance.source,
             bdaName: attendance.bdaName,
             bdaEmail: attendance.bdaEmail,
-            joinedAt: attendance.joinedAt,
+            joinedAt: attendance.firstJoinedAt || attendance.joinedAt || null,
             leftAt: attendance.leftAt,
             markedAt: attendance.markedAt,
             meetLink: attendance.meetLink,
             durationMs: attendance.durationMs ?? null,
             cumulativeDurationMs: attendance.cumulativeDurationMs ?? 0,
+            verified: attendance.source === 'meet_api' || Boolean(attendance.meetApiFinalizedAt),
+            lateByMs: attendance.lateByMs ?? null,
+            sessions: Array.isArray(attendance.sessions) ? attendance.sessions : [],
+            participantsAtJoin: Array.isArray(attendance.participantsAtJoin) ? attendance.participantsAtJoin : [],
             meetingScheduledStart: attendance.meetingScheduledStart ?? null,
             meetingScheduledEnd: attendance.meetingScheduledEnd ?? null,
             notes: attendance.notes ?? null,
@@ -1658,6 +1693,14 @@ export async function getAttendanceBulk(req, res) {
       bookingId: { $in: bookingIds },
     }).lean();
 
+    // A booking can have several rows (scheduler's "unassigned" + the real
+    // BDA's row). Keep the most authoritative one:
+    // Google-verified > present/manual > absent > unmarked.
+    const rank = (a) =>
+      (a.source === 'meet_api' ? 40 : 0) +
+      (a.status === 'present' ? 30 : a.status === 'manual' ? 20 : a.status === 'absent' ? 10 : 0);
+    records.sort((a, b) => rank(a) - rank(b));
+
     const attendanceMap = {};
     for (const att of records) {
       attendanceMap[att.bookingId] = {
@@ -1665,11 +1708,18 @@ export async function getAttendanceBulk(req, res) {
         source: att.source,
         bdaName: att.bdaName,
         bdaEmail: att.bdaEmail,
-        joinedAt: att.joinedAt,
+        // In time survives session close via firstJoinedAt (joinedAt is
+        // cleared when a session ends).
+        joinedAt: att.firstJoinedAt || att.joinedAt || null,
         leftAt: att.leftAt,
         markedAt: att.markedAt,
         durationMs: att.durationMs ?? null,
         cumulativeDurationMs: att.cumulativeDurationMs ?? 0,
+        // ---- Google Meet records (source: meet_api) ----
+        verified: att.source === 'meet_api' || Boolean(att.meetApiFinalizedAt),
+        lateByMs: att.lateByMs ?? null,
+        sessions: Array.isArray(att.sessions) ? att.sessions : [],
+        participantsAtJoin: Array.isArray(att.participantsAtJoin) ? att.participantsAtJoin : [],
         notes: att.notes ?? null,
       };
     }
