@@ -954,6 +954,22 @@ export async function reportJoin(req, res) {
 
     await doc.save();
 
+    // The absent-poller keys its row on 'unassigned', so a real join creates a
+    // separate document and leaves a phantom "unmarked" row behind. A recorded
+    // join supersedes it — otherwise the CRM shows a false absence for a BDA who
+    // was actually in the meeting.
+    const supersededPhantom = await BdaAttendanceModel.deleteMany({
+      bookingId,
+      source: 'scheduler',
+      status: 'unmarked',
+      bdaEmail: { $ne: emailNorm },
+    });
+    if (supersededPhantom.deletedCount) {
+      console.log(
+        `[BdaAttendance] Superseded ${supersededPhantom.deletedCount} phantom "unmarked" row(s) for ${bookingId} after real join by ${emailNorm}`
+      );
+    }
+
     if (notifyJoin) {
       const message =
         `✅ **BDA Joined Meeting**\n` +
