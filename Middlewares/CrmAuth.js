@@ -62,6 +62,27 @@ export async function requireCrmUser(req, res, next) {
   }
 }
 
+/**
+ * Non-blocking auth: if a valid CRM bearer token is present, attach req.crmUser.
+ * If absent or invalid, continue anyway. Used on routes that must stay open to
+ * non-CRM callers (microservices/automations) but should trust the logged-in
+ * CRM user's identity when one is present — e.g. status-ownership enforcement.
+ */
+export function attachCrmUserOptional(req, res, next) {
+  try {
+    const token = readBearerToken(req);
+    if (token) {
+      const payload = jwt.verify(token, getCrmJwtSecret());
+      if (payload?.role === 'crm_user' || payload?.role === 'crm_admin') {
+        req.crmUser = payload;
+      }
+    }
+  } catch {
+    // Invalid/expired token — treat as anonymous, do not block.
+  }
+  return next();
+}
+
 export function requireBdaExtension(req, res, next) {
   try {
     const token = readBearerToken(req);

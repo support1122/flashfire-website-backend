@@ -177,7 +177,7 @@ import {
 } from './Controllers/ZoomPhoneController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe, getLoginApprovalStatus } from './Controllers/CrmAuthController.js';
 import { listPendingLoginApprovals, approveLoginApproval, denyLoginApproval } from './Controllers/CrmLoginApprovalController.js';
-import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit } from './Middlewares/CrmAuth.js';
+import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit, attachCrmUserOptional } from './Middlewares/CrmAuth.js';
 import {
   getAvailableLeads,
   getLeadByEmail,
@@ -430,7 +430,7 @@ export default function Routes(app) {
   });
   app.get('/api/campaign-bookings/:bookingId', getBookingById); // Get specific booking
   app.get('/api/campaign-bookings/email/:email', getBookingsByEmail); // Get bookings by email
-  app.put('/api/campaign-bookings/:bookingId/status', updateBookingStatus); // Update booking status
+  app.put('/api/campaign-bookings/:bookingId/status', attachCrmUserOptional, updateBookingStatus); // Update booking status (status-ownership enforced inside)
   app.post('/api/campaign-bookings/:bookingId/reschedule', rescheduleBooking); // Reschedule booking and refresh queue
   app.put('/api/campaign-bookings/:bookingId/notes', updateBookingNotes); // Update booking notes
   app.post('/api/campaign-bookings/:bookingId/meeting-notes', getMeetingNotes); // Get meeting notes from Fireflies

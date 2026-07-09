@@ -1,6 +1,7 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
+import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { DateTime } from 'luxon';
 import { triggerWorkflow, cancelScheduledWorkflows, cancelScheduledWorkflowLogsForBooking } from './WorkflowController.js';
 import {
@@ -1033,14 +1034,61 @@ export const updateBookingStatus = async (req, res) => {
       }
     }
 
-    // Who is making this change. Prefer the authenticated CRM user when the route
-    // carries one; otherwise trust the actor fields the CRM sends in the body
-    // (this route is unauthenticated, matching the existing pattern).
+    // Who is making this change. When a CRM login token is present (attached by
+    // attachCrmUserOptional) we TRUST its email over anything in the body — this
+    // is what makes the status-ownership lock tamper-resistant. Non-CRM callers
+    // (microservices/automations) fall back to the body actor fields.
     const statusChangedAt = new Date();
-    const actorEmail = req.crmUser?.email || req.body.changedBy || req.headers['x-user-email'] || 'admin';
-    const actorName = req.crmUser?.name || req.body.changedByName || 'Admin';
-    const statusSource = req.body.source || (req.crmUser?.role === 'admin' ? 'admin' : (req.crmUser ? 'bda' : 'admin'));
+    const authedEmail = req.crmUser?.email ? String(req.crmUser.email).toLowerCase() : null;
+
+    // Resolve whether the authenticated actor is a CRM admin (role lives in the DB,
+    // not in the token). Admins may override any lock.
+    let isAdminActor = false;
+    if (authedEmail) {
+      const actorRecord = await CrmUserModel.findOne({ email: authedEmail }).select('role name').lean();
+      isAdminActor = actorRecord?.role === 'admin';
+    }
+
+    let actorEmail;
+    let actorName;
+    let statusSource;
+    if (authedEmail) {
+      actorEmail = authedEmail;
+      actorName = req.crmUser.name || req.body.changedByName || (isAdminActor ? 'Admin' : authedEmail);
+      statusSource = isAdminActor ? 'admin' : 'bda';
+    } else {
+      // Legacy / non-CRM path (unauthenticated). Trust the body, as before.
+      actorEmail = req.body.changedBy || req.headers['x-user-email'] || 'admin';
+      actorName = req.body.changedByName || 'Admin';
+      statusSource = req.body.source || 'admin';
+      isAdminActor = statusSource === 'admin' || statusSource === 'system';
+    }
     const previousStatus = existingBooking.bookingStatus || null;
+
+    // ── Status-ownership lock ────────────────────────────────────────────────
+    // Once a BDA sets a FINAL decision (completed / no-show / paid / canceled /
+    // ignored) that lead's status belongs to them: another BDA cannot change it.
+    // Only the same BDA, or an admin, may. Automated sources are exempt.
+    const FINAL_DECISION_STATUSES = ['completed', 'no-show', 'paid', 'canceled', 'ignored'];
+    const lockedOwner = existingBooking.statusChangedBy
+      ? String(existingBooking.statusChangedBy).toLowerCase()
+      : null;
+    const isLocked =
+      existingBooking.statusChangeSource === 'bda' &&
+      FINAL_DECISION_STATUSES.includes(existingBooking.bookingStatus) &&
+      !!lockedOwner;
+
+    if (isLocked && !isAdminActor && actorEmail.toLowerCase() !== lockedOwner) {
+      const ownerName = existingBooking.statusChangedByName || existingBooking.statusChangedBy;
+      return res.status(403).json({
+        success: false,
+        locked: true,
+        owner: existingBooking.statusChangedBy,
+        ownerName,
+        currentStatus: existingBooking.bookingStatus,
+        message: `This lead was marked "${existingBooking.bookingStatus}" by ${ownerName}. Only ${ownerName} or an admin can change its status.`,
+      });
+    }
 
     const updatePayload = {
       bookingStatus: status,
