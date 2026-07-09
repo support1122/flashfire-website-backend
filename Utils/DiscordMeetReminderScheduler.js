@@ -27,20 +27,13 @@ const STUCK_PROCESSING_MS = Math.max(
   Number(process.env.DISCORD_MEET_REMINDER_STUCK_PROCESSING_MS) || 8 * 60 * 1000
 );
 
+// Every BDA's meeting reminder goes to this single shared channel; the
+// "Assigned BDA" line in the message body identifies who it's for.
 const DISCORD_MEET_2MIN_WEBHOOK_URL =
   process.env.DISCORD_MEET_2MIN_WEBHOOK_URL ||
   process.env.DISCORD_MEET_WEB_HOOK_URL ||
   process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL ||
   null;
-
-// Meetings assigned to a BDA whose name starts with "Kalpataru" get their
-// confirm-attendance reminder routed to a dedicated Discord channel instead of
-// the shared one. Falls back to the shared webhook if not configured.
-// Env can override; hardcoded default keeps the dedicated channel working even
-// when the env var is missing on a deploy.
-const DISCORD_MEET_KALPATARU_WEBHOOK_URL =
-  process.env.DISCORD_MEET_KALPATARU_WEBHOOK_URL ||
-  'https://discord.com/api/webhooks/1523575499454939307/i_ESYLBr2ADfKJlB_Owb0aFub1LRivpN1us8Xrbf0vIFKB-TsK8RQefcG3PTDRjojgat';
 
 let isRunning = false;
 let pollInterval = null;
@@ -445,16 +438,7 @@ export async function processDueDiscordMeetReminders() {
 
         logReminderDrift('discord_bda', reminder.reminderId, reminder.scheduledFor);
 
-        // Route to the Kalpataru channel when the assigned BDA's name starts with
-        // "Kalpataru"; otherwise use the shared channel. Match on name only.
-        const assignedBdaName = (booking?.calendlyHost?.name || booking?.claimedBy?.name || '').trim();
-        const isKalpataru = /^kalpataru/i.test(assignedBdaName);
-        const targetWebhookUrl =
-          isKalpataru && DISCORD_MEET_KALPATARU_WEBHOOK_URL
-            ? DISCORD_MEET_KALPATARU_WEBHOOK_URL
-            : DISCORD_MEET_2MIN_WEBHOOK_URL;
-
-        const sendResult = await DiscordConnect(targetWebhookUrl, content, false);
+        const sendResult = await DiscordConnect(DISCORD_MEET_2MIN_WEBHOOK_URL, content, false);
         if (!sendResult.ok) {
           throw new Error(`Discord send failed: ${sendResult.error || 'unknown'}`);
         }

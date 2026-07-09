@@ -131,6 +131,24 @@ export function crmUserMetaLeadsOnly(req) {
   return perms.includes('meta_leads') && !perms.includes('leads');
 }
 
+/**
+ * Returns the requesting BDA's own email if the Leads list should be scoped to
+ * only their assigned leads, or null if the request should see everyone's leads
+ * (admins, and anyone whose role isn't 'bda').
+ *
+ * Leads with no resolved calendlyHost (old bookings, or Meta-lead bookings that
+ * never got a host resolved) are intentionally left visible to every BDA — the
+ * scope only ever narrows leads that DO have a clear owner.
+ */
+export function crmUserBdaOwnEmailScope(req) {
+  // bdaRole carries CrmUser.role (admin/bda); absent on tokens issued before this
+  // field existed, or on non-crm_user tokens — treat anything but an explicit
+  // 'bda' as unscoped so nobody is unexpectedly locked out by an old token.
+  if (req.crmUser?.bdaRole !== 'bda') return null;
+  const email = req.crmUser?.email;
+  return email ? String(email).toLowerCase().trim() : null;
+}
+
 export function requireCrmAnyPermission(permissions) {
   const list = Array.isArray(permissions) ? permissions : [];
   return (req, res, next) => {
