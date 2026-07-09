@@ -7,6 +7,21 @@ import { DiscordConnect } from './DiscordConnect.js';
 dotenv.config();
 
 const POLL_INTERVAL_MS = 60000; // 1 minute
+
+/**
+ * How long after the scheduled start we wait before flagging "no response".
+ *
+ * A 60-second window produced false alerts: BDAs routinely join 3-5 minutes after
+ * the scheduled start, and the Chrome extension can lag several minutes before it
+ * reports the join. Both cases fired "BDA No Response" for someone already in the
+ * meeting. Tune with BDA_ABSENT_GRACE_MINUTES (clamped to 2..60).
+ */
+const ABSENT_GRACE_MINUTES = (() => {
+  const raw = Number(process.env.BDA_ABSENT_GRACE_MINUTES);
+  return Number.isFinite(raw) && raw >= 2 && raw <= 60 ? raw : 8;
+})();
+const ABSENT_GRACE_MS = ABSENT_GRACE_MINUTES * 60 * 1000;
+
 let isRunning = false;
 let pollInterval = null;
 
@@ -75,17 +90,17 @@ export async function pollForAbsentBDAs() {
     await closeStaleOpenSessions();
 
     const now = new Date();
-    const oneMinAgo = new Date(now.getTime() - 60 * 1000); // 60 seconds
+    const graceCutoff = new Date(now.getTime() - ABSENT_GRACE_MS);
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
 
-    // Find scheduled meetings that started > 60 seconds ago, within last 2 hours,
-    // claimed by a BDA, and not canceled/rescheduled
+    // Find scheduled meetings that started more than the grace period ago, within
+    // the last 2 hours, and not canceled/rescheduled.
     const meetings = await CampaignBookingModel.find({
       bookingStatus: { $in: ['scheduled'] },
       scheduledEventStartTime: {
         $exists: true,
         $ne: null,
-        $lte: oneMinAgo,
+        $lte: graceCutoff,
         $gte: twoHoursAgo,
       },
     })
@@ -114,6 +129,19 @@ export async function pollForAbsentBDAs() {
       // Skip if any BDA has already reported attendance for this meeting
       if (attendedBookingIds.has(meeting.bookingId)) continue;
 
+      // Re-check immediately before alerting. A join can land between the batch
+      // read above and this iteration (the extension reports asynchronously), and
+      // a recorded join must ALWAYS win over the "no response" alert.
+      const lateJoin = await BdaAttendanceModel.findOne({ bookingId: meeting.bookingId })
+        .select('_id status firstJoinedAt')
+        .lean();
+      if (lateJoin) {
+        console.log(
+          `[BdaAbsentScheduler] Skipping ${meeting.bookingId} — attendance recorded (status=${lateJoin.status})`
+        );
+        continue;
+      }
+
       const isClaimed = !!(meeting.claimedBy?.email);
       const bdaEmail = meeting.claimedBy?.email || 'unassigned';
       const bdaName = meeting.claimedBy?.name || 'Unassigned';
@@ -136,7 +164,7 @@ export async function pollForAbsentBDAs() {
               meetingScheduledEnd: meeting.scheduledEventEndTime || null,
               discordNotified: true,
               notes: isClaimed
-                ? 'No response captured 60s after start — BDA must confirm present or mark absent'
+                ? `No response captured ${ABSENT_GRACE_MINUTES}m after start — BDA must confirm present or mark absent`
                 : 'Meeting not claimed by any BDA — no one joined',
             },
             $setOnInsert: {
@@ -151,7 +179,7 @@ export async function pollForAbsentBDAs() {
             `**BDA:** ${bdaName} (${bdaEmail})\n` +
             `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
             `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
-            `_No response 60s after start. Not marked absent yet — attendance will be auto-verified from Google Meet records after the meeting._`
+            `_No response ${ABSENT_GRACE_MINUTES}m after start. Not marked absent yet — attendance will be auto-verified from Google Meet records after the meeting._`
           : `🚨 **NO BDA ASSIGNED — Meeting Started!**\n` +
             `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
             `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
@@ -190,7 +218,8 @@ export function startBdaAbsentScheduler() {
   }
 
   console.log(
-    `[BdaAbsentScheduler] Starting BDA absent detection scheduler (poll every ${POLL_INTERVAL_MS / 1000}s)`
+    `[BdaAbsentScheduler] Starting BDA absent detection scheduler (poll every ${POLL_INTERVAL_MS / 1000}s, ` +
+      `grace ${ABSENT_GRACE_MINUTES}m after scheduled start)`
   );
 
   // Run immediately once, then on interval
