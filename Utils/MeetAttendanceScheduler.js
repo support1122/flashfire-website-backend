@@ -285,6 +285,9 @@ export async function processBooking(booking, now) {
       ) {
         set.status = 'absent';
         set.notes = `${existing?.notes || ''} [meet_api: joined outside the ±1 min window]`.trim();
+        // We post the verified-absent message below; flag the row so the
+        // absent-poller treats it as already announced and never double-alerts.
+        set.discordNotified = true;
       }
     }
 

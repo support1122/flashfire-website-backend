@@ -11,15 +11,14 @@ const POLL_INTERVAL_MS = 60000; // 1 minute
 /**
  * How long after the scheduled start we wait before flagging "no response".
  *
- * A 60-second window produced false alerts: BDAs routinely join 3-5 minutes after
- * the scheduled start, and the Chrome extension can lag several minutes before it
- * reports the join. Both cases fired "BDA No Response" for someone already in the
- * meeting. Tune with BDA_ABSENT_GRACE_MINUTES (clamped to 2..60).
+ * Fixed at 1 minute, deliberately not env-tunable: a stray env value silently
+ * delayed these alerts in production. This is a nudge, not an absence verdict.
+ * At +1 minute nobody has joined yet, so the ping is accurate and still useful
+ * while the meeting is young (they run ~15 min). The row it writes is "unmarked",
+ * never "absent" - a later join supersedes it, and the send is skipped outright
+ * if the BDA is already marked present.
  */
-const ABSENT_GRACE_MINUTES = (() => {
-  const raw = Number(process.env.BDA_ABSENT_GRACE_MINUTES);
-  return Number.isFinite(raw) && raw >= 2 && raw <= 60 ? raw : 8;
-})();
+const ABSENT_GRACE_MINUTES = 1;
 const ABSENT_GRACE_MS = ABSENT_GRACE_MINUTES * 60 * 1000;
 
 let isRunning = false;
@@ -114,30 +113,51 @@ export async function pollForAbsentBDAs() {
       return;
     }
 
-    // Get all booking IDs to check for existing attendance
     const bookingIds = meetings.map((m) => m.bookingId);
-    const existingAttendance = await BdaAttendanceModel.find({
-      bookingId: { $in: bookingIds },
-    }).lean();
 
-    // Set of bookingIds that have any attendance record
-    const attendedBookingIds = new Set(existingAttendance.map((a) => a.bookingId));
+    // Only an actual PRESENT mark suppresses the alert. The extension writes
+    // 'present' when it detects the BDA in the Meet room; a manual CRM mark writes
+    // 'manual'. An 'unmarked' row (no response / bad join URL) means nobody is in
+    // the meeting, so it must NOT suppress the alert.
+    const presentRows = await BdaAttendanceModel.find({
+      bookingId: { $in: bookingIds },
+      status: { $in: ['present', 'manual'] },
+    })
+      .select('bookingId')
+      .lean();
+    const presentBookingIds = new Set(presentRows.map((a) => a.bookingId));
+
+    // Alert once per booking, not on every 60s poll.
+    const pingedRows = await BdaAttendanceModel.find({
+      bookingId: { $in: bookingIds },
+      discordNotified: true,
+      status: { $in: ['unmarked', 'absent'] },
+    })
+      .select('bookingId')
+      .lean();
+    const alreadyPinged = new Set(pingedRows.map((a) => a.bookingId));
 
     let absentCount = 0;
 
     for (const meeting of meetings) {
-      // Skip if any BDA has already reported attendance for this meeting
-      if (attendedBookingIds.has(meeting.bookingId)) continue;
+      // BDA is marked present (extension or manual), nothing to alert about.
+      if (presentBookingIds.has(meeting.bookingId)) continue;
+
+      // Already pinged for this meeting and still no present mark, don't repeat.
+      if (alreadyPinged.has(meeting.bookingId)) continue;
 
       // Re-check immediately before alerting. A join can land between the batch
       // read above and this iteration (the extension reports asynchronously), and
-      // a recorded join must ALWAYS win over the "no response" alert.
-      const lateJoin = await BdaAttendanceModel.findOne({ bookingId: meeting.bookingId })
+      // a recorded PRESENT mark must ALWAYS win over the "no response" alert.
+      const lateJoin = await BdaAttendanceModel.findOne({
+        bookingId: meeting.bookingId,
+        status: { $in: ['present', 'manual'] },
+      })
         .select('_id status firstJoinedAt')
         .lean();
       if (lateJoin) {
         console.log(
-          `[BdaAbsentScheduler] Skipping ${meeting.bookingId} — attendance recorded (status=${lateJoin.status})`
+          `[BdaAbsentScheduler] Skipping ${meeting.bookingId}: BDA marked ${lateJoin.status}`
         );
         continue;
       }
