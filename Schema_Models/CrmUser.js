@@ -14,6 +14,7 @@ const CRM_MODULE_KEYS = [
   'bda_admin',
   'activity_logs',
   'lead_analytics',
+  'graphs03',
   'phone_calls',
 ];
 
