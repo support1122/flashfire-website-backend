@@ -151,7 +151,7 @@ import {
 import { crmAdminLogin, crmAdminRequestOtp, crmAdminVerifyOtp, listCrmUsers, createCrmUser, updateCrmUser, deleteCrmUser } from './Controllers/CrmAdminController.js';
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
-import { getStripePaymentsByMonth, getStripeAllMonthsSummary } from './Controllers/StripeDataController.js';
+import { getStripePaymentsByMonth, getStripeAllMonthsSummary, getStripePaidPlanMonthlySummary } from './Controllers/StripeDataController.js';
 import { getManualPaymentsByMonth, createManualPayment, updateManualPayment, deleteManualPayment } from './Controllers/ManualPaymentController.js';
 import { listMySessions, revokeMySession, listAllSessions, adminRevokeSession } from './Controllers/CrmSessionController.js';
 import {
@@ -279,6 +279,7 @@ export default function Routes(app) {
   // Stripe Data tab — month-wise succeeded charges enriched with Checkout line-item plan name.
   app.get('/api/crm/stripe/payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaymentsByMonth);
   app.get('/api/crm/stripe/summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeAllMonthsSummary);
+  app.get('/api/crm/stripe/paid-plan-summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaidPlanMonthlySummary);
 
   // Manual INR payment entries — merged into the Stripe Data tab alongside Stripe charges.
   app.get('/api/crm/stripe/manual-payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getManualPaymentsByMonth);
