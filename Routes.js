@@ -271,15 +271,15 @@ export default function Routes(app) {
   app.get('/api/crm/paid-clients/analytics', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics']), getPaidClientsAnalytics);
 
   // Graphs 03 — per-BDA performance: meetings vs paid, and no-show follow-up coverage.
-  app.get('/api/crm/graphs03/bda-meetings', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getBdaMeetingsAnalytics);
-  app.get('/api/crm/graphs03/no-show-followup', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data', 'phone_calls']), getNoShowFollowupAnalytics);
-  app.get('/api/crm/graphs03/bda-call-activity', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data', 'phone_calls']), getBdaCallActivity);
-  app.get('/api/crm/graphs03/bda-scorecard', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getBdaScorecard);
+  app.get('/api/crm/graphs03/bda-meetings', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data']), getBdaMeetingsAnalytics);
+  app.get('/api/crm/graphs03/no-show-followup', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data', 'phone_calls']), getNoShowFollowupAnalytics);
+  app.get('/api/crm/graphs03/bda-call-activity', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data', 'phone_calls']), getBdaCallActivity);
+  app.get('/api/crm/graphs03/bda-scorecard', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data']), getBdaScorecard);
 
   // Stripe Data tab — month-wise succeeded charges enriched with Checkout line-item plan name.
   app.get('/api/crm/stripe/payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaymentsByMonth);
   app.get('/api/crm/stripe/summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeAllMonthsSummary);
-  app.get('/api/crm/stripe/paid-plan-summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaidPlanMonthlySummary);
+  app.get('/api/crm/stripe/paid-plan-summary', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaidPlanMonthlySummary);
 
   // Manual INR payment entries — merged into the Stripe Data tab alongside Stripe charges.
   app.get('/api/crm/stripe/manual-payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getManualPaymentsByMonth);
@@ -457,7 +457,7 @@ export default function Routes(app) {
   
   app.get('/api/leads/paginated', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsPaginated);
   app.get('/api/leads/ids', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads']), getLeadsIds);
-  app.get('/api/leads/analytics', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics']), getLeadsAnalytics);
+  app.get('/api/leads/analytics', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'graphs03']), getLeadsAnalytics);
   app.get('/api/meeting-links', requireCrmUser, requireCrmPermission('meeting_links'), getMeetingLinks);
 
   app.get('/api/campaign-bookings/:bookingId/custom-workflows', requireCrmUser, getCustomWorkflowsForBooking);
