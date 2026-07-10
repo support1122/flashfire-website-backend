@@ -21,7 +21,7 @@ import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 // The business operates on ET; day/week boundaries must match how the team reads them.
 const TZ = 'America/New_York';
 const UNASSIGNED = 'unassigned';
-const UNASSIGNED_LABEL = 'Unassigned';
+const UNASSIGNED_LABEL = 'Flashfire Team';
 
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 
