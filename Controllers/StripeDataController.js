@@ -1,7 +1,16 @@
 import Stripe from "stripe";
+import { ManualPaymentModel } from "../Schema_Models/ManualPaymentModel.js";
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY || "";
 const stripe = stripeSecretKey ? new Stripe(stripeSecretKey) : null;
+
+// Same plan-name classification as the Stripe Data tab's Plan Breakdown
+// (src/components/StripeDataView.tsx PLAN_BUCKETS) — kept in lockstep so the
+// two views never disagree on what counts as a "real" plan.
+const isAddonOrUpgrade = (planName) => {
+  const p = (planName || "").toLowerCase();
+  return p.includes("add-on") || p.includes("add on") || p.includes("upgrade");
+};
 
 // Simple in-memory cache for checkout-session line-item lookups, since each
 // charge needs 2 extra API calls (session lookup + line items) to get the
@@ -77,6 +86,57 @@ export const getStripeAllMonthsSummary = async (req, res) => {
     return res.status(200).json({ success: true, data: rows });
   } catch (error) {
     console.error("Error fetching Stripe all-months summary:", error);
+    return res.status(500).json({ success: false, error: error.message || "Failed to fetch summary" });
+  }
+};
+
+/**
+ * All-months "real plan" paid-client count for Graph 03's Completed — Monthly chart.
+ * Same universe as the Stripe Data tab's Plan Breakdown (Stripe succeeded charges +
+ * manual payments, classified by plan name) but summed across all plan tiers and
+ * EXCLUDING Add-on / Upgrade line items — those are extras on an existing plan, not
+ * a new paying client, so they'd inflate this count past what "Paid" should mean here.
+ */
+export const getStripePaidPlanMonthlySummary = async (req, res) => {
+  try {
+    if (!stripe) {
+      return res.status(503).json({ success: false, error: "Stripe not configured." });
+    }
+
+    let charges = [];
+    let startingAfter;
+    while (true) {
+      const page = await stripe.charges.list({ limit: 100, starting_after: startingAfter });
+      const succeeded = page.data.filter((c) => c.status === "succeeded");
+      charges = charges.concat(succeeded);
+      if (!page.has_more) break;
+      startingAfter = page.data[page.data.length - 1].id;
+    }
+
+    const planNames = await Promise.all(charges.map((c) => getPlanNameForCharge(c)));
+
+    const byMonth = {};
+    charges.forEach((c, i) => {
+      if (isAddonOrUpgrade(planNames[i])) return;
+      const d = new Date(c.created * 1000);
+      const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+      byMonth[ym] = (byMonth[ym] || 0) + 1;
+    });
+
+    const manualDocs = await ManualPaymentModel.find({});
+    for (const m of manualDocs) {
+      if (isAddonOrUpgrade(m.planName)) continue;
+      const d = new Date(m.date);
+      const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+      byMonth[ym] = (byMonth[ym] || 0) + 1;
+    }
+
+    const months = Object.keys(byMonth).sort();
+    const rows = months.map((m) => ({ month: m, paidCount: byMonth[m] }));
+
+    return res.status(200).json({ success: true, data: rows });
+  } catch (error) {
+    console.error("Error fetching Stripe paid-plan monthly summary:", error);
     return res.status(500).json({ success: false, error: error.message || "Failed to fetch summary" });
   }
 };
