@@ -4,29 +4,13 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const PLANS = {
   professional: {
-    name: 'FlashFire – Professional Plan',
-    description: [
-      '✦ 500 Job Applications – We find & apply to jobs for you',
-      '✦ No Time Constraint – Until your applications are completed',
-      '✦ LinkedIn Makeover – Let recruiters come to you',
-      '✦ Interview Prep Material – Resources to help you ace interviews',
-      '✦ Everything in Ignite Plan included',
-      '',
-      'Once your payment is confirmed, you will receive an official invoice via email. Our team will initiate the onboarding process within 24 hours.',
-    ].join('\n'),
+    name: 'Professional Plan – Mid-Level Professionals',
+    description: 'Once your payment is confirmed, you will receive an official invoice via email. Our team will initiate the onboarding process within 24 hours, providing you with access credentials and clear next steps. Dedicated 24/7 support will be available throughout your journey.',
     originalPrice: 349,
   },
   executive: {
-    name: 'FlashFire – Executive Plan',
-    description: [
-      '✦ 1200 Job Applications – We find & apply to jobs for you',
-      '✦ Everything in Professional Plan included',
-      '✦ 1 Cover Letter – Personalized for all applications',
-      '✦ Emailing Recruiters – We personally reach out to recruiters for you',
-      '✦ Portfolio Website – We build a personal site to showcase your projects, skills & achievements',
-      '',
-      'Once your payment is confirmed, you will receive an official invoice via email. Our team will initiate the onboarding process within 24 hours.',
-    ].join('\n'),
+    name: 'Executive Plan – 1200+ Applications',
+    description: 'Once your payment is confirmed, you will receive an official invoice via email. Our team will initiate the onboarding process within 24 hours, providing you with access credentials and clear next steps. Dedicated 24/7 support will be available throughout your journey.',
     originalPrice: 599,
   },
 };
@@ -53,11 +37,13 @@ export async function generatePaymentLink(req, res) {
     }
 
     const baseUrl = process.env.CAMPAIGN_BASE_URL || 'https://www.flashfirejobs.com';
-    const expiresAt = Math.floor(Date.now() / 1000) + 5 * 60 * 60;
+    const expiresAt = Math.floor(Date.now() / 1000) + 12 * 60 * 60;
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       currency: 'usd',
+      customer_creation: 'always',
+      invoice_creation: { enabled: true },
       line_items: [
         {
           price_data: {
