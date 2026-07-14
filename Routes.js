@@ -153,6 +153,7 @@ import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogCo
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
 import { getStripePaymentsByMonth, getStripeAllMonthsSummary, getStripePaidPlanMonthlySummary } from './Controllers/StripeDataController.js';
 import { getManualPaymentsByMonth, createManualPayment, updateManualPayment, deleteManualPayment } from './Controllers/ManualPaymentController.js';
+import { generatePaymentLink } from './Controllers/PaymentLinkController.js';
 import { listMySessions, revokeMySession, listAllSessions, adminRevokeSession } from './Controllers/CrmSessionController.js';
 import {
   listDesignedTemplates,
@@ -286,6 +287,9 @@ export default function Routes(app) {
   app.post('/api/crm/stripe/manual-payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), createManualPayment);
   app.put('/api/crm/stripe/manual-payments/:id', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), updateManualPayment);
   app.delete('/api/crm/stripe/manual-payments/:id', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), deleteManualPayment);
+
+  // Payment Link Generator — BDA internal tool
+  app.post('/api/crm/generate-payment-link', requireCrmUser, requireCrmPermission('payment_links'), generatePaymentLink);
 
   // Zoom Phone — webhook is public (HMAC-verified inside).
   app.post('/api/zoom-phone/webhook', zoomPhoneWebhook);
