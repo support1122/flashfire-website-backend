@@ -363,6 +363,51 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // --- Call Leads tab --------------------------------------------------------
+  // A Meta lead that never booked has no owner anywhere else: claimLead() rejects
+  // the 'not-scheduled' status outright, and Calendly never runs so calendlyHost
+  // stays null. This is the follow-up owner, set on first touch (a call placed or
+  // a note written from the Call Leads tab) and never reassigned automatically.
+  callLeadAssignee: {
+    email: {
+      type: String,
+      default: null,
+      lowercase: true,
+      trim: true
+    },
+    name: {
+      type: String,
+      default: null
+    },
+    assignedAt: {
+      type: Date,
+      default: null
+    }
+  },
+  // Append-only, attributed follow-up notes. Deliberately NOT `meetingNotes` above,
+  // which is a single string that the Fireflies webhook overwrites with transcript
+  // summaries — appending call notes there would lose them.
+  callLeadNotes: [{
+    text: {
+      type: String,
+      required: true,
+      trim: true
+    },
+    authorEmail: {
+      type: String,
+      default: null,
+      lowercase: true,
+      trim: true
+    },
+    authorName: {
+      type: String,
+      default: null
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   firefliesTranscriptId: {
     type: String,
     default: null,
@@ -593,6 +638,9 @@ CampaignBookingSchema.index({ bookingStatus: 1, clientEmail: 1, scheduledEventSt
 CampaignBookingSchema.index({ bookingStatus: 1, 'paymentPlan.name': 1, 'paymentPlan.price': 1 });
 CampaignBookingSchema.index({ 'claimedBy.email': 1, bookingStatus: 1 });
 CampaignBookingSchema.index({ 'scheduledWorkflows.status': 1, 'scheduledWorkflows.scheduledFor': 1 });
+// Call Leads tab: Meta leads still on 'not-scheduled', newest first.
+CampaignBookingSchema.index({ leadSource: 1, bookingStatus: 1, bookingCreatedAt: -1 });
+CampaignBookingSchema.index({ 'callLeadAssignee.email': 1 });
 
 export const CampaignBookingModel = mongoose.model('CampaignBooking', CampaignBookingSchema);
 

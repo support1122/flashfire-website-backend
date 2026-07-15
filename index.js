@@ -1088,6 +1088,28 @@ app.listen(PORT || 4001, async () => {
     console.warn('⚠️ [Server] Failed to start Zoom Phone syncer:', error.message);
   }
 
+  // Call Leads — round-robin any Meta lead that has gone 24h without booking across
+  // the active BDAs. A lead becomes assignable purely by ageing past the cutoff, so
+  // this has to run on a timer rather than at ingest.
+  try {
+    const { assignUnassignedCallLeads } = await import('./Controllers/CallLeadsController.js');
+    const runAssigner = async () => {
+      try {
+        const r = await assignUnassignedCallLeads({});
+        if (r.assigned > 0) {
+          console.log(`✅ [CallLeads] round-robin assigned ${r.assigned} lead(s)`, r.totals || '');
+        }
+      } catch (error) {
+        console.warn('⚠️ [CallLeads] round-robin pass failed:', error.message);
+      }
+    };
+    await runAssigner();
+    setInterval(runAssigner, 10 * 60 * 1000).unref();
+    console.log('✅ [Server] Call Leads round-robin assigner started (10m interval)');
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to start Call Leads assigner:', error.message);
+  }
+
   // One-time backfill: existing CRM users with a view permission get the matching
   // `_edit` permission so behavior does not regress when per-module view/edit ships.
   // Idempotent — only adds missing edit keys.
