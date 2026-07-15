@@ -422,25 +422,38 @@ export async function sendMetaLeadDiscordNotification(leadInfo) {
   const webhookUrl = process.env.DISCORD_META_LEADS_WEBHOOK_URL || process.env.DISCORD_WEB_HOOK_URL;
   if (!webhookUrl) return;
 
+  // Color + title signal the outcome at a glance: green = new lead,
+  // amber = repeat submission merged into an existing lead, Facebook blue
+  // for legacy callers that pass no outcome.
+  const isMerged = leadInfo.outcome === 'merged';
+  const isCreated = leadInfo.outcome === 'created';
+  const title = isMerged
+    ? '🔁 Meta Lead — Repeat Submission (merged)'
+    : (isCreated ? '🚀 New Meta Lead' : 'New Meta Lead Ad Submission');
+  const color = isMerged ? 0xF59E0B : (isCreated ? 0x57F287 : 0x1877F2);
+
   const embed = {
-    title: 'New Meta Lead Ad Submission',
-    color: 0x1877F2,
+    title,
+    description: `**${leadInfo.clientName || 'Unknown name'}**`,
+    color,
     fields: [
-      { name: 'Name', value: leadInfo.clientName || 'N/A', inline: true },
-      { name: 'Email', value: leadInfo.clientEmail || 'N/A', inline: true },
-      { name: 'Phone', value: leadInfo.clientPhone || 'N/A', inline: true },
-      ...(leadInfo.jobType ? [{ name: 'Job Type', value: leadInfo.jobType, inline: true }] : []),
-      ...(leadInfo.utmSource ? [{ name: 'Source', value: leadInfo.utmSource, inline: true }] : []),
-      ...(leadInfo.utmMedium ? [{ name: 'Medium', value: leadInfo.utmMedium, inline: true }] : []),
-      ...(leadInfo.utmCampaign ? [{ name: 'Campaign', value: leadInfo.utmCampaign, inline: true }] : []),
-      ...(leadInfo.countryCode ? [{ name: 'Country', value: leadInfo.countryCode, inline: true }] : []),
-      ...(leadInfo.locale ? [{ name: 'Locale', value: leadInfo.locale, inline: true }] : []),
-      ...(leadInfo.outcome ? [{ name: 'Outcome', value: leadInfo.outcome, inline: true }] : []),
-      { name: 'Form', value: leadInfo.formName || 'N/A', inline: true },
-      { name: 'Booking ID', value: leadInfo.bookingId, inline: true },
+      { name: '📧 Email', value: '`' + (leadInfo.clientEmail || 'N/A') + '`', inline: true },
+      { name: '📱 Phone', value: '`' + (leadInfo.clientPhone || 'N/A') + '`', inline: true },
+      ...(leadInfo.jobType ? [{ name: '💼 Job Type', value: leadInfo.jobType, inline: true }] : []),
+      ...(leadInfo.utmSource ? [{ name: '📣 Source', value: leadInfo.utmSource, inline: true }] : []),
+      ...(leadInfo.utmMedium ? [{ name: '📈 Medium', value: leadInfo.utmMedium, inline: true }] : []),
+      ...(leadInfo.utmCampaign ? [{ name: '🎯 Campaign', value: leadInfo.utmCampaign, inline: true }] : []),
+      ...(leadInfo.countryCode ? [{ name: '🌍 Country', value: leadInfo.countryCode, inline: true }] : []),
+      ...(leadInfo.locale ? [{ name: '🗺️ Page', value: leadInfo.locale === 'en-ca' ? '🇨🇦 en-ca' : '🇺🇸 us', inline: true }] : []),
+      ...(leadInfo.leadgenId ? [{ name: '🪪 Lead ID', value: String(leadInfo.leadgenId), inline: true }] : []),
+      ...(leadInfo.outcome ? [{
+        name: '🧾 Outcome',
+        value: isMerged ? 'Merged into existing lead — workflows NOT re-triggered' : 'New lead created — workflows triggered',
+        inline: false
+      }] : []),
     ],
     timestamp: new Date().toISOString(),
-    footer: { text: 'Meta Lead Ads → Flashfire CRM' }
+    footer: { text: `${leadInfo.formName || 'Meta Lead Ads'} • ${leadInfo.bookingId} • Flashfire CRM` }
   };
 
   await fetch(webhookUrl, {
