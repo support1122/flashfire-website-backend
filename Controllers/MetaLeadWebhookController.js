@@ -123,6 +123,25 @@ function getFieldValue(fieldData, ...candidates) {
 }
 
 /**
+ * A job type is an answer like "opt_jobs" — never a phone number.
+ *
+ * Both ingest paths have been landing the lead's phone in the job-type slot: the
+ * webhook via a "...whatsapp number...job..." field name (fixed in parseLeadFields
+ * below), and the Sheets upsert because the Apps Script sends the phone in its
+ * `job_type` column (on the affected rows metaRawData.job_type === metaRawData.phone
+ * exactly, so the real answer never reached us and cannot be recovered here).
+ *
+ * Dropping the value keeps the bad data out of `anythingToKnow`, which is what the
+ * Call Leads tab reads the lead's Type from. It does not fix the Sheet.
+ */
+function sanitizeJobType(value) {
+  const v = (value == null ? '' : String(value)).trim();
+  if (!v) return '';
+  if (/^[+(]?\d[\d\s()\-.]{5,}$/.test(v)) return '';
+  return v;
+}
+
+/**
  * Broad field_data parser — maps common field names to a structured object.
  */
 function parseLeadFields(fieldData) {
@@ -143,14 +162,15 @@ function parseLeadFields(fieldData) {
     } else if (name.includes('last_name') || name === 'last_name') {
       parsed.lastName = value;
     } else if (
-      name === 'whatsapp_number' ||
-      name === 'whatsapp' ||
-      name.startsWith('whatsapp_') ||
+      name.includes('whatsapp') ||
       name.includes('phone') ||
-      name === 'phone_number' ||
       name === 'mobile' ||
       name === 'mobile_number'
     ) {
+      // Matched on `includes`, not `startsWith`: Meta forms ask this as a sentence,
+      // e.g. "What is your WhatsApp number to receive job details?". The old prefix
+      // test missed those, and they then fell through to the `includes('job')` branch
+      // below and were filed as the lead's job title.
       parsed.phone = parsed.phone || value;
     } else if (name.includes('job') || name.includes('role') || name.includes('position')) {
       parsed.jobTitle = value;
@@ -202,10 +222,11 @@ function extractLeadFields(leadData) {
     parsed.customFields?.mobile ||
     '';
 
-  const jobType =
+  const jobType = sanitizeJobType(
     getFieldValue(fd, 'which_type_of_job_looking?', 'which_type_of_job_looking') ||
-    parsed.jobTitle ||
-    '';
+      parsed.jobTitle ||
+      ''
+  );
 
   return {
     email: email.trim().toLowerCase(),
@@ -574,7 +595,7 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     const utmCampaign = resolvedCampaignName
       || (ad_id != null && String(ad_id).trim() !== '' ? `meta_ad_${String(ad_id).trim()}` : 'meta_lead_form');
 
-    const anythingToKnow = `Job type: ${job_type != null ? String(job_type) : ''}`;
+    const anythingToKnow = `Job type: ${sanitizeJobType(job_type)}`;
 
     const filter = { metaLeadId };
 

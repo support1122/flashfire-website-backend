@@ -182,6 +182,12 @@ import {
   getLiveCallForLead,
   getAgentPresence,
 } from './Controllers/ZoomPhoneController.js';
+import {
+  getCallLeads,
+  getCallLeadsSummary,
+  addCallLeadNote,
+  triggerCallLeadAssignment,
+} from './Controllers/CallLeadsController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe, getLoginApprovalStatus } from './Controllers/CrmAuthController.js';
 import { listPendingLoginApprovals, approveLoginApproval, denyLoginApproval } from './Controllers/CrmLoginApprovalController.js';
 import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit, attachCrmUserOptional } from './Middlewares/CrmAuth.js';
@@ -311,6 +317,18 @@ export default function Routes(app) {
   app.get('/api/crm/zoom-phone/events', requireCrmUser, requireCrmPermission('phone_calls'), getZoomWebhookEvents);
   // Same data, admin-token gated — easier for one-off debugging.
   app.get('/api/crm/admin/zoom-phone/events', requireCrmAdmin, getZoomWebhookEvents);
+
+  // Call Leads — Meta leads that never booked a meeting, 24h+ after the form fill.
+  // Note the permission set: the BDAs who actually work this list hold `leads`/`all_data`,
+  // NOT `phone_calls`, so gating on phone_calls alone would hide the tab from them.
+  const CALL_LEADS_VIEW = ['leads', 'leads_edit', 'meta_leads', 'meta_leads_edit', 'all_data', 'all_data_edit', 'phone_calls', 'phone_calls_edit'];
+  const CALL_LEADS_EDIT = ['leads_edit', 'meta_leads_edit', 'all_data_edit', 'phone_calls_edit'];
+  app.get('/api/crm/call-leads', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_VIEW), getCallLeads);
+  app.get('/api/crm/call-leads/summary', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_VIEW), getCallLeadsSummary);
+  app.post('/api/crm/call-leads/:bookingId/notes', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_EDIT), addCallLeadNote);
+  // Force a round-robin pass. The scheduler does this on a timer; the controller
+  // rejects BDAs, so only admins can reshuffle the queue.
+  app.post('/api/crm/call-leads/assign', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_EDIT), triggerCallLeadAssignment);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);
