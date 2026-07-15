@@ -302,6 +302,12 @@ export const submitMetaAdsFormLead = async (req, res) => {
         clientPhone: phone,
         formName: FORM_NAME,
         jobType: status,
+        utmSource: utmSource || 'meta_ads_form',
+        utmMedium: utmMedium || 'paid',
+        utmCampaign: utmCampaign || FORM_NAME,
+        countryCode: serverGeo.countryCode,
+        locale,
+        outcome: 'merged',
         leadgenId: null,
         adId: null
       });
@@ -379,6 +385,12 @@ export const submitMetaAdsFormLead = async (req, res) => {
       clientPhone: phone,
       formName: FORM_NAME,
       jobType: status,
+      utmSource: newBooking.utmSource,
+      utmMedium: newBooking.utmMedium,
+      utmCampaign: newBooking.utmCampaign,
+      countryCode: serverGeo.countryCode,
+      locale,
+      outcome: 'created',
       leadgenId: null,
       adId: null
     });
