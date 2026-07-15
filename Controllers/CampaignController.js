@@ -2,6 +2,14 @@ import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import crypto from 'crypto';
 
+// Destinations a campaign link may point at. Kept as an allowlist so the
+// public create endpoint can never mint links to arbitrary domains.
+const ALLOWED_BASE_URLS = [
+  'https://www.flashfirejobs.com',
+  'https://register.flashfirejobs.com'
+];
+const DEFAULT_BASE_URL = ALLOWED_BASE_URLS[0];
+
 function buildCampaignGeneratedUrl(baseUrl, utmSource, utmMedium, utmCampaign, utmContent, utmTerm) {
   const urlParams = new URLSearchParams();
   urlParams.set('utm_source', utmSource);
@@ -29,7 +37,7 @@ function normalizeCustomPath(raw) {
 // ==================== CREATE CAMPAIGN ====================
 export const createCampaign = async (req, res) => {
   try {
-    const { campaignName, utmSource: explicitUtmSource, utmMedium, utmCampaign, utmContent, utmTerm, customPath: rawCustomPath } = req.body;
+    const { campaignName, utmSource: explicitUtmSource, utmMedium, utmCampaign, utmContent, utmTerm, customPath: rawCustomPath, baseUrl: rawBaseUrl } = req.body;
 
     if (!campaignName && !explicitUtmSource) {
       return res.status(400).json({
@@ -38,7 +46,17 @@ export const createCampaign = async (req, res) => {
       });
     }
 
-    const baseUrl = 'https://www.flashfirejobs.com';
+    let baseUrl = DEFAULT_BASE_URL;
+    if (rawBaseUrl !== undefined && rawBaseUrl !== null && String(rawBaseUrl).trim() !== '') {
+      const normalizedBase = String(rawBaseUrl).trim().replace(/\/+$/, '');
+      if (!ALLOWED_BASE_URLS.includes(normalizedBase)) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid destination website. Allowed: ${ALLOWED_BASE_URLS.join(', ')}`
+        });
+      }
+      baseUrl = normalizedBase;
+    }
     const resolvedMedium = utmMedium || 'campaign';
 
     let customPath = null;
