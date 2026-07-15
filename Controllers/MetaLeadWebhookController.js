@@ -416,7 +416,10 @@ export const handleMetaLeadWebhook = async (req, res) => {
 // ---------------------------------------------------------------------------
 
 export async function sendMetaLeadDiscordNotification(leadInfo) {
-  const webhookUrl = process.env.DISCORD_WEB_HOOK_URL;
+  // DISCORD_META_LEADS_WEBHOOK_URL targets the meta-leads channel (same one
+  // the Sheets Apps Script posts to); DISCORD_WEB_HOOK_URL is the legacy
+  // fallback and points at the payments channel.
+  const webhookUrl = process.env.DISCORD_META_LEADS_WEBHOOK_URL || process.env.DISCORD_WEB_HOOK_URL;
   if (!webhookUrl) return;
 
   const embed = {
