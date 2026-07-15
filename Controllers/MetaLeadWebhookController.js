@@ -598,18 +598,7 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
 
     const anythingToKnow = `Job type: ${sanitizeJobType(job_type)}`;
 
-    const filter = { metaLeadId };
-
-    const $set = {
-      utmSource: platform != null && String(platform).trim() !== '' ? String(platform).trim() : 'meta_lead_ad',
-      utmMedium: 'paid',
-      utmCampaign,
-      clientName,
-      clientEmail,
-      clientPhone,
-      normalizedClientPhone,
-      bookingCreatedAt,
-      leadSource: 'meta_lead_ad',
+    const metaFields = {
       metaLeadId,
       metaFormId: form_id != null ? String(form_id) : null,
       metaAdId: ad_id != null ? String(ad_id) : null,
@@ -622,8 +611,59 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       metaPlatform: platform != null ? String(platform) : null,
       metaIsOrganic: typeof is_organic === 'boolean' ? is_organic : (is_organic === 'true' ? true : (is_organic === 'false' ? false : null)),
       metaLeadStatus: lead_status != null ? String(lead_status) : null,
+      metaRawData: body
+    };
+
+    // The upsert below keys on metaLeadId, but the same person may already
+    // exist WITHOUT one (e.g. captured via the website meta ads form before
+    // the sheet synced). Merge the meta fields into that lead instead of
+    // creating a duplicate — same email/phone fallback the webhook path uses.
+    const existingByMetaId = await CampaignBookingModel.findOne({ metaLeadId }).lean();
+    if (!existingByMetaId) {
+      const orConditions = [{ clientEmail }];
+      if (normalizedClientPhone) {
+        orConditions.push({ normalizedClientPhone });
+        orConditions.push({ clientPhone: { $regex: normalizedClientPhone.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$' } });
+      }
+      const existingLead = await CampaignBookingModel.findOne({ $or: orConditions }).sort({ bookingCreatedAt: -1 });
+
+      if (existingLead) {
+        const mergeSet = { ...metaFields };
+        if (clientPhone) {
+          mergeSet.clientPhone = clientPhone;
+          mergeSet.normalizedClientPhone = normalizedClientPhone || null;
+        }
+        if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
+        const prev = existingLead.anythingToKnow || '';
+        if (!prev.includes(anythingToKnow)) {
+          mergeSet.anythingToKnow = prev ? `${prev}\n\n${anythingToKnow}` : anythingToKnow;
+        }
+
+        await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
+        console.log('meta-leads-from-sheet: merged into existing lead', {
+          metaLeadId,
+          bookingId: existingLead.bookingId,
+          leadSource: existingLead.leadSource
+        });
+        // No workflow trigger — the lead already went through its intake path.
+        return res.status(200).json({ success: true, isNewLead: false, merged: true, workflowTriggered: false });
+      }
+    }
+
+    const filter = { metaLeadId };
+
+    const $set = {
+      utmSource: platform != null && String(platform).trim() !== '' ? String(platform).trim() : 'meta_lead_ad',
+      utmMedium: 'paid',
+      utmCampaign,
+      clientName,
+      clientEmail,
+      clientPhone,
+      normalizedClientPhone,
+      bookingCreatedAt,
+      leadSource: 'meta_lead_ad',
+      ...metaFields,
       anythingToKnow,
-      metaRawData: body,
       updatedAt: now
     };
 
