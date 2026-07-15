@@ -415,7 +415,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
 // Discord notification
 // ---------------------------------------------------------------------------
 
-async function sendMetaLeadDiscordNotification(leadInfo) {
+export async function sendMetaLeadDiscordNotification(leadInfo) {
   const webhookUrl = process.env.DISCORD_WEB_HOOK_URL;
   if (!webhookUrl) return;
 
@@ -437,7 +437,8 @@ async function sendMetaLeadDiscordNotification(leadInfo) {
   await fetch(webhookUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ embeds: [embed] })
+    body: JSON.stringify({ embeds: [embed] }),
+    signal: AbortSignal.timeout(5000)
   });
 }
 

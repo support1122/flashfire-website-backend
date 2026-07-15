@@ -105,6 +105,8 @@ import {
   createMetaLeadManually,
   upsertMetaLeadFromSheet
 } from "./Controllers/MetaLeadWebhookController.js";
+// Website Meta Ads Form Controller
+import { submitMetaAdsFormLead } from "./Controllers/MetaAdsFormController.js";
 // Payment Reminder Controllers
 import { schedulePaymentReminder, getPaymentReminders, cancelPaymentReminder } from "./Controllers/PaymentReminderController.js";
 // Payment Controllers
@@ -502,6 +504,7 @@ export default function Routes(app) {
   app.post('/api/webhooks/meta-leads', handleMetaLeadWebhook); // Receive Meta Lead Ad submissions (POST)
   app.post('/api/meta-leads/manual', createMetaLeadManually); // Manually create Meta lead (for testing)
   app.post('/meta-leads-from-sheet', upsertMetaLeadFromSheet); // Google Apps Script / Sheets → MongoDB upsert by metaLeadId
+  app.post('/api/meta-ads-form/lead', submitMetaAdsFormLead); // Website lead form → CRM meta lead + workflows
   // Zoom Phone webhook is registered once above (zoomPhoneWebhook) — the duplicate
   // stub handler that previously lived here was dead code (never reached) and was removed.
   // Fireflies Webhooks (DISABLED - Fireflies integration removed)
