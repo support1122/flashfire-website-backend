@@ -41,20 +41,97 @@ const LEAKED_FIELD_NAMES = ['whatsapp_number', 'phone_number', 'mobile_number', 
 
 const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// The business timezone. Every other CRM surface (Graphs 03, the reminders) buckets
+// days in New York, so "Yesterday" here must mean the same calendar day it means there.
+const TZ = 'America/New_York';
+
+/** The calendar day (YYYY-MM-DD) of an instant, in the business timezone. */
+function nyDay(date) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: TZ,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const g = (t) => parts.find((p) => p.type === t).value;
+  return `${g('year')}-${g('month')}-${g('day')}`;
+}
+
 /**
- * Aggregation stages that derive the two values this tab computes rather than stores:
+ * Shift a YYYY-MM-DD day by whole days. Pure calendar arithmetic on the date parts
+ * (via a UTC anchor that is never displayed), so a DST transition in the middle of the
+ * range cannot move a boundary by a day.
+ */
+function shiftDay(dayStr, deltaDays) {
+  const [y, m, d] = dayStr.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  dt.setUTCDate(dt.getUTCDate() + deltaDays);
+  return dt.toISOString().slice(0, 10);
+}
+
+const isDayStr = (s) => typeof s === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s);
+
+/**
+ * The min/max NY day (inclusive) for a quick preset, relative to today. Presets overlap
+ * on purpose (Yesterday ⊂ Last 7 days ⊂ Last 30 days) — they are alternative shortcuts,
+ * not a partition, so their counts are not expected to sum to the total.
+ */
+function presetDayBounds(preset) {
+  const today = nyDay(new Date());
+  switch (preset) {
+    case 'today':
+      return { min: today, max: today };
+    case 'yesterday': {
+      const y = shiftDay(today, -1);
+      return { min: y, max: y };
+    }
+    case 'last7':
+      return { min: shiftDay(today, -6), max: today };
+    case 'last30':
+      return { min: shiftDay(today, -29), max: today };
+    case 'older30':
+      // Strictly before the Last-30 window starts.
+      return { max: shiftDay(today, -30) };
+    default:
+      return null;
+  }
+}
+
+/**
+ * A `$match` on the derived `_createdDayNY` string. An explicit from/to range wins over a
+ * preset. String comparison is exact here because YYYY-MM-DD sorts chronologically.
+ */
+function dateDayMatch({ preset, from, to }) {
+  if (isDayStr(from) || isDayStr(to)) {
+    const cond = {};
+    if (isDayStr(from)) cond.$gte = from;
+    if (isDayStr(to)) cond.$lte = to;
+    return Object.keys(cond).length ? { _createdDayNY: cond } : null;
+  }
+  const b = presetDayBounds(preset);
+  if (!b) return null;
+  const cond = {};
+  if (b.min) cond.$gte = b.min;
+  if (b.max) cond.$lte = b.max;
+  return { _createdDayNY: cond };
+}
+
+/**
+ * Aggregation stages that derive the values this tab computes rather than stores:
  *
- *   _phoneKey — the lead's last-10 digits. CampaignBooking.normalizedClientPhone is
- *               already last-10, but ~9 rows never got one (they were written through
- *               an update path that skips the pre-save hook), so fall back to the raw
- *               clientPhone and truncate it here.
+ *   _phoneKey     — the lead's last-10 digits. CampaignBooking.normalizedClientPhone is
+ *                   already last-10, but ~9 rows never got one (written through an update
+ *                   path that skips the pre-save hook), so fall back to the raw
+ *                   clientPhone and truncate it here.
  *
- *   _type     — the job-type answer, which the ingest buries in the first line of
- *               `anythingToKnow` ("Job type: opt_jobs"). Null unless it is a real
- *               answer, because both ingest paths have been landing junk in that slot:
- *               the lead's phone number (Sheets sends the phone in its `job_type`
- *               column) and bare field names. Rendering a phone number under "Type"
- *               would be wrong and would duplicate the Phone column.
+ *   _type         — the job-type answer, which the ingest buries in the first line of
+ *                   `anythingToKnow` ("Job type: opt_jobs"). Null unless it is a real
+ *                   answer, because both ingest paths have been landing junk in that slot:
+ *                   the lead's phone number (Sheets sends the phone in its `job_type`
+ *                   column) and bare field names. Rendering a phone number under "Type"
+ *                   would be wrong and would duplicate the Phone column.
+ *
+ *   _createdDayNY — the form-fill day as a NY calendar-day string, for the date filters.
  *
  * Defined once and shared by the list and summary endpoints, so a lead can never be
  * filtered under one definition and displayed under another.
@@ -119,26 +196,11 @@ const DERIVE_STAGES = [
           '$_jtRaw',
         ],
       },
-      // Bucket boundaries must mirror ageRange() exactly, or the dropdown would show a
-      // count that its own filter cannot reproduce.
-      _ageBucket: {
-        $let: {
-          vars: {
-            days: {
-              $divide: [{ $subtract: ['$$NOW', '$bookingCreatedAt'] }, 24 * 60 * 60 * 1000],
-            },
-          },
-          in: {
-            $switch: {
-              branches: [
-                { case: { $lt: ['$$days', 2] }, then: 'lt2d' },
-                { case: { $lt: ['$$days', 7] }, then: '2to7d' },
-                { case: { $lt: ['$$days', 30] }, then: '7to30d' },
-              ],
-              default: 'gt30d',
-            },
-          },
-        },
+      // The lead's form-fill day as a NY calendar-day string. Both the day-range filter
+      // and the quick presets compare against this, so a lead can never be counted under
+      // one day boundary and filtered under another.
+      _createdDayNY: {
+        $dateToString: { date: '$bookingCreatedAt', format: '%Y-%m-%d', timezone: TZ },
       },
     },
   },
@@ -201,28 +263,6 @@ function statusStage(calledKeys, conversationKeys) {
       },
     },
   };
-}
-
-/**
- * How long ago the lead filled the form. Merged into (not over) the base 24h cutoff:
- * the age ranges below are all older than 24h, so spreading this last narrows the
- * window correctly rather than reopening it.
- */
-function ageRange(age) {
-  const now = Date.now();
-  const daysAgo = (n) => new Date(now - n * 24 * 60 * 60 * 1000);
-  switch (age) {
-    case 'lt2d':
-      return { $gt: daysAgo(2) };
-    case '2to7d':
-      return { $gt: daysAgo(7), $lte: daysAgo(2) };
-    case '7to30d':
-      return { $gt: daysAgo(30), $lte: daysAgo(7) };
-    case 'gt30d':
-      return { $lte: daysAgo(30) };
-    default:
-      return null;
-  }
 }
 
 const jobTypeLabel = (t) =>
@@ -481,7 +521,9 @@ export const getCallLeads = async (req, res) => {
     const typeFilter = String(req.query.type || '').trim();
     const assigneeFilter = String(req.query.assignee || '').trim().toLowerCase();
     const statusFilter = String(req.query.status || 'all').trim();
-    const ageFilter = String(req.query.age || 'all').trim();
+    const datePreset = String(req.query.datePreset || '').trim();
+    const dateFrom = String(req.query.from || '').trim();
+    const dateTo = String(req.query.to || '').trim();
     const sort = String(req.query.sort || 'newest').trim();
 
     const match = baseMatch();
@@ -498,9 +540,6 @@ export const getCallLeads = async (req, res) => {
     } else if (assigneeFilter) {
       match['callLeadAssignee.email'] = assigneeFilter;
     }
-
-    const age = ageRange(ageFilter);
-    if (age) match.bookingCreatedAt = { ...match.bookingCreatedAt, ...age };
 
     // Applied last so it overwrites any assignee filter: a BDA cannot widen their own
     // scope by passing ?assignee=someone-else.
@@ -525,6 +564,8 @@ export const getCallLeads = async (req, res) => {
     if (['new', 'attempted', 'contacted'].includes(statusFilter)) {
       pipeline.push({ $match: { _status: statusFilter } });
     }
+    const dateMatch = dateDayMatch({ preset: datePreset, from: dateFrom, to: dateTo });
+    if (dateMatch) pipeline.push({ $match: dateMatch });
 
     const [facet] = await CampaignBookingModel.aggregate([
       ...pipeline,
@@ -625,6 +666,18 @@ export const getCallLeadsSummary = async (req, res) => {
     const match = baseMatch();
     if (scopedTo) match['callLeadAssignee.email'] = scopedTo;
 
+    // Quick-preset boundaries, computed once here and reused as literals in the $group
+    // below AND by dateDayMatch() at query time — same day strings both places, so each
+    // chip's count is exactly what clicking it returns.
+    const today = nyDay(new Date());
+    const dYesterday = shiftDay(today, -1);
+    const dLast7From = shiftDay(today, -6);
+    const dLast30From = shiftDay(today, -29);
+    const dOlder30To = shiftDay(today, -30);
+    const inRange = (from, to) => ({
+      $and: [{ $gte: ['$_createdDayNY', from] }, { $lte: ['$_createdDayNY', to] }],
+    });
+
     const [facet] = await CampaignBookingModel.aggregate([
       { $match: match },
       ...DERIVE_STAGES,
@@ -648,11 +701,18 @@ export const getCallLeadsSummary = async (req, res) => {
                 // A lead with no number cannot be called from this tab. Reported,
                 // not silently folded into "never called".
                 noPhone: { $sum: { $cond: [{ $eq: ['$_phoneKey', ''] }, 1, 0] } },
+                // Quick-preset counts. These OVERLAP (yesterday ⊂ last7 ⊂ last30), so
+                // they are not expected to sum to total.
+                qYesterday: { $sum: { $cond: [{ $eq: ['$_createdDayNY', dYesterday] }, 1, 0] } },
+                qLast7: { $sum: { $cond: [inRange(dLast7From, today), 1, 0] } },
+                qLast30: { $sum: { $cond: [inRange(dLast30From, today), 1, 0] } },
+                qOlder30: { $sum: { $cond: [{ $lte: ['$_createdDayNY', dOlder30To] }, 1, 0] } },
+                // Oldest form-fill day present — bounds the range picker's "From".
+                oldestDay: { $min: '$_createdDayNY' },
               },
             },
           ],
           byType: [{ $group: { _id: '$_type', count: { $sum: 1 } } }, { $sort: { count: -1 } }],
-          byAge: [{ $group: { _id: '$_ageBucket', count: { $sum: 1 } } }],
           byAssignee: [
             { $match: { 'callLeadAssignee.email': { $nin: [null, ''] } } },
             {
@@ -670,9 +730,8 @@ export const getCallLeadsSummary = async (req, res) => {
 
     const t = facet?.totals?.[0] ?? {
       total: 0, statusNew: 0, attempted: 0, contacted: 0, assigned: 0, noPhone: 0,
+      qYesterday: 0, qLast7: 0, qLast30: 0, qOlder30: 0, oldestDay: null,
     };
-
-    const ageCounts = Object.fromEntries((facet?.byAge ?? []).map((r) => [r._id, r.count]));
 
     return res.status(200).json({
       success: true,
@@ -695,12 +754,17 @@ export const getCallLeadsSummary = async (req, res) => {
         { value: 'attempted', label: 'Attempted', count: t.attempted },
         { value: 'contacted', label: 'Contacted', count: t.contacted },
       ],
-      ages: [
-        { value: 'lt2d', label: '1–2 days', count: ageCounts.lt2d ?? 0 },
-        { value: '2to7d', label: '2–7 days', count: ageCounts['2to7d'] ?? 0 },
-        { value: '7to30d', label: '7–30 days', count: ageCounts['7to30d'] ?? 0 },
-        { value: 'gt30d', label: '30+ days', count: ageCounts.gt30d ?? 0 },
+      // Quick date presets. Counts overlap by design — alternative shortcuts, not a
+      // partition — so they do not sum to total.
+      dateQuick: [
+        { value: 'yesterday', label: 'Yesterday', count: t.qYesterday },
+        { value: 'last7', label: 'Last 7 days', count: t.qLast7 },
+        { value: 'last30', label: 'Last 30 days', count: t.qLast30 },
+        { value: 'older30', label: '30+ days', count: t.qOlder30 },
       ],
+      // The window the day-range picker may span: from the oldest form-fill up to today.
+      // Lets the UI bound its date inputs instead of allowing absurd dates.
+      dateBounds: { min: t.oldestDay, max: today },
       assignees: (facet?.byAssignee ?? []).map((r) => ({
         email: r._id,
         name: r.name || r._id,

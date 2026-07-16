@@ -465,8 +465,11 @@ export const trackButtonClick = async (req, res) => {
     // Increment total button clicks
     campaign.totalButtonClicks = (campaign.totalButtonClicks || 0) + 1;
 
-    // Also increment total clicks (for backward compatibility)
-    campaign.totalClicks += 1;
+    // Note: deliberately NOT bumping totalClicks here. totalClicks backs the "Page
+    // Views" card in the no-date-filter read, so folding button clicks into it would
+    // make Page Views count clicks too. No campaign has ever had a button click, so
+    // this changes no existing number — it only keeps Page Views meaning page views
+    // now that landing pages actually report button clicks.
 
     // Add to unique visitors if not already present
     if (!campaign.uniqueVisitors.includes(finalVisitorId)) {
