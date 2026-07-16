@@ -1,6 +1,7 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { Logger } from '../Utils/Logger.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
+import { ensureCountryCode } from '../Utils/ensureCountryCode.js';
 import { triggerWorkflow } from './WorkflowController.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
@@ -286,7 +287,8 @@ export const handleMetaLeadWebhook = async (req, res) => {
 
         const clientName = extracted.fullName || 'New lead';
         const clientEmail = extracted.email;
-        const clientPhone = extracted.phone || '';
+        // Default a country-code-less number to +1 so WhatsApp/Wati don't misread it.
+        const clientPhone = ensureCountryCode(extracted.phone || '');
         const formName = leadData?.form_name || '';
         const parsedFields = extracted.parsedFields || {};
 
@@ -470,7 +472,8 @@ export async function sendMetaLeadDiscordNotification(leadInfo) {
 
 export const createMetaLeadManually = async (req, res) => {
   try {
-    const { clientName, clientEmail, clientPhone, formName, adId } = req.body;
+    const { clientName, clientEmail, formName, adId } = req.body;
+    const clientPhone = ensureCountryCode(req.body?.clientPhone || '');
 
     if (!clientName || !clientEmail) {
       return res.status(400).json({ success: false, message: 'clientName and clientEmail are required' });
@@ -611,7 +614,10 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     const now = new Date();
     const bookingCreatedAt = parseSheetCreatedTime(created_time);
     const clientName = (full_name != null ? String(full_name).trim() : '') || 'New lead';
-    const clientPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
+    // Sheet leads arrive as bare national numbers; pin a +1 default so WhatsApp/Wati
+    // don't misread e.g. "3346694343" as France (+33). Existing country codes are kept.
+    const rawPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
+    const clientPhone = rawPhone ? ensureCountryCode(rawPhone) : null;
     const normalizedClientPhone = normalizedPhoneLast10(clientPhone);
 
     const resolvedCampaignName = campaign_name != null && String(campaign_name).trim() !== '' ? String(campaign_name).trim() : null;

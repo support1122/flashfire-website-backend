@@ -1,6 +1,7 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { MetaAdsFormSubmissionModel } from '../Schema_Models/MetaAdsFormSubmission.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
+import { ensureCountryCode } from '../Utils/ensureCountryCode.js';
 import { triggerWorkflow } from './WorkflowController.js';
 import { getClientIp, detectCountryFromIp } from '../Utils/GeoIP.js';
 import { sendMetaLeadDiscordNotification } from './MetaLeadWebhookController.js';
@@ -235,6 +236,10 @@ export const submitMetaAdsFormLead = async (req, res) => {
     const userAgent = req.headers['user-agent'] || null;
     const normalizedEmail = email; // already trimmed + lowercased in validation
     const normalizedPhone = normalizePhoneForMatching(phone);
+    // The stored CRM number, with a +1 default when the visitor typed no country code —
+    // otherwise WhatsApp/Wati guesses the country from the leading digits. The raw typed
+    // value is still kept on the archive record below for audit.
+    const clientPhone = phone ? ensureCountryCode(phone) : null;
 
     // 5. Archive first — CRM capture takes priority, so archive failure is non-fatal
     try {
@@ -278,7 +283,7 @@ export const submitMetaAdsFormLead = async (req, res) => {
       // 7. Merge path — enrich only; never downgrade status or re-trigger workflows
       const mergeSet = { clientName: name };
       if (phone) {
-        mergeSet.clientPhone = phone;
+        mergeSet.clientPhone = clientPhone;
         // findOneAndUpdate bypasses the pre-save hook, so set normalizedClientPhone explicitly
         mergeSet.normalizedClientPhone = normalizedPhone || null;
       }
@@ -318,7 +323,7 @@ export const submitMetaAdsFormLead = async (req, res) => {
     const newBooking = new CampaignBookingModel({
       clientName: name,
       clientEmail: normalizedEmail,
-      clientPhone: phone || null,
+      clientPhone: clientPhone || null,
       normalizedClientPhone: normalizedPhone || null,
       utmSource: utmSource || 'meta_ads_form',
       utmMedium: utmMedium || 'paid',
