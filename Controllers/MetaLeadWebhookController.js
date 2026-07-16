@@ -341,6 +341,21 @@ export const handleMetaLeadWebhook = async (req, res) => {
 
           await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
           console.log(`Meta lead merged: ${existingLead.bookingId} | ${existingLead.clientEmail} | ${existingLead.bookingStatus} | Form: ${formName}`);
+
+          const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled';
+
+          if (!hasActiveUpcomingMeeting) {
+            try {
+              const wfResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
+              if (wfResult.success && wfResult.triggered) {
+                console.log(`Not-scheduled workflows re-triggered for returning meta lead ${existingLead.bookingId}`);
+              }
+            } catch (wfError) {
+              console.error(`Failed to re-trigger workflows for returning meta lead ${existingLead.bookingId}:`, wfError.message);
+            }
+          } else {
+            console.log(`Skipped workflow re-trigger for ${existingLead.bookingId} — active upcoming meeting scheduled`);
+          }
         } else {
           const metaCampaignName = leadValue.campaign_name || leadData?.campaign_name || null;
           const metaAdName = leadValue.ad_name || leadData?.ad_name || null;
