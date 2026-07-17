@@ -19,13 +19,17 @@ import { ensureCountryCode } from './ensureCountryCode.js';
  *   2. Ambiguous 10 digits starting 6-9 -> Twilio Lookup v2 basic validation (free):
  *      the number is validated against BOTH the US and IN numbering plans.
  *      valid only as IN -> +91; valid only as US -> +1.
- *   3. Fallback for the ambiguous range when Twilio is inconclusive (both valid),
- *      not configured, or unreachable -> +91 (per product rule: 6-9 leads are
- *      overwhelmingly Indian in this funnel).
- *   4. Anything else falls back to ensureCountryCode's +1 default.
+ *   3. Both valid -> Twilio Line Type Intelligence (paid, ~$0.008/lookup,
+ *      disable with TWILIO_LOOKUP_LINE_TYPE=false): a REAL mobile beats a
+ *      VoIP/landline/toll-free shell. E.g. 8607088800 is "nonFixedVoip" as US
+ *      but "mobile - Vodafone IDEA Haryana" as IN -> +91 on evidence.
+ *   4. Still tied (genuine collision - real mobile in BOTH countries, e.g.
+ *      9546662642 = T-Mobile US and Airtel Bihar) or Twilio unavailable ->
+ *      +91 (per product rule: 6-9 leads are overwhelmingly Indian in this funnel).
+ *   5. Anything else falls back to ensureCountryCode's +1 default.
  */
 
-const TWILIO_LOOKUP_TIMEOUT_MS = 4000;
+const TWILIO_LOOKUP_TIMEOUT_MS = 8000;
 
 // digits -> { phone, method } so sheet re-syncs/merges don't re-hit Twilio.
 const resolveCache = new Map();
@@ -77,6 +81,34 @@ async function isValidInCountry(client, nationalDigits, countryCode) {
     // 404 from Lookup means "not a parseable number for this country" -> invalid.
     if (e?.status === 404) return false;
     console.warn(`MetaSheetPhoneResolver: Twilio lookup failed for ${countryCode}:`, e.message);
+    return null;
+  }
+}
+
+function lineTypeLookupEnabled() {
+  const v = String(process.env.TWILIO_LOOKUP_LINE_TYPE ?? 'true').toLowerCase();
+  return v !== 'false' && v !== '0' && v !== 'off';
+}
+
+/**
+ * Twilio Line Type Intelligence (paid, ~$0.008/lookup). Returns
+ * { type, carrier } (type e.g. 'mobile' | 'nonFixedVoip' | 'landline' |
+ * 'tollFree' | ...) or null when the lookup failed or returned no data.
+ */
+async function getLineType(client, nationalDigits, countryCode) {
+  try {
+    const result = await withTimeout(
+      client.lookups.v2.phoneNumbers(nationalDigits).fetch({
+        countryCode,
+        fields: 'line_type_intelligence'
+      }),
+      TWILIO_LOOKUP_TIMEOUT_MS
+    );
+    const lti = result?.lineTypeIntelligence;
+    if (!lti || !lti.type) return null;
+    return { type: lti.type, carrier: lti.carrier_name || null };
+  } catch (e) {
+    console.warn(`MetaSheetPhoneResolver: line-type lookup failed for ${countryCode}:`, e.message);
     return null;
   }
 }
@@ -143,6 +175,7 @@ export async function resolveSheetLeadPhone(rawPhone) {
     if (first >= '6' && first <= '9') {
       const client = await getTwilioClient();
       if (client) {
+        // Round 1 - free basic validation against both plans.
         const [validIn, validUs] = await Promise.all([
           isValidInCountry(client, digits, 'IN'),
           isValidInCountry(client, digits, 'US')
@@ -153,8 +186,35 @@ export async function resolveSheetLeadPhone(rawPhone) {
         if (validUs === true && validIn !== true) {
           return cacheAndReturn(digits, { phone: `+1${digits}`, method: 'twilio-us' });
         }
+
+        // Round 2 - both plans accept the shape. Paid Line Type Intelligence:
+        // a real mobile beats a VoIP/landline/toll-free shell.
+        if (validIn === true && validUs === true && lineTypeLookupEnabled()) {
+          const [ltiIn, ltiUs] = await Promise.all([
+            getLineType(client, digits, 'IN'),
+            getLineType(client, digits, 'US')
+          ]);
+          const inMobile = ltiIn?.type === 'mobile';
+          const usMobile = ltiUs?.type === 'mobile';
+          if (inMobile && !usMobile) {
+            console.log(`MetaSheetPhoneResolver: ${digits} -> IN mobile (${ltiIn.carrier || 'unknown carrier'}), US is ${ltiUs?.type || 'unknown'}`);
+            return cacheAndReturn(digits, { phone: `+91${digits}`, method: 'lti-mobile-in' });
+          }
+          if (usMobile && !inMobile) {
+            console.log(`MetaSheetPhoneResolver: ${digits} -> US mobile (${ltiUs.carrier || 'unknown carrier'}), IN is ${ltiIn?.type || 'unknown'}`);
+            return cacheAndReturn(digits, { phone: `+1${digits}`, method: 'lti-mobile-us' });
+          }
+          if (inMobile && usMobile) {
+            // Genuine collision: two real subscribers share these 10 digits
+            // (e.g. T-Mobile US and Airtel IN). Only lead context could tell
+            // them apart; the funnel rule says India.
+            console.log(`MetaSheetPhoneResolver: ${digits} -> mobile in BOTH (IN: ${ltiIn.carrier}, US: ${ltiUs.carrier}); defaulting to IN`);
+            return cacheAndReturn(digits, { phone: `+91${digits}`, method: 'lti-collision-default-in' });
+          }
+          // Neither side is a mobile, or LTI failed - fall through to the default.
+        }
       }
-      // Twilio unavailable, errored, or says both/neither are valid ->
+      // Twilio unavailable, inconclusive, or line-type lookup disabled ->
       // product rule: 6-9 leads in this funnel default to India.
       return cacheAndReturn(digits, { phone: `+91${digits}`, method: 'ambiguous-default-in' });
     }
