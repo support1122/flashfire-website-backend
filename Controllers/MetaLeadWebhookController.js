@@ -2,6 +2,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { Logger } from '../Utils/Logger.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 import { ensureCountryCode } from '../Utils/ensureCountryCode.js';
+import { resolveSheetLeadPhone } from '../Utils/MetaSheetPhoneResolver.js';
 import { triggerWorkflow } from './WorkflowController.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
@@ -614,10 +615,19 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     const now = new Date();
     const bookingCreatedAt = parseSheetCreatedTime(created_time);
     const clientName = (full_name != null ? String(full_name).trim() : '') || 'New lead';
-    // Sheet leads arrive as bare national numbers; pin a +1 default so WhatsApp/Wati
-    // don't misread e.g. "3346694343" as France (+33). Existing country codes are kept.
+    // Sheet leads arrive as bare national numbers (people rarely type a country
+    // code into Meta instant forms). Resolve US vs India: deterministic shape
+    // rules first, Twilio Lookup v2 for the ambiguous 6-9 range, India default
+    // when Twilio is inconclusive. See Utils/MetaSheetPhoneResolver.js.
     const rawPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
-    const clientPhone = rawPhone ? ensureCountryCode(rawPhone) : null;
+    let clientPhone = null;
+    if (rawPhone) {
+      const resolved = await resolveSheetLeadPhone(rawPhone);
+      clientPhone = resolved.phone;
+      if (resolved.method !== 'explicit' && resolved.method !== 'empty') {
+        console.log(`meta-leads-from-sheet: phone "${rawPhone}" -> "${clientPhone}" (${resolved.method})`, { metaLeadId });
+      }
+    }
     const normalizedClientPhone = normalizedPhoneLast10(clientPhone);
 
     const resolvedCampaignName = campaign_name != null && String(campaign_name).trim() !== '' ? String(campaign_name).trim() : null;
