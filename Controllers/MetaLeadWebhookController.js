@@ -289,7 +289,8 @@ export const handleMetaLeadWebhook = async (req, res) => {
         const clientName = extracted.fullName || 'New lead';
         const clientEmail = extracted.email;
         // Default a country-code-less number to +1 so WhatsApp/Wati don't misread it.
-        const clientPhone = ensureCountryCode(extracted.phone || '');
+        const rawWebhookPhone = extracted.phone || '';
+        const clientPhone = ensureCountryCode(rawWebhookPhone);
         const formName = leadData?.form_name || '';
         const parsedFields = extracted.parsedFields || {};
 
@@ -334,6 +335,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
           };
           if (clientPhone) {
             mergeSet.clientPhone = clientPhone;
+            mergeSet.rawClientPhone = rawWebhookPhone || null;
             mergeSet.normalizedClientPhone = normalizedPhone || null;
           }
           if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
@@ -353,6 +355,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
             clientName: clientName.trim(),
             clientEmail: normalizedEmail,
             clientPhone: clientPhone || null,
+            rawClientPhone: rawWebhookPhone || null,
             normalizedClientPhone: normalizedPhone || null,
             utmSource: parsedFields.utmSource || metaPlatform || 'meta_lead_ad',
             utmMedium: parsedFields.utmMedium || 'paid',
@@ -474,7 +477,8 @@ export async function sendMetaLeadDiscordNotification(leadInfo) {
 export const createMetaLeadManually = async (req, res) => {
   try {
     const { clientName, clientEmail, formName, adId } = req.body;
-    const clientPhone = ensureCountryCode(req.body?.clientPhone || '');
+    const rawManualPhone = req.body?.clientPhone || '';
+    const clientPhone = ensureCountryCode(rawManualPhone);
 
     if (!clientName || !clientEmail) {
       return res.status(400).json({ success: false, message: 'clientName and clientEmail are required' });
@@ -513,6 +517,7 @@ export const createMetaLeadManually = async (req, res) => {
       clientName: clientName.trim(),
       clientEmail: normalizedEmail,
       clientPhone: clientPhone || null,
+      rawClientPhone: rawManualPhone || null,
       utmSource: 'meta_lead_ad',
       utmMedium: 'paid',
       utmCampaign: adId ? `meta_ad_${adId}` : 'meta_lead_form',
@@ -669,6 +674,7 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
         const mergeSet = { ...metaFields };
         if (clientPhone) {
           mergeSet.clientPhone = clientPhone;
+          mergeSet.rawClientPhone = rawPhone;
           mergeSet.normalizedClientPhone = normalizedClientPhone || null;
         }
         if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
@@ -697,6 +703,7 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       clientName,
       clientEmail,
       clientPhone,
+      rawClientPhone: rawPhone,
       normalizedClientPhone,
       bookingCreatedAt,
       leadSource: 'meta_lead_ad',

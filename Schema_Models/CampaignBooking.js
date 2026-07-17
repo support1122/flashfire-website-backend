@@ -58,6 +58,12 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // Phone exactly as the client typed it in the Meta form, before country-code
+  // resolution (Twilio lookup / heuristics) rewrote clientPhone. CRM shows both.
+  rawClientPhone: {
+    type: String,
+    default: null
+  },
   // Normalized phone (no country code) for matching/sync (e.g. Meta leads merge)
   normalizedClientPhone: {
     type: String,
