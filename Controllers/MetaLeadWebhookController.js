@@ -688,7 +688,15 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       const existingLead = await CampaignBookingModel.findOne({ $or: orConditions }).sort({ bookingCreatedAt: -1 });
 
       if (existingLead) {
-        const mergeSet = { ...metaFields };
+        const mergeSet = {
+          utmSource: platform != null && String(platform).trim() !== '' ? String(platform).trim() : 'meta_lead_ad',
+          utmMedium: 'paid',
+          utmCampaign,
+          clientEmail,
+          leadSource: 'meta_lead_ad',
+          ...metaFields,
+          updatedAt: now
+        };
         if (clientPhone) {
           mergeSet.clientPhone = clientPhone;
           mergeSet.rawClientPhone = rawPhone;
@@ -697,18 +705,53 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
         }
         if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
         const prev = existingLead.anythingToKnow || '';
-        if (!prev.includes(anythingToKnow)) {
-          mergeSet.anythingToKnow = prev ? `${prev}\n\n${anythingToKnow}` : anythingToKnow;
-        }
+        mergeSet.anythingToKnow = prev && !prev.includes(anythingToKnow) ? `${prev}\n\n${anythingToKnow}` : (prev || anythingToKnow);
 
         await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
         console.log('meta-leads-from-sheet: merged into existing lead', {
           metaLeadId,
           bookingId: existingLead.bookingId,
-          leadSource: existingLead.leadSource
+          leadSource: existingLead.leadSource,
+          priorStatus: existingLead.bookingStatus
         });
-        // No workflow trigger — the lead already went through its intake path.
-        return res.status(200).json({ success: true, isNewLead: false, merged: true, workflowTriggered: false });
+
+        try {
+          await sendMetaLeadDiscordNotification({
+            bookingId: existingLead.bookingId,
+            clientName: mergeSet.clientName || existingLead.clientName,
+            clientEmail,
+            clientPhone: clientPhone || existingLead.clientPhone || '',
+            formName: metaFields.metaFormName,
+            jobType: sanitizeJobType(job_type),
+            leadgenId: metaLeadId,
+            adId: metaFields.metaAdId,
+            outcome: 'merged'
+          });
+        } catch (discordError) {
+          console.error('meta-leads-from-sheet: discord notify failed', discordError.message);
+        }
+
+        let workflowResult = null;
+        const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled';
+        if (!hasActiveUpcomingMeeting) {
+          try {
+            workflowResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
+            if (workflowResult.success && workflowResult.triggered) {
+              console.log(`meta-leads-from-sheet: workflows re-triggered for returning lead ${existingLead.bookingId}`);
+            }
+          } catch (wfError) {
+            console.error(`meta-leads-from-sheet: workflow re-trigger failed for ${existingLead.bookingId}:`, wfError.message);
+          }
+        } else {
+          console.log(`meta-leads-from-sheet: skipped re-trigger for ${existingLead.bookingId} — active scheduled meeting`);
+        }
+
+        return res.status(200).json({
+          success: true,
+          isNewLead: false,
+          merged: true,
+          workflowTriggered: workflowResult?.triggered || false
+        });
       }
     }
 
