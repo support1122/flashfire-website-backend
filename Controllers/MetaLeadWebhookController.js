@@ -732,7 +732,9 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
         }
 
         let workflowResult = null;
-        const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled';
+        const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled'
+          && existingLead.scheduledEventStartTime
+          && new Date(existingLead.scheduledEventStartTime) > now;
         if (!hasActiveUpcomingMeeting) {
           try {
             workflowResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
