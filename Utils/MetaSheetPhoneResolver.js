@@ -1,5 +1,4 @@
 import { ensureCountryCode } from './ensureCountryCode.js';
-import { whapiConfigured, hasWhatsApp } from './WhapiExistenceCheck.js';
 
 /**
  * Country-code resolution for Google-Sheet Meta leads (upsertMetaLeadFromSheet ONLY).
@@ -20,16 +19,13 @@ import { whapiConfigured, hasWhatsApp } from './WhapiExistenceCheck.js';
  *   2. Ambiguous 10 digits starting 6-9 -> Twilio Lookup v2 basic validation (free):
  *      the number is validated against BOTH the US and IN numbering plans.
  *      valid only as IN -> +91; valid only as US -> +1.
- *   3. Both valid -> Whapi.cloud WhatsApp existence check (product rule,
- *      needs WHAPI_API_TOKEN; same service the dashboard backend uses):
- *      check +1 first - if the US number is on WhatsApp, send there;
- *      otherwise if the IN number is on WhatsApp, use +91.
- *   4. Whapi unavailable/inconclusive -> Twilio Line Type Intelligence
- *      (paid, ~$0.008/lookup, disable with TWILIO_LOOKUP_LINE_TYPE=false):
- *      a REAL mobile beats a VoIP/landline/toll-free shell.
- *   5. Still tied or all lookups unavailable -> +91 (funnel rule: 6-9 leads
- *      are overwhelmingly Indian in this funnel).
- *   6. Anything else falls back to ensureCountryCode's +1 default.
+ *   3. Otherwise (both plans accept the shape, or Twilio unavailable) the
+ *      number is stored as +1 with method 'wati-pending': the FIRST workflow
+ *      WhatsApp send verifies it via WATI's isValidWhatsAppNumber response
+ *      flag - if the +1 reading has no WhatsApp the sender flips to +91,
+ *      retries once, and persists the working number on the lead
+ *      (see the WhatsApp branch of WorkflowController.executeWorkflowStep).
+ *   4. Anything else falls back to ensureCountryCode's +1 default.
  */
 
 const TWILIO_LOOKUP_TIMEOUT_MS = 8000;
@@ -84,34 +80,6 @@ async function isValidInCountry(client, nationalDigits, countryCode) {
     // 404 from Lookup means "not a parseable number for this country" -> invalid.
     if (e?.status === 404) return false;
     console.warn(`MetaSheetPhoneResolver: Twilio lookup failed for ${countryCode}:`, e.message);
-    return null;
-  }
-}
-
-function lineTypeLookupEnabled() {
-  const v = String(process.env.TWILIO_LOOKUP_LINE_TYPE ?? 'true').toLowerCase();
-  return v !== 'false' && v !== '0' && v !== 'off';
-}
-
-/**
- * Twilio Line Type Intelligence (paid, ~$0.008/lookup). Returns
- * { type, carrier } (type e.g. 'mobile' | 'nonFixedVoip' | 'landline' |
- * 'tollFree' | ...) or null when the lookup failed or returned no data.
- */
-async function getLineType(client, nationalDigits, countryCode) {
-  try {
-    const result = await withTimeout(
-      client.lookups.v2.phoneNumbers(nationalDigits).fetch({
-        countryCode,
-        fields: 'line_type_intelligence'
-      }),
-      TWILIO_LOOKUP_TIMEOUT_MS
-    );
-    const lti = result?.lineTypeIntelligence;
-    if (!lti || !lti.type) return null;
-    return { type: lti.type, carrier: lti.carrier_name || null };
-  } catch (e) {
-    console.warn(`MetaSheetPhoneResolver: line-type lookup failed for ${countryCode}:`, e.message);
     return null;
   }
 }
@@ -178,7 +146,8 @@ export async function resolveSheetLeadPhone(rawPhone) {
     if (first >= '6' && first <= '9') {
       const client = await getTwilioClient();
       if (client) {
-        // Round 1 - free basic validation against both plans.
+        // Free basic validation against both plans: a number valid in only
+        // one plan is decided here without wasting a WhatsApp send.
         const [validIn, validUs] = await Promise.all([
           isValidInCountry(client, digits, 'IN'),
           isValidInCountry(client, digits, 'US')
@@ -189,63 +158,13 @@ export async function resolveSheetLeadPhone(rawPhone) {
         if (validUs === true && validIn !== true) {
           return cacheAndReturn(digits, { phone: `+1${digits}`, method: 'twilio-us' });
         }
-
-        // Round 2 - both plans accept the shape. Product rule via Whapi
-        // WhatsApp existence: +1 first - if the US number has WhatsApp the
-        // sends go there; else the IN number if it has WhatsApp. A stranger
-        // can own the other country's number, so this order is a deliberate
-        // product decision; falls through to line-type evidence when Whapi
-        // is unconfigured or cannot answer.
-        if (validIn === true && validUs === true && whapiConfigured()) {
-          const usExists = await hasWhatsApp(`+1${digits}`);
-          if (usExists === true) {
-            console.log(`MetaSheetPhoneResolver: ${digits} -> +1 has WhatsApp (Whapi)`);
-            return cacheAndReturn(digits, { phone: `+1${digits}`, method: 'whapi-us' });
-          }
-          if (usExists === false) {
-            const inExists = await hasWhatsApp(`+91${digits}`);
-            if (inExists === true) {
-              console.log(`MetaSheetPhoneResolver: ${digits} -> +1 has no WhatsApp, +91 does (Whapi)`);
-              return cacheAndReturn(digits, { phone: `+91${digits}`, method: 'whapi-in' });
-            }
-            if (inExists === false) {
-              console.log(`MetaSheetPhoneResolver: ${digits} -> no WhatsApp on either reading (Whapi); falling back to line-type evidence`);
-            }
-          }
-          // usExists/inExists null (Whapi error) or neither on WhatsApp ->
-          // fall through to Line Type Intelligence below.
-        }
-
-        // Round 3 - paid Line Type Intelligence:
-        // a real mobile beats a VoIP/landline/toll-free shell.
-        if (validIn === true && validUs === true && lineTypeLookupEnabled()) {
-          const [ltiIn, ltiUs] = await Promise.all([
-            getLineType(client, digits, 'IN'),
-            getLineType(client, digits, 'US')
-          ]);
-          const inMobile = ltiIn?.type === 'mobile';
-          const usMobile = ltiUs?.type === 'mobile';
-          if (inMobile && !usMobile) {
-            console.log(`MetaSheetPhoneResolver: ${digits} -> IN mobile (${ltiIn.carrier || 'unknown carrier'}), US is ${ltiUs?.type || 'unknown'}`);
-            return cacheAndReturn(digits, { phone: `+91${digits}`, method: 'lti-mobile-in' });
-          }
-          if (usMobile && !inMobile) {
-            console.log(`MetaSheetPhoneResolver: ${digits} -> US mobile (${ltiUs.carrier || 'unknown carrier'}), IN is ${ltiIn?.type || 'unknown'}`);
-            return cacheAndReturn(digits, { phone: `+1${digits}`, method: 'lti-mobile-us' });
-          }
-          if (inMobile && usMobile) {
-            // Genuine collision: two real subscribers share these 10 digits
-            // (e.g. T-Mobile US and Airtel IN). Only lead context could tell
-            // them apart; the funnel rule says India.
-            console.log(`MetaSheetPhoneResolver: ${digits} -> mobile in BOTH (IN: ${ltiIn.carrier}, US: ${ltiUs.carrier}); defaulting to IN`);
-            return cacheAndReturn(digits, { phone: `+91${digits}`, method: 'lti-collision-default-in' });
-          }
-          // Neither side is a mobile, or LTI failed - fall through to the default.
-        }
       }
-      // Twilio unavailable, inconclusive, or line-type lookup disabled ->
-      // product rule: 6-9 leads in this funnel default to India.
-      return cacheAndReturn(digits, { phone: `+91${digits}`, method: 'ambiguous-default-in' });
+      // Both plans accept the shape (or Twilio was unavailable). Product
+      // rule: store +1 first; the FIRST workflow WhatsApp send verifies it
+      // through WATI's isValidWhatsAppNumber flag and flips to +91 with a
+      // retry when the +1 reading has no WhatsApp. The working number is
+      // then persisted on the lead for all future sends.
+      return cacheAndReturn(digits, { phone: `+1${digits}`, method: 'wati-pending' });
     }
   }
 

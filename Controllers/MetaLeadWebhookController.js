@@ -626,9 +626,11 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     // when Twilio is inconclusive. See Utils/MetaSheetPhoneResolver.js.
     const rawPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
     let clientPhone = null;
+    let phoneResolution = null;
     if (rawPhone) {
       const resolved = await resolveSheetLeadPhone(rawPhone);
       clientPhone = resolved.phone;
+      phoneResolution = resolved.method;
       if (resolved.method !== 'explicit' && resolved.method !== 'empty') {
         console.log(`meta-leads-from-sheet: phone "${rawPhone}" -> "${clientPhone}" (${resolved.method})`, { metaLeadId });
       }
@@ -675,6 +677,7 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
         if (clientPhone) {
           mergeSet.clientPhone = clientPhone;
           mergeSet.rawClientPhone = rawPhone;
+          mergeSet.phoneResolution = phoneResolution;
           mergeSet.normalizedClientPhone = normalizedClientPhone || null;
         }
         if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
@@ -704,6 +707,7 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       clientEmail,
       clientPhone,
       rawClientPhone: rawPhone,
+      phoneResolution,
       normalizedClientPhone,
       bookingCreatedAt,
       leadSource: 'meta_lead_ad',
