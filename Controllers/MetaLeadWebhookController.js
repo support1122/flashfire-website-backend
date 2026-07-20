@@ -1,6 +1,8 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { Logger } from '../Utils/Logger.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
+import { ensureCountryCode } from '../Utils/ensureCountryCode.js';
+import { resolveSheetLeadPhone } from '../Utils/MetaSheetPhoneResolver.js';
 import { triggerWorkflow } from './WorkflowController.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
@@ -286,7 +288,9 @@ export const handleMetaLeadWebhook = async (req, res) => {
 
         const clientName = extracted.fullName || 'New lead';
         const clientEmail = extracted.email;
-        const clientPhone = extracted.phone || '';
+        // Default a country-code-less number to +1 so WhatsApp/Wati don't misread it.
+        const rawWebhookPhone = extracted.phone || '';
+        const clientPhone = ensureCountryCode(rawWebhookPhone);
         const formName = leadData?.form_name || '';
         const parsedFields = extracted.parsedFields || {};
 
@@ -331,6 +335,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
           };
           if (clientPhone) {
             mergeSet.clientPhone = clientPhone;
+            mergeSet.rawClientPhone = rawWebhookPhone || null;
             mergeSet.normalizedClientPhone = normalizedPhone || null;
           }
           if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
@@ -365,6 +370,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
             clientName: clientName.trim(),
             clientEmail: normalizedEmail,
             clientPhone: clientPhone || null,
+            rawClientPhone: rawWebhookPhone || null,
             normalizedClientPhone: normalizedPhone || null,
             utmSource: parsedFields.utmSource || metaPlatform || 'meta_lead_ad',
             utmMedium: parsedFields.utmMedium || 'paid',
@@ -485,7 +491,9 @@ export async function sendMetaLeadDiscordNotification(leadInfo) {
 
 export const createMetaLeadManually = async (req, res) => {
   try {
-    const { clientName, clientEmail, clientPhone, formName, adId } = req.body;
+    const { clientName, clientEmail, formName, adId } = req.body;
+    const rawManualPhone = req.body?.clientPhone || '';
+    const clientPhone = ensureCountryCode(rawManualPhone);
 
     if (!clientName || !clientEmail) {
       return res.status(400).json({ success: false, message: 'clientName and clientEmail are required' });
@@ -524,6 +532,7 @@ export const createMetaLeadManually = async (req, res) => {
       clientName: clientName.trim(),
       clientEmail: normalizedEmail,
       clientPhone: clientPhone || null,
+      rawClientPhone: rawManualPhone || null,
       utmSource: 'meta_lead_ad',
       utmMedium: 'paid',
       utmCampaign: adId ? `meta_ad_${adId}` : 'meta_lead_form',
@@ -626,7 +635,21 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     const now = new Date();
     const bookingCreatedAt = parseSheetCreatedTime(created_time);
     const clientName = (full_name != null ? String(full_name).trim() : '') || 'New lead';
-    const clientPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
+    // Sheet leads arrive as bare national numbers (people rarely type a country
+    // code into Meta instant forms). Resolve US vs India: deterministic shape
+    // rules first, Twilio Lookup v2 for the ambiguous 6-9 range, India default
+    // when Twilio is inconclusive. See Utils/MetaSheetPhoneResolver.js.
+    const rawPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
+    let clientPhone = null;
+    let phoneResolution = null;
+    if (rawPhone) {
+      const resolved = await resolveSheetLeadPhone(rawPhone);
+      clientPhone = resolved.phone;
+      phoneResolution = resolved.method;
+      if (resolved.method !== 'explicit' && resolved.method !== 'empty') {
+        console.log(`meta-leads-from-sheet: phone "${rawPhone}" -> "${clientPhone}" (${resolved.method})`, { metaLeadId });
+      }
+    }
     const normalizedClientPhone = normalizedPhoneLast10(clientPhone);
 
     const resolvedCampaignName = campaign_name != null && String(campaign_name).trim() !== '' ? String(campaign_name).trim() : null;
@@ -668,6 +691,8 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
         const mergeSet = { ...metaFields };
         if (clientPhone) {
           mergeSet.clientPhone = clientPhone;
+          mergeSet.rawClientPhone = rawPhone;
+          mergeSet.phoneResolution = phoneResolution;
           mergeSet.normalizedClientPhone = normalizedClientPhone || null;
         }
         if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
@@ -696,6 +721,8 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       clientName,
       clientEmail,
       clientPhone,
+      rawClientPhone: rawPhone,
+      phoneResolution,
       normalizedClientPhone,
       bookingCreatedAt,
       leadSource: 'meta_lead_ad',
