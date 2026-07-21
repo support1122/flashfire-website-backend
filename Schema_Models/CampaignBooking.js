@@ -58,19 +58,6 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
-  // Phone exactly as the client typed it in the Meta form, before country-code
-  // resolution (Twilio lookup / heuristics) rewrote clientPhone. CRM shows both.
-  rawClientPhone: {
-    type: String,
-    default: null
-  },
-  // How clientPhone's country code was decided ('twilio-in', 'nanp-shape-us',
-  // 'wati-pending', 'wati-verified-in', ...). 'wati-pending' means the first
-  // workflow WhatsApp send verifies the +1 guess and flips to +91 on failure.
-  phoneResolution: {
-    type: String,
-    default: null
-  },
   // Normalized phone (no country code) for matching/sync (e.g. Meta leads merge)
   normalizedClientPhone: {
     type: String,
