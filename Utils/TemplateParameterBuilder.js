@@ -142,6 +142,19 @@ async function resolveRescheduleLink(booking) {
 }
 
 /**
+ * Shared builder for the not-scheduled meta_* templates:
+ * {{1}} = client name, {{2}} = booking link.
+ */
+async function metaSchedulingParams({ booking, step }) {
+  const schedulingLink = step?.templateConfig?.schedulingLink || DEFAULT_SCHEDULING_LINK;
+
+  return [
+    booking.clientName || 'Valued Client',
+    schedulingLink
+  ];
+}
+
+/**
  * Template parameter builder registry.
  * Each builder takes { booking, step, executedAt } and returns an array of parameter values.
  */
@@ -186,49 +199,16 @@ const builders = {
     ];
   },
 
-  meta_1: async ({ booking, step }) => {
-    const schedulingLink = step?.templateConfig?.schedulingLink
-      || booking.calendlyRescheduleLink
-      || DEFAULT_SCHEDULING_LINK;
-
-    return [
-      booking.clientName || 'Valued Client',
-      schedulingLink
-    ];
-  },
-
-  meta_2: async ({ booking, step }) => {
-    const schedulingLink = step?.templateConfig?.schedulingLink
-      || booking.calendlyRescheduleLink
-      || DEFAULT_SCHEDULING_LINK;
-
-    return [
-      booking.clientName || 'Valued Client',
-      schedulingLink
-    ];
-  },
-
-  meta_31: async ({ booking, step }) => {
-    const schedulingLink = step?.templateConfig?.schedulingLink
-      || booking.calendlyRescheduleLink
-      || DEFAULT_SCHEDULING_LINK;
-
-    return [
-      booking.clientName || 'Valued Client',
-      schedulingLink
-    ];
-  },
-
-  meta_41: async ({ booking, step }) => {
-    const schedulingLink = step?.templateConfig?.schedulingLink
-      || booking.calendlyRescheduleLink
-      || DEFAULT_SCHEDULING_LINK;
-
-    return [
-      booking.clientName || 'Valued Client',
-      schedulingLink
-    ];
-  },
+  // meta_* templates run in the not-scheduled workflow: the client has no active
+  // upcoming meeting (status change to scheduled cancels these steps), so they must
+  // always get a fresh BOOKING link. Never fall back to booking.calendlyRescheduleLink —
+  // for a returning client (completed meeting, re-filled the form) that field still
+  // holds the old event's reschedule link and would invite them to reschedule a
+  // finished meeting instead of booking a new one.
+  meta_1: metaSchedulingParams,
+  meta_2: metaSchedulingParams,
+  meta_31: metaSchedulingParams,
+  meta_41: metaSchedulingParams,
 
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
