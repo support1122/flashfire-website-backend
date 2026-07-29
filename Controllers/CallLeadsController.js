@@ -768,6 +768,46 @@ export const getCallLeadsSummary = async (req, res) => {
 };
 
 /**
+ * Force reassignment of all call leads to Kalpataru.
+ */
+export async function reassignAllLeadsToKalpataru() {
+  const kalpataru = await CrmUserModel.findOne({
+    email: 'kalpataru@flashfirehq.com',
+    isActive: { $ne: false },
+  }).lean();
+
+  if (!kalpataru) {
+    throw new Error('Kalpataru user not found or inactive');
+  }
+
+  const match = {
+    $or: [{ leadSource: 'meta_lead_ad' }, { metaLeadId: { $exists: true, $ne: null } }],
+    bookingStatus: 'not-scheduled',
+    scheduledEventStartTime: null,
+  };
+
+  const leads = await CampaignBookingModel.find(match).select('bookingId').lean();
+  const now = new Date();
+
+  const ops = leads.map((lead) => ({
+    updateOne: {
+      filter: { bookingId: lead.bookingId },
+      update: {
+        $set: {
+          'callLeadAssignee.email': kalpataru.email,
+          'callLeadAssignee.name': kalpataru.name,
+          'callLeadAssignee.assignedAt': now,
+        },
+      },
+    },
+  }));
+
+  if (ops.length === 0) return { assigned: 0 };
+  const result = await CampaignBookingModel.bulkWrite(ops, { ordered: false });
+  return { assigned: result.modifiedCount };
+}
+
+/**
  * POST /api/crm/call-leads/assign
  * Manual trigger for the assignment pass. The scheduler runs it anyway; this exists
  * so an admin can force a pass without waiting for the tick.
