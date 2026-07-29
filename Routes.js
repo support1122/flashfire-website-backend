@@ -326,6 +326,18 @@ export default function Routes(app) {
   // Force an assignment pass (unassigned leads → the fixed assignee). The scheduler
   // does this on a timer; the controller rejects BDAs, so only admins can trigger it.
   app.post('/api/crm/call-leads/assign', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_EDIT), triggerCallLeadAssignment);
+  app.post('/scripts/assign/calls', async (req, res) => {
+    try {
+      if (req.body?.set !== true) {
+        return res.status(400).json({ success: false, error: 'Missing or invalid body parameter: {set: true}' });
+      }
+      const { reassignAllLeadsToKalpataru } = await import('./Controllers/CallLeadsController.js');
+      const result = await reassignAllLeadsToKalpataru();
+      res.status(200).json({ success: true, ...result });
+    } catch (error) {
+      res.status(500).json({ success: false, error: error.message });
+    }
+  });
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);
   app.post('/api/crm/auth/verify-otp', verifyCrmOtp);
