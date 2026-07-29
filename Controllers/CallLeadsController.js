@@ -318,16 +318,21 @@ function baseMatch() {
 }
 
 /* ------------------------------------------------------------------------ */
-/* BDA rotation                                                              */
+/* BDA assignment                                                            */
 /* ------------------------------------------------------------------------ */
 
+// Every call lead goes to this one BDA. The round-robin across active BDAs was
+// removed on request (2026-07-29, "assign all of these calling leads to Kalpataru
+// for now") — to bring it back, restore the fewest-leads-wins loop that used to
+// live in assignUnassignedCallLeads (git history has it).
+const FIXED_ASSIGNEE_EMAIL = 'kalpataru@flashfirehq.com';
+
 /**
- * The BDAs in the round-robin, in a stable order.
+ * The active non-admin BDAs, in a stable order. Used for view scoping.
  *
  * `role: 'bda'` alone is NOT a safe test: CrmUser.role DEFAULTS to 'bda', so an admin
  * whose document predates the field — or who simply never had it set — reads as a BDA.
- * Requiring isAdmin !== true drops them. Today this resolves to exactly Siddhartha and
- * Kalpataru; add a BDA in the CRM and they join the rotation with no code change.
+ * Requiring isAdmin !== true drops them.
  */
 async function rotationBdas() {
   const users = await CrmUserModel.find({
@@ -346,10 +351,9 @@ async function rotationBdas() {
 /**
  * The email this request may see, or null for someone who sees every lead.
  *
- * Deliberately the SAME predicate as the rotation: if you are in the rotation you see
- * only your own leads, and if you are not, you see all of them. That equivalence is
- * what makes the tab coherent — nobody can be assigned leads they cannot open, and
- * nobody is scoped to a queue they are not in.
+ * A non-admin BDA sees only their own leads; everyone else sees all of them. This
+ * stays roster-based even with a fixed assignee, so a BDA who is not the fixed
+ * assignee simply sees an empty queue instead of other people's leads.
  *
  * Resolved from the database rather than the JWT on purpose. The token's `bdaRole`
  * claim is `user.role || 'bda'`, so an admin with no role field arrives claiming to be
@@ -363,36 +367,29 @@ async function ownScopeEmail(req) {
 }
 
 /**
- * Round-robin every unassigned call lead across the active BDAs.
+ * Assign every unassigned call lead to the fixed assignee.
  *
- * Balances against each BDA's CURRENT total rather than cycling a stored pointer, so
- * repeated runs converge instead of drifting, and a BDA added later catches up rather
- * than staying permanently behind. Oldest leads go first — they have waited longest.
- *
- * Idempotent and safe to run concurrently: every update re-asserts "still unassigned"
- * in its own filter, so a lead cannot be handed to two BDAs by two overlapping runs.
+ * Existing assignments are never touched: only leads with an empty
+ * callLeadAssignee are considered, and every update re-asserts "still
+ * unassigned" in its own filter, so the pass is idempotent and safe to run
+ * concurrently. Oldest leads go first — they have waited longest.
  */
 export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
-  const roster = await rotationBdas();
-  if (roster.length === 0) {
-    return { ok: true, assigned: 0, reason: 'no active BDAs in the rotation' };
+  const assignee = await CrmUserModel.findOne({
+    email: FIXED_ASSIGNEE_EMAIL,
+    isActive: { $ne: false },
+  })
+    .select('email name')
+    .lean();
+
+  if (!assignee) {
+    return { ok: true, assigned: 0, reason: `fixed assignee ${FIXED_ASSIGNEE_EMAIL} not found or inactive` };
   }
 
-  const counts = new Map(roster.map((b) => [b.email, 0]));
-  const existing = await CampaignBookingModel.aggregate([
-    {
-      $match: {
-        ...META_LEAD_MATCH,
-        bookingStatus: 'not-scheduled',
-        'callLeadAssignee.email': { $nin: [null, ''] },
-      },
-    },
-    { $group: { _id: '$callLeadAssignee.email', n: { $sum: 1 } } },
-  ]);
-  for (const e of existing) {
-    const k = String(e._id).toLowerCase();
-    if (counts.has(k)) counts.set(k, e.n);
-  }
+  const pick = {
+    email: String(assignee.email).toLowerCase().trim(),
+    name: assignee.name || assignee.email,
+  };
 
   const pending = await CampaignBookingModel.find({
     ...baseMatch(),
@@ -403,30 +400,21 @@ export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
     .limit(limit)
     .lean();
 
-  if (pending.length === 0) return { ok: true, assigned: 0, roster: roster.map((b) => b.email) };
+  if (pending.length === 0) return { ok: true, assigned: 0, assignee: pick.email };
 
   const now = new Date();
-  const ops = pending.map((lead) => {
-    // Fewest leads wins; ties fall to the earlier email, so the split is deterministic.
-    let pick = roster[0];
-    for (const b of roster) {
-      if (counts.get(b.email) < counts.get(pick.email)) pick = b;
-    }
-    counts.set(pick.email, counts.get(pick.email) + 1);
-
-    return {
-      updateOne: {
-        filter: { bookingId: lead.bookingId, 'callLeadAssignee.email': { $in: [null, ''] } },
-        update: {
-          $set: {
-            'callLeadAssignee.email': pick.email,
-            'callLeadAssignee.name': pick.name,
-            'callLeadAssignee.assignedAt': now,
-          },
+  const ops = pending.map((lead) => ({
+    updateOne: {
+      filter: { bookingId: lead.bookingId, 'callLeadAssignee.email': { $in: [null, ''] } },
+      update: {
+        $set: {
+          'callLeadAssignee.email': pick.email,
+          'callLeadAssignee.name': pick.name,
+          'callLeadAssignee.assignedAt': now,
         },
       },
-    };
-  });
+    },
+  }));
 
   const result = await CampaignBookingModel.bulkWrite(ops, { ordered: false });
 
@@ -434,7 +422,7 @@ export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
     ok: true,
     assigned: result.modifiedCount ?? 0,
     considered: pending.length,
-    totals: Object.fromEntries(counts),
+    assignee: pick.email,
   };
 }
 
@@ -781,8 +769,8 @@ export const getCallLeadsSummary = async (req, res) => {
 
 /**
  * POST /api/crm/call-leads/assign
- * Manual trigger for the round-robin. The scheduler runs it anyway; this exists so an
- * admin can force a pass (and see the resulting split) without waiting for the tick.
+ * Manual trigger for the assignment pass. The scheduler runs it anyway; this exists
+ * so an admin can force a pass without waiting for the tick.
  */
 export const triggerCallLeadAssignment = async (req, res) => {
   try {
