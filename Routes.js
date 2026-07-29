@@ -323,8 +323,8 @@ export default function Routes(app) {
   app.get('/api/crm/call-leads', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_VIEW), getCallLeads);
   app.get('/api/crm/call-leads/summary', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_VIEW), getCallLeadsSummary);
   app.post('/api/crm/call-leads/:bookingId/notes', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_EDIT), addCallLeadNote);
-  // Force a round-robin pass. The scheduler does this on a timer; the controller
-  // rejects BDAs, so only admins can reshuffle the queue.
+  // Force an assignment pass (unassigned leads → the fixed assignee). The scheduler
+  // does this on a timer; the controller rejects BDAs, so only admins can trigger it.
   app.post('/api/crm/call-leads/assign', requireCrmUser, requireCrmAnyPermission(CALL_LEADS_EDIT), triggerCallLeadAssignment);
 
   app.post('/api/crm/auth/request-otp', requestCrmOtp);

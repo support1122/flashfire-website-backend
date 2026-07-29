@@ -1088,24 +1088,24 @@ app.listen(PORT || 4001, async () => {
     console.warn('⚠️ [Server] Failed to start Zoom Phone syncer:', error.message);
   }
 
-  // Call Leads — round-robin any Meta lead that has gone 24h without booking across
-  // the active BDAs. A lead becomes assignable purely by ageing past the cutoff, so
-  // this has to run on a timer rather than at ingest.
+  // Call Leads — assign any Meta lead that has gone 24h without booking to the
+  // fixed call-lead assignee. A lead becomes assignable purely by ageing past the
+  // cutoff, so this has to run on a timer rather than at ingest.
   try {
     const { assignUnassignedCallLeads } = await import('./Controllers/CallLeadsController.js');
     const runAssigner = async () => {
       try {
         const r = await assignUnassignedCallLeads({});
         if (r.assigned > 0) {
-          console.log(`✅ [CallLeads] round-robin assigned ${r.assigned} lead(s)`, r.totals || '');
+          console.log(`✅ [CallLeads] assigned ${r.assigned} lead(s) to ${r.assignee || 'n/a'}`);
         }
       } catch (error) {
-        console.warn('⚠️ [CallLeads] round-robin pass failed:', error.message);
+        console.warn('⚠️ [CallLeads] assignment pass failed:', error.message);
       }
     };
     await runAssigner();
     setInterval(runAssigner, 10 * 60 * 1000).unref();
-    console.log('✅ [Server] Call Leads round-robin assigner started (10m interval)');
+    console.log('✅ [Server] Call Leads assigner started (10m interval)');
   } catch (error) {
     console.warn('⚠️ [Server] Failed to start Call Leads assigner:', error.message);
   }
