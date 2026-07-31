@@ -15,6 +15,7 @@ import {
 import { cancelDiscordMeetRemindersForMeeting, scheduleDiscordMeetReminder } from '../Utils/DiscordMeetReminderScheduler.js';
 import { getRescheduleLinkForBooking, resolveCalendlyHost } from '../Utils/CalendlyAPIHelper.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
+import { withMongoRetry } from '../Utils/withMongoRetry.js';
 
 /**
  * One-line "Assigned BDA" label for Discord messages. Prefers the Calendly
@@ -136,6 +137,21 @@ export const handleCalendlyWebhook = async (req, res) => {
       stack: error.stack,
       body: req.body
     });
+
+    // Best-effort alert so the team still hears about a booking even when the
+    // DB write itself failed (e.g. transient Mongo timeout) — a failure here
+    // must never mask the original error response below. Posted to the same
+    // channel as successful bookings (#new-meetings-calendly) so failures are
+    // visible right next to normal booking activity.
+    if (process.env.DISCORD_MEET_WEB_HOOK_URL) {
+      const payload = req.body?.payload;
+      const inviteeName = payload?.invitee?.name || payload?.name || 'Unknown';
+      const inviteeEmail = payload?.invitee?.email || payload?.email || 'Unknown';
+      const meetingStart = payload?.scheduled_event?.start_time || 'Unknown';
+      DiscordConnectForMeet(
+        `⚠️ Calendly webhook processing FAILED (${error.message}). Booking may be missing from DB — please check manually.\nName: ${inviteeName}\nEmail: ${inviteeEmail}\nMeeting start: ${meetingStart}`
+      ).catch(discordErr => Logger.warn('Failed to send webhook-failure Discord alert', { error: discordErr.message }));
+    }
 
     res.status(500).json({
       success: false,
@@ -308,11 +324,11 @@ async function handleCreatedEvent(req, res, payload) {
     scheduledEventStartTime: scheduledStartISO,
     $or: duplicateOr,
   };
-  const existingBooking = await CampaignBookingModel.findOne(duplicateQuery);
+  const existingBooking = await withMongoRetry(() => CampaignBookingModel.findOne(duplicateQuery));
 
   // Same invitee URI already stored = Calendly retry or duplicate delivery
   if (inviteeUri) {
-    const uriAlready = await CampaignBookingModel.findOne({ calendlyInviteeUri: inviteeUri }).lean();
+    const uriAlready = await withMongoRetry(() => CampaignBookingModel.findOne({ calendlyInviteeUri: inviteeUri }).lean());
     if (uriAlready) {
       Logger.warn('Duplicate invitee.created — calendlyInviteeUri already in DB', { inviteeUri });
       return res.status(200).json({
@@ -387,7 +403,7 @@ async function handleCreatedEvent(req, res, payload) {
   if (inviteeUri) {
     calendlyDedupeKey = `invitee.created:${inviteeUri}`;
     try {
-      await CalendlyWebhookDedupeModel.create({ key: calendlyDedupeKey });
+      await withMongoRetry(() => CalendlyWebhookDedupeModel.create({ key: calendlyDedupeKey }));
     } catch (e) {
       if (e.code === 11000) {
         Logger.warn('Calendly invitee.created duplicate delivery suppressed', { inviteeUri });
@@ -403,7 +419,7 @@ async function handleCreatedEvent(req, res, payload) {
 
   let newBooking = null;
   if (shouldMergeIntoExisting) {
-    newBooking = await CampaignBookingModel.findOneAndUpdate(
+    newBooking = await withMongoRetry(() => CampaignBookingModel.findOneAndUpdate(
       { bookingId: existingBooking.bookingId },
       {
         $set: {
@@ -430,7 +446,7 @@ async function handleCreatedEvent(req, res, payload) {
         }
       },
       { new: true }
-    );
+    ));
     Logger.info(
       rebookedSameSlot
         ? '✅ Merged Calendly invitee.created into existing booking (cancel+rebook)'
@@ -740,7 +756,7 @@ async function handleCreatedEvent(req, res, payload) {
     ...(calendlyHost ? { calendlyHost } : {})
   });
 
-  await newBooking.save();
+  await withMongoRetry(() => newBooking.save());
 
   // Resolve the real meet.google.com code behind Calendly's join_url redirect
   // NOW, so the extension can match the Meet tab the moment the BDA joins
