@@ -11,6 +11,8 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
+console.log("[MongoDB] ConnectDB module loaded — mongo-resilience build (retry+reconnect enabled)");
+
 mongoose.connection.on("connected", () => {
   console.log("[MongoDB] connected");
 });
