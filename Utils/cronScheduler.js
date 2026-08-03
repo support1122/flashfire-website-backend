@@ -895,7 +895,16 @@ async function runDailyReminderBackfill() {
 /**
  * Runs at 4:00 AM IST daily.
  * Summarises the just-finished calling shift: 7 PM yesterday IST → 4 AM today IST.
- * Posts to the #sales-win Discord channel.
+ *
+ * Only counts calls to leads that appear in the Call Leads tab:
+ *   - Meta source, bookingStatus === 'not-scheduled', no meeting, 24h+ old
+ *   - Excludes anyone who also has a scheduled/active meeting (the BDA calls
+ *     those people too during the shift, but that is meeting-reminder work,
+ *     not call-lead outreach).
+ *
+ * Called        = distinct call-lead phone keys in CallLog during the shift
+ * Left to call  = total call leads − Called
+ * Time on calls = sum of durationSec from matched shift logs only
  */
 async function sendCallShiftSummary() {
   const webhookUrl = process.env.DISCORD_CALL_SHIFT_SUMMARY_WEBHOOK_URL;
@@ -904,62 +913,121 @@ async function sendCallShiftSummary() {
     return;
   }
 
+  const META_LEAD_MATCH = {
+    $or: [{ leadSource: 'meta_lead_ad' }, { metaLeadId: { $exists: true, $ne: null } }],
+  };
+  const COOL_OFF_HOURS = 24;
+
+  const last10 = (s) => {
+    const d = String(s || '').replace(/\D+/g, '');
+    return d.length > 10 ? d.slice(-10) : d;
+  };
+
   try {
-    // Shift window: 7 PM IST yesterday → 4 AM IST today (the just-finished shift)
     const nowIST = DateTime.now().setZone(IST_TIMEZONE);
     const shiftEnd = nowIST.set({ hour: 4, minute: 0, second: 0, millisecond: 0 });
     const shiftStart = shiftEnd.minus({ hours: 9 }); // 7 PM yesterday IST
 
-    const shiftStartUTC = shiftStart.toJSDate();
-    const shiftEndUTC = shiftEnd.toJSDate();
-
-    // All calls made during the shift window
-    const callsInShift = await CallLogModel.find({
-      startedAt: { $gte: shiftStartUTC, $lt: shiftEndUTC },
+    // 1. Phone keys of people with an active/scheduled meeting — exclude these.
+    //    The BDA calls them during the shift but they are meeting reminders, not call-lead work.
+    const scheduledBookings = await CampaignBookingModel.find({
+      ...META_LEAD_MATCH,
+      bookingStatus: { $in: ['scheduled', 'completed', 'rescheduled', 'no-show', 'paid'] },
     })
-      .select('leadNumberNormalized durationSec status')
+      .select('normalizedClientPhone clientPhone')
       .lean();
 
-    // Unique lead phone numbers that were called this shift
-    const calledPhones = new Set(
-      callsInShift.map((c) => c.leadNumberNormalized).filter(Boolean)
-    );
+    const scheduledKeySet = new Set();
+    for (const b of scheduledBookings) {
+      const raw = String(b.normalizedClientPhone || b.clientPhone || '').replace(/\D+/g, '');
+      if (!raw) continue;
+      scheduledKeySet.add(last10(raw));
+      scheduledKeySet.add(raw);
+    }
 
-    // Total talk time across the shift
-    const totalSec = callsInShift.reduce((sum, c) => sum + (Number(c.durationSec) || 0), 0);
-
-    // Leads still to call: not-scheduled, created in last 3 days, not called this shift
-    const threeDaysAgo = shiftEnd.minus({ days: 3 }).toJSDate();
-    const leftToCall = await CampaignBookingModel.countDocuments({
+    // 2. All eligible call leads (same baseMatch as CallLeadsController), minus scheduled persons.
+    const cutoff = new Date(shiftEnd.toJSDate().getTime() - COOL_OFF_HOURS * 3600 * 1000);
+    const allLeads = await CampaignBookingModel.find({
+      ...META_LEAD_MATCH,
       bookingStatus: 'not-scheduled',
       scheduledEventStartTime: null,
-      bookingCreatedAt: { $gte: threeDaysAgo },
-      $or: [
-        { normalizedClientPhone: { $nin: [...calledPhones] } },
-        { normalizedClientPhone: null },
-      ],
-    });
+      bookingCreatedAt: { $lte: cutoff },
+    })
+      .select('normalizedClientPhone clientPhone')
+      .lean();
 
-    // Format duration as Xh Ym
-    const totalMin = Math.floor(totalSec / 60);
-    const hours = Math.floor(totalMin / 60);
-    const mins = totalMin % 60;
-    const durationStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+    const leadKeySet = new Set();
+    const leadFullDigits = new Set();
+    for (const lead of allLeads) {
+      const raw = String(lead.normalizedClientPhone || lead.clientPhone || '').replace(/\D+/g, '');
+      if (!raw) continue;
+      const key = last10(raw);
+      if (scheduledKeySet.has(key) || scheduledKeySet.has(raw)) continue;
+      leadKeySet.add(key);
+      leadFullDigits.add(raw);
+    }
 
-    const dateLabel = shiftStart.toFormat('dd MMM, h:mm a') + ' → ' + shiftEnd.toFormat('h:mm a') + ' IST';
+    const totalLeads = leadKeySet.size;
 
-    const message = [
-      `📞 **Call Shift Summary** — ${dateLabel}`,
-      ``,
-      `✅ **Called this shift:** ${calledPhones.size} leads (${callsInShift.length} calls)`,
-      `⏳ **Left to call (last 3 days):** ${leftToCall} leads`,
-      `🕐 **Time on calls:** ${durationStr}`,
-    ].join('\n');
+    // 3. CallLog entries in the shift window — keep only those matching a call lead.
+    const shiftLogs = await CallLogModel.find({
+      startedAt: { $gte: shiftStart.toJSDate(), $lt: shiftEnd.toJSDate() },
+      leadNumberNormalized: { $nin: [null, ''] },
+    })
+      .select('leadNumberNormalized durationSec salesEmail salesName')
+      .lean();
 
-    await DiscordConnect(webhookUrl, message, false);
+    const calledLeadKeys = new Set();
+    let totalShiftSec = 0;
+    const bdaTotals = new Map();
+
+    for (const log of shiftLogs) {
+      const logKey = last10(log.leadNumberNormalized);
+      const logFull = String(log.leadNumberNormalized || '').replace(/\D+/g, '');
+      if (!leadKeySet.has(logKey) && !leadFullDigits.has(logFull)) continue;
+
+      const sec = Number(log.durationSec) || 0;
+      calledLeadKeys.add(logKey);
+      totalShiftSec += sec;
+
+      const email = log.salesEmail || 'Unknown';
+      const name = log.salesName || email;
+      if (!bdaTotals.has(email)) bdaTotals.set(email, { name, calls: 0, sec: 0 });
+      const b = bdaTotals.get(email);
+      b.calls += 1;
+      b.sec += sec;
+    }
+
+    const calledCount = calledLeadKeys.size;
+    const leftToCall = totalLeads - calledCount;
+
+    const fmtDur = (s) => {
+      const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+      return h > 0 ? `${h}h ${m}m` : `${m}m`;
+    };
+
+    const dateLabel = `${shiftStart.toFormat('MMM d')}, ${shiftStart.toFormat('h:mma')} → ${shiftEnd.toFormat('h:mma')} IST`;
+
+    const lines = [
+      `📞 **Call Leads Summary — ${dateLabel}**`,
+      `✅ Called: ${calledCount}`,
+      `⏳ Left to call: ${leftToCall}`,
+      `🕐 Time on calls: ${fmtDur(totalShiftSec)}`,
+    ];
+
+    if (bdaTotals.size > 0) {
+      lines.push('');
+      lines.push('**BDA Breakdown:**');
+      for (const [, b] of [...bdaTotals.entries()].sort((a, z) => z.calls - a.calls)) {
+        lines.push(`• ${b.name}: ${b.calls} call${b.calls !== 1 ? 's' : ''} · ${fmtDur(b.sec)}`);
+      }
+    }
+
+    await DiscordConnect(webhookUrl, lines.join('\n'), false);
     console.log('[CallShiftSummary] Summary sent to Discord.');
   } catch (err) {
     console.error('[CallShiftSummary] Error:', err.message);
+    await DiscordConnect(webhookUrl, `❌ **Call Shift Summary FAILED**: ${err.message}`, false).catch(() => {});
   }
 }
 
