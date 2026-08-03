@@ -22,6 +22,7 @@ import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
 import { scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { normalizePhoneForReminders, buildCallId } from './MeetingReminderUtils.js';
+import { CallLogModel } from '../Schema_Models/CallLog.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
 
@@ -891,6 +892,77 @@ async function runDailyReminderBackfill() {
   }
 }
 
+/**
+ * Runs at 4:00 AM IST daily.
+ * Summarises the just-finished calling shift: 7 PM yesterday IST → 4 AM today IST.
+ * Posts to the #sales-win Discord channel.
+ */
+async function sendCallShiftSummary() {
+  const webhookUrl = process.env.DISCORD_CALL_SHIFT_SUMMARY_WEBHOOK_URL;
+  if (!webhookUrl) {
+    console.warn('[CallShiftSummary] DISCORD_CALL_SHIFT_SUMMARY_WEBHOOK_URL not configured, skipping.');
+    return;
+  }
+
+  try {
+    // Shift window: 7 PM IST yesterday → 4 AM IST today (the just-finished shift)
+    const nowIST = DateTime.now().setZone(IST_TIMEZONE);
+    const shiftEnd = nowIST.set({ hour: 4, minute: 0, second: 0, millisecond: 0 });
+    const shiftStart = shiftEnd.minus({ hours: 9 }); // 7 PM yesterday IST
+
+    const shiftStartUTC = shiftStart.toJSDate();
+    const shiftEndUTC = shiftEnd.toJSDate();
+
+    // All calls made during the shift window
+    const callsInShift = await CallLogModel.find({
+      startedAt: { $gte: shiftStartUTC, $lt: shiftEndUTC },
+    })
+      .select('leadNumberNormalized durationSec status')
+      .lean();
+
+    // Unique lead phone numbers that were called this shift
+    const calledPhones = new Set(
+      callsInShift.map((c) => c.leadNumberNormalized).filter(Boolean)
+    );
+
+    // Total talk time across the shift
+    const totalSec = callsInShift.reduce((sum, c) => sum + (Number(c.durationSec) || 0), 0);
+
+    // Leads still to call: not-scheduled, created in last 3 days, not called this shift
+    const threeDaysAgo = shiftEnd.minus({ days: 3 }).toJSDate();
+    const leftToCall = await CampaignBookingModel.countDocuments({
+      bookingStatus: 'not-scheduled',
+      scheduledEventStartTime: null,
+      bookingCreatedAt: { $gte: threeDaysAgo },
+      $or: [
+        { normalizedClientPhone: { $nin: [...calledPhones] } },
+        { normalizedClientPhone: null },
+      ],
+    });
+
+    // Format duration as Xh Ym
+    const totalMin = Math.floor(totalSec / 60);
+    const hours = Math.floor(totalMin / 60);
+    const mins = totalMin % 60;
+    const durationStr = hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
+
+    const dateLabel = shiftStart.toFormat('dd MMM, h:mm a') + ' → ' + shiftEnd.toFormat('h:mm a') + ' IST';
+
+    const message = [
+      `📞 **Call Shift Summary** — ${dateLabel}`,
+      ``,
+      `✅ **Called this shift:** ${calledPhones.size} leads (${callsInShift.length} calls)`,
+      `⏳ **Left to call (last 3 days):** ${leftToCall} leads`,
+      `🕐 **Time on calls:** ${durationStr}`,
+    ].join('\n');
+
+    await DiscordConnect(webhookUrl, message, false);
+    console.log('[CallShiftSummary] Summary sent to Discord.');
+  } catch (err) {
+    console.error('[CallShiftSummary] Error:', err.message);
+  }
+}
+
 export function startCronScheduler() {
   cron.schedule('*/15 * * * *', async () => {
     await processScheduledItems();
@@ -907,7 +979,15 @@ export function startCronScheduler() {
     timezone: IST_TIMEZONE
   });
 
-  console.log('✅ Cron scheduler started - every 15min processing + 10am IST daily backfill');
+  // 4am IST daily: post call shift summary (7 PM yesterday → 4 AM today) to #sales-win Discord
+  cron.schedule('0 4 * * *', async () => {
+    await sendCallShiftSummary();
+  }, {
+    scheduled: true,
+    timezone: IST_TIMEZONE
+  });
+
+  console.log('✅ Cron scheduler started - every 15min processing + 10am IST daily backfill + 4am IST call shift summary');
 
   processScheduledItems();
 }
