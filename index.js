@@ -1110,6 +1110,24 @@ app.listen(PORT || 4001, async () => {
     console.warn('⚠️ [Server] Failed to start Call Leads assigner:', error.message);
   }
 
+  // Call Leads — daily Discord summary at 4:00 AM IST: unique leads called and time
+  // on calls over the last 24h, per-BDA breakdown, and the still-uncalled queue from
+  // the past 3 days. 4 AM IST is just past the end of the US-evening calling window.
+  try {
+    const cronModule = await import('node-cron');
+    const { sendCallLeadsDailySummary } = await import('./Controllers/CallLeadsController.js');
+    cronModule.default.schedule('0 4 * * *', async () => {
+      try {
+        await sendCallLeadsDailySummary();
+      } catch (error) {
+        console.warn('⚠️ [CallLeads] daily summary failed:', error.message);
+      }
+    }, { scheduled: true, timezone: 'Asia/Kolkata' });
+    console.log('✅ [Server] Call Leads daily Discord summary scheduled (4:00 AM IST)');
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to schedule Call Leads daily summary:', error.message);
+  }
+
   // One-time backfill: existing CRM users with a view permission get the matching
   // `_edit` permission so behavior does not regress when per-module view/edit ships.
   // Idempotent — only adds missing edit keys.

@@ -927,3 +927,120 @@ export const addCallLeadNote = async (req, res) => {
 // `zoomphonecall://` deep link and nothing else — every call fact on this tab (who
 // called, how long, when) comes from Zoom's own CallLog, exactly like the Phone Calls
 // tab. Recording our own click would be a second, disagreeing source of truth.
+
+/* ------------------------------------------------------------------------ */
+/* Daily Discord summary                                                     */
+/* ------------------------------------------------------------------------ */
+
+const IST = 'Asia/Kolkata';
+
+/** "1h 12m" / "8m" — minutes rounded, so 25s shows as "0m" like the manual reports did. */
+function fmtCallTime(totalSec) {
+  const min = Math.round((totalSec || 0) / 60);
+  const h = Math.floor(min / 60);
+  return h > 0 ? `${h}h ${min % 60}m` : `${min}m`;
+}
+
+function fmtISTStamp(date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: IST,
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).formatToParts(date);
+  const g = (t) => parts.find((p) => p.type === t)?.value || '';
+  return `${g('month')} ${g('day')}, ${g('hour')}:${g('minute')}${g('dayPeriod')}`;
+}
+
+/**
+ * Build the daily call-leads summary for the 24h window ending at `end`.
+ *
+ * - Called / time / BDA breakdown come from Zoom CallLog rows in the window
+ *   (internal calls excluded — a BDA ringing a teammate is not lead calling).
+ *   "Called" is UNIQUE leads dialed; the per-BDA numbers are call counts, so
+ *   the breakdown can legitimately sum past the headline.
+ * - "Left to call" is the callable queue from the last 3 days: call leads
+ *   created in the past 72h, already past the 24h cool-off, never called.
+ */
+export async function buildCallLeadsDailySummary(end = new Date()) {
+  const windowStart = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+
+  const calls = await CallLogModel.find({
+    startedAt: { $gte: windowStart, $lt: end },
+    direction: { $ne: 'internal' },
+  })
+    .select('salesEmail salesName leadNumberNormalized durationSec')
+    .lean();
+
+  const uniqueLeads = new Set();
+  let totalSec = 0;
+  const byBda = new Map();
+  for (const c of calls) {
+    if (c.leadNumberNormalized) uniqueLeads.add(c.leadNumberNormalized);
+    totalSec += c.durationSec || 0;
+    const key = (c.salesEmail || 'unknown').toLowerCase();
+    const row = byBda.get(key) || { name: c.salesName || c.salesEmail || 'Unknown', calls: 0, sec: 0 };
+    if (c.salesName) row.name = c.salesName;
+    row.calls += 1;
+    row.sec += c.durationSec || 0;
+    byBda.set(key, row);
+  }
+
+  const threeDaysAgo = new Date(end.getTime() - 3 * 24 * 60 * 60 * 1000);
+  const recentLeads = await CampaignBookingModel.find({
+    ...baseMatch(),
+    bookingCreatedAt: { $gte: threeDaysAgo, $lte: cutoffDate() },
+  })
+    .select('clientPhone rawClientPhone normalizedClientPhone')
+    .lean();
+
+  const candidates = new Set();
+  for (const b of recentLeads) phoneCandidatesOf(b, candidates);
+  const calledNumbers = new Set(
+    candidates.size > 0
+      ? await CallLogModel.distinct('leadNumberNormalized', { leadNumberNormalized: { $in: [...candidates] } })
+      : []
+  );
+  let leftToCall = 0;
+  for (const b of recentLeads) {
+    const own = phoneCandidatesOf(b, new Set());
+    let called = false;
+    for (const k of own) {
+      if (calledNumbers.has(k)) { called = true; break; }
+    }
+    if (!called) leftToCall += 1;
+  }
+
+  const breakdown = [...byBda.values()].sort((a, b) => b.calls - a.calls);
+  const lines = [
+    `📞 Call Leads Summary — ${fmtISTStamp(windowStart)} → ${fmtISTStamp(end)} IST`,
+    `✅ Called: ${uniqueLeads.size}`,
+    `⏳ Left to call (last 3 days): ${leftToCall}`,
+    `🕐 Time on calls: ${fmtCallTime(totalSec)}`,
+  ];
+  if (breakdown.length > 0) {
+    lines.push('', 'BDA Breakdown:');
+    for (const r of breakdown) lines.push(`• ${r.name}: ${r.calls} call${r.calls === 1 ? '' : 's'} · ${fmtCallTime(r.sec)}`);
+  }
+
+  return {
+    message: lines.join('\n'),
+    stats: { uniqueLeadsCalled: uniqueLeads.size, totalCalls: calls.length, totalSec, leftToCall },
+  };
+}
+
+/** Build today's summary and post it to the call-leads Discord channel. */
+export async function sendCallLeadsDailySummary() {
+  const url = process.env.DISCORD_CALL_LEADS_SUMMARY_WEBHOOK_URL;
+  if (!url) {
+    console.warn('⚠️ [CallLeads] DISCORD_CALL_LEADS_SUMMARY_WEBHOOK_URL not configured — daily summary skipped');
+    return { ok: false, error: 'no_url' };
+  }
+  const { message, stats } = await buildCallLeadsDailySummary(new Date());
+  const { DiscordConnect } = await import('../Utils/DiscordConnect.js');
+  const result = await DiscordConnect(url, message, false);
+  console.log(`${result.ok ? '✅' : '❌'} [CallLeads] daily summary ${result.ok ? 'sent' : 'failed'}`, stats);
+  return result;
+}
