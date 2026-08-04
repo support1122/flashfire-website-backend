@@ -1,8 +1,6 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { Logger } from '../Utils/Logger.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
-import { ensureCountryCode } from '../Utils/ensureCountryCode.js';
-import { resolveSheetLeadPhone } from '../Utils/MetaSheetPhoneResolver.js';
 import { triggerWorkflow } from './WorkflowController.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
@@ -288,9 +286,7 @@ export const handleMetaLeadWebhook = async (req, res) => {
 
         const clientName = extracted.fullName || 'New lead';
         const clientEmail = extracted.email;
-        // Default a country-code-less number to +1 so WhatsApp/Wati don't misread it.
-        const rawWebhookPhone = extracted.phone || '';
-        const clientPhone = ensureCountryCode(rawWebhookPhone);
+        const clientPhone = extracted.phone || '';
         const formName = leadData?.form_name || '';
         const parsedFields = extracted.parsedFields || {};
 
@@ -335,7 +331,6 @@ export const handleMetaLeadWebhook = async (req, res) => {
           };
           if (clientPhone) {
             mergeSet.clientPhone = clientPhone;
-            mergeSet.rawClientPhone = rawWebhookPhone || null;
             mergeSet.normalizedClientPhone = normalizedPhone || null;
           }
           if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
@@ -346,6 +341,21 @@ export const handleMetaLeadWebhook = async (req, res) => {
 
           await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
           console.log(`Meta lead merged: ${existingLead.bookingId} | ${existingLead.clientEmail} | ${existingLead.bookingStatus} | Form: ${formName}`);
+
+          const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled';
+
+          if (!hasActiveUpcomingMeeting) {
+            try {
+              const wfResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
+              if (wfResult.success && wfResult.triggered) {
+                console.log(`Not-scheduled workflows re-triggered for returning meta lead ${existingLead.bookingId}`);
+              }
+            } catch (wfError) {
+              console.error(`Failed to re-trigger workflows for returning meta lead ${existingLead.bookingId}:`, wfError.message);
+            }
+          } else {
+            console.log(`Skipped workflow re-trigger for ${existingLead.bookingId} — active upcoming meeting scheduled`);
+          }
         } else {
           const metaCampaignName = leadValue.campaign_name || leadData?.campaign_name || null;
           const metaAdName = leadValue.ad_name || leadData?.ad_name || null;
@@ -355,7 +365,6 @@ export const handleMetaLeadWebhook = async (req, res) => {
             clientName: clientName.trim(),
             clientEmail: normalizedEmail,
             clientPhone: clientPhone || null,
-            rawClientPhone: rawWebhookPhone || null,
             normalizedClientPhone: normalizedPhone || null,
             utmSource: parsedFields.utmSource || metaPlatform || 'meta_lead_ad',
             utmMedium: parsedFields.utmMedium || 'paid',
@@ -476,9 +485,7 @@ export async function sendMetaLeadDiscordNotification(leadInfo) {
 
 export const createMetaLeadManually = async (req, res) => {
   try {
-    const { clientName, clientEmail, formName, adId } = req.body;
-    const rawManualPhone = req.body?.clientPhone || '';
-    const clientPhone = ensureCountryCode(rawManualPhone);
+    const { clientName, clientEmail, clientPhone, formName, adId } = req.body;
 
     if (!clientName || !clientEmail) {
       return res.status(400).json({ success: false, message: 'clientName and clientEmail are required' });
@@ -517,7 +524,6 @@ export const createMetaLeadManually = async (req, res) => {
       clientName: clientName.trim(),
       clientEmail: normalizedEmail,
       clientPhone: clientPhone || null,
-      rawClientPhone: rawManualPhone || null,
       utmSource: 'meta_lead_ad',
       utmMedium: 'paid',
       utmCampaign: adId ? `meta_ad_${adId}` : 'meta_lead_form',
@@ -620,21 +626,7 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     const now = new Date();
     const bookingCreatedAt = parseSheetCreatedTime(created_time);
     const clientName = (full_name != null ? String(full_name).trim() : '') || 'New lead';
-    // Sheet leads arrive as bare national numbers (people rarely type a country
-    // code into Meta instant forms). Resolve US vs India: deterministic shape
-    // rules first, Twilio Lookup v2 for the ambiguous 6-9 range, India default
-    // when Twilio is inconclusive. See Utils/MetaSheetPhoneResolver.js.
-    const rawPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
-    let clientPhone = null;
-    let phoneResolution = null;
-    if (rawPhone) {
-      const resolved = await resolveSheetLeadPhone(rawPhone);
-      clientPhone = resolved.phone;
-      phoneResolution = resolved.method;
-      if (resolved.method !== 'explicit' && resolved.method !== 'empty') {
-        console.log(`meta-leads-from-sheet: phone "${rawPhone}" -> "${clientPhone}" (${resolved.method})`, { metaLeadId });
-      }
-    }
+    const clientPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
     const normalizedClientPhone = normalizedPhoneLast10(clientPhone);
 
     const resolvedCampaignName = campaign_name != null && String(campaign_name).trim() !== '' ? String(campaign_name).trim() : null;
@@ -673,27 +665,70 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       const existingLead = await CampaignBookingModel.findOne({ $or: orConditions }).sort({ bookingCreatedAt: -1 });
 
       if (existingLead) {
-        const mergeSet = { ...metaFields };
+        const mergeSet = {
+          utmSource: platform != null && String(platform).trim() !== '' ? String(platform).trim() : 'meta_lead_ad',
+          utmMedium: 'paid',
+          utmCampaign,
+          clientEmail,
+          leadSource: 'meta_lead_ad',
+          ...metaFields,
+          updatedAt: now
+        };
         if (clientPhone) {
           mergeSet.clientPhone = clientPhone;
-          mergeSet.rawClientPhone = rawPhone;
-          mergeSet.phoneResolution = phoneResolution;
           mergeSet.normalizedClientPhone = normalizedClientPhone || null;
         }
         if (clientName && clientName !== 'New lead') mergeSet.clientName = clientName;
         const prev = existingLead.anythingToKnow || '';
-        if (!prev.includes(anythingToKnow)) {
-          mergeSet.anythingToKnow = prev ? `${prev}\n\n${anythingToKnow}` : anythingToKnow;
-        }
+        mergeSet.anythingToKnow = prev && !prev.includes(anythingToKnow) ? `${prev}\n\n${anythingToKnow}` : (prev || anythingToKnow);
 
         await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
         console.log('meta-leads-from-sheet: merged into existing lead', {
           metaLeadId,
           bookingId: existingLead.bookingId,
-          leadSource: existingLead.leadSource
+          leadSource: existingLead.leadSource,
+          priorStatus: existingLead.bookingStatus
         });
-        // No workflow trigger — the lead already went through its intake path.
-        return res.status(200).json({ success: true, isNewLead: false, merged: true, workflowTriggered: false });
+
+        try {
+          await sendMetaLeadDiscordNotification({
+            bookingId: existingLead.bookingId,
+            clientName: mergeSet.clientName || existingLead.clientName,
+            clientEmail,
+            clientPhone: clientPhone || existingLead.clientPhone || '',
+            formName: metaFields.metaFormName,
+            jobType: sanitizeJobType(job_type),
+            leadgenId: metaLeadId,
+            adId: metaFields.metaAdId,
+            outcome: 'merged'
+          });
+        } catch (discordError) {
+          console.error('meta-leads-from-sheet: discord notify failed', discordError.message);
+        }
+
+        let workflowResult = null;
+        const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled'
+          && existingLead.scheduledEventStartTime
+          && new Date(existingLead.scheduledEventStartTime) > now;
+        if (!hasActiveUpcomingMeeting) {
+          try {
+            workflowResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
+            if (workflowResult.success && workflowResult.triggered) {
+              console.log(`meta-leads-from-sheet: workflows re-triggered for returning lead ${existingLead.bookingId}`);
+            }
+          } catch (wfError) {
+            console.error(`meta-leads-from-sheet: workflow re-trigger failed for ${existingLead.bookingId}:`, wfError.message);
+          }
+        } else {
+          console.log(`meta-leads-from-sheet: skipped re-trigger for ${existingLead.bookingId} — active scheduled meeting`);
+        }
+
+        return res.status(200).json({
+          success: true,
+          isNewLead: false,
+          merged: true,
+          workflowTriggered: workflowResult?.triggered || false
+        });
       }
     }
 
@@ -706,8 +741,6 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
       clientName,
       clientEmail,
       clientPhone,
-      rawClientPhone: rawPhone,
-      phoneResolution,
       normalizedClientPhone,
       bookingCreatedAt,
       leadSource: 'meta_lead_ad',

@@ -10,11 +10,14 @@ const CRM_MODULE_KEYS = [
   'leads',
   'meta_leads',
   'claim_leads',
+  'call_leads',
   'meeting_links',
   'bda_admin',
   'activity_logs',
   'lead_analytics',
+  'graphs03',
   'phone_calls',
+  'payment_links',
 ];
 
 // View = `<module>` (legacy key, backwards-compatible). Edit = `<module>_edit`.

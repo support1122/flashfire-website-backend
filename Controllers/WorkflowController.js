@@ -1046,67 +1046,13 @@ async function executeWorkflowStep(step, booking, workflowId, workflowName = nul
       const watiTemplateName = resolvedTemplateName;
       const watiTemplateId = step.templateId;
       
-      let result = await watiService.sendTemplateMessage({
+      const result = await watiService.sendTemplateMessage({
         mobileNumber: booking.clientPhone,
         templateName: watiTemplateName,
         templateId: watiTemplateId,
         parameters: parameters,
         campaignId: `workflow_${workflowId}_${Date.now()}`
       });
-
-      // Country-code self-verification for sheet leads stored as +1 pending
-      // WATI confirmation ('wati-pending'): WATI's response flags each
-      // receiver with isValidWhatsAppNumber. If the +1 reading has no
-      // WhatsApp, flip to +91 (or back), retry once, and persist the working
-      // number on the lead so every future step uses it.
-      const hasInvalidReceiver = (r) =>
-        Array.isArray(r?.watiResponse?.receivers) &&
-        r.watiResponse.receivers.some(x => x?.isValidWhatsAppNumber === false);
-
-      if (booking.phoneResolution === 'wati-pending') {
-        const last10 = String(booking.rawClientPhone || booking.clientPhone || '').replace(/\D/g, '').slice(-10);
-        if (hasInvalidReceiver(result) && last10.length === 10) {
-          const current = String(booking.clientPhone || '');
-          const flipped = current.startsWith('+1') ? `+91${last10}` : `+1${last10}`;
-          console.log(`[WorkflowController] ${booking.bookingId}: ${current} has no WhatsApp (WATI); retrying with ${flipped}`);
-
-          const retry = await watiService.sendTemplateMessage({
-            mobileNumber: flipped,
-            templateName: watiTemplateName,
-            templateId: watiTemplateId,
-            parameters: parameters,
-            campaignId: `workflow_${workflowId}_${Date.now()}_ccflip`
-          });
-
-          if (!hasInvalidReceiver(retry)) {
-            await CampaignBookingModel.updateOne(
-              { bookingId: booking.bookingId },
-              { $set: {
-                  clientPhone: flipped,
-                  normalizedClientPhone: last10,
-                  phoneResolution: flipped.startsWith('+91') ? 'wati-verified-in' : 'wati-verified-us'
-              } }
-            );
-            booking.clientPhone = flipped;
-            console.log(`[WorkflowController] ${booking.bookingId}: phone verified by WATI as ${flipped}; persisted for future sends`);
-            result = retry;
-          } else {
-            // Neither reading is on WhatsApp - record it and keep the
-            // original number; the normal failure path below logs the step.
-            await CampaignBookingModel.updateOne(
-              { bookingId: booking.bookingId },
-              { $set: { phoneResolution: 'wati-none' } }
-            ).catch(() => {});
-            console.warn(`[WorkflowController] ${booking.bookingId}: neither +1 nor +91 reading is on WhatsApp (WATI)`);
-          }
-        } else if (result.success) {
-          // First try worked: the stored guess is confirmed.
-          await CampaignBookingModel.updateOne(
-            { bookingId: booking.bookingId },
-            { $set: { phoneResolution: String(booking.clientPhone || '').startsWith('+91') ? 'wati-verified-in' : 'wati-verified-us' } }
-          ).catch(() => {});
-        }
-      }
 
       if (!result.success) {
         const errorDetails = result.watiResponse ? JSON.stringify(result.watiResponse, null, 2) : '';
