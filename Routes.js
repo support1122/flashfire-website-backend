@@ -169,6 +169,7 @@ import {
   getNoShowFollowupAnalytics,
   getBdaCallActivity,
   getBdaScorecard,
+  getBdaStatusBreakdown,
 } from './Controllers/Graphs03Controller.js';
 import {
   zoomPhoneWebhook,
@@ -284,6 +285,7 @@ export default function Routes(app) {
   app.get('/api/crm/graphs03/no-show-followup', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data', 'phone_calls']), getNoShowFollowupAnalytics);
   app.get('/api/crm/graphs03/bda-call-activity', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data', 'phone_calls']), getBdaCallActivity);
   app.get('/api/crm/graphs03/bda-scorecard', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data']), getBdaScorecard);
+  app.get('/api/crm/graphs03/bda-status-breakdown', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data']), getBdaStatusBreakdown);
 
   // Stripe Data tab — month-wise succeeded charges enriched with Checkout line-item plan name.
   app.get('/api/crm/stripe/payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaymentsByMonth);

@@ -719,3 +719,118 @@ export const getBdaScorecard = async (req, res) => {
     return res.status(500).json({ success: false, message: error.message || 'Failed to load BDA scorecard' });
   }
 };
+
+/**
+ * BDA Status Breakdown — assigned, completed, no-show, rescheduled, cancelled, conversion rate.
+ *
+ * "Assigned" = any booking attributed to the BDA regardless of current status (host → claim).
+ * Statuses counted: completed, paid (a subset of completed), no-show, rescheduled, cancelled,
+ * scheduled (still pending). Conversion rate = paid / assigned.
+ *
+ * GET /api/crm/graphs03/bda-status-breakdown?fromDate=YYYY-MM-DD&toDate=YYYY-MM-DD&days=N
+ */
+export const getBdaStatusBreakdown = async (req, res) => {
+  try {
+    const days = clamp(parseInt(req.query.days, 10) || 90, 1, 400);
+    const to = req.query.toDate ? new Date(req.query.toDate) : new Date();
+    to.setHours(23, 59, 59, 999);
+    const from = req.query.fromDate
+      ? new Date(req.query.fromDate)
+      : new Date(to.getTime() - (days - 1) * 86400000);
+    from.setHours(0, 0, 0, 0);
+
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+      return res.status(400).json({ success: false, message: 'Invalid fromDate/toDate' });
+    }
+
+    const rows = await CampaignBookingModel.aggregate([
+      {
+        $match: {
+          bookingStatus: { $in: ['completed', 'paid', 'no-show', 'rescheduled', 'canceled', 'scheduled', 'not-scheduled', 'ignored'] },
+          $or: [
+            { scheduledEventStartTime: { $gte: from, $lte: to } },
+            { bookingCreatedAt: { $gte: from, $lte: to } },
+          ],
+        },
+      },
+      OWNER_EMAILS_STAGE,
+      OWNER_RESOLVE_STAGE,
+      {
+        $group: {
+          _id: '$bdaEmail',
+          name: { $first: '$bdaName' },
+          assigned: { $sum: 1 },
+          completed: { $sum: { $cond: [{ $in: ['$bookingStatus', ['completed', 'paid']] }, 1, 0] } },
+          paid: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'paid'] }, 1, 0] } },
+          noShow: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'no-show'] }, 1, 0] } },
+          rescheduled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'rescheduled'] }, 1, 0] } },
+          cancelled: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'canceled'] }, 1, 0] } },
+          scheduled: { $sum: { $cond: [{ $in: ['$bookingStatus', ['scheduled', 'not-scheduled']] }, 1, 0] } },
+          ignored: { $sum: { $cond: [{ $eq: ['$bookingStatus', 'ignored'] }, 1, 0] } },
+        },
+      },
+    ]);
+
+    const bdas = rows
+      .map((r) => ({
+        email: r._id,
+        name: r.name || r._id,
+        assigned: r.assigned,
+        completed: r.completed,
+        paid: r.paid,
+        noShow: r.noShow,
+        rescheduled: r.rescheduled,
+        cancelled: r.cancelled,
+        scheduled: r.scheduled,
+        ignored: r.ignored,
+        conversionRate: pct(r.paid, r.assigned),
+        completionRate: pct(r.completed, r.assigned),
+        noShowRate: pct(r.noShow, r.assigned),
+      }))
+      .sort((a, b) => {
+        if (a.email === UNASSIGNED) return 1;
+        if (b.email === UNASSIGNED) return -1;
+        return b.assigned - a.assigned;
+      });
+
+    const overall = bdas.reduce(
+      (acc, b) => {
+        acc.assigned += b.assigned;
+        acc.completed += b.completed;
+        acc.paid += b.paid;
+        acc.noShow += b.noShow;
+        acc.rescheduled += b.rescheduled;
+        acc.cancelled += b.cancelled;
+        acc.scheduled += b.scheduled;
+        acc.ignored += b.ignored;
+        return acc;
+      },
+      { assigned: 0, completed: 0, paid: 0, noShow: 0, rescheduled: 0, cancelled: 0, scheduled: 0, ignored: 0 }
+    );
+    overall.conversionRate = pct(overall.paid, overall.assigned);
+    overall.completionRate = pct(overall.completed, overall.assigned);
+    overall.noShowRate = pct(overall.noShow, overall.assigned);
+
+    const unattributed = bdas.find((b) => b.email === UNASSIGNED)?.assigned ?? 0;
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        timezone: TZ,
+        from: from.toISOString(),
+        to: to.toISOString(),
+        bdas,
+        overall,
+        coverage: {
+          total: overall.assigned,
+          attributed: overall.assigned - unattributed,
+          unattributed,
+          attributedPct: pct(overall.assigned - unattributed, overall.assigned),
+        },
+      },
+    });
+  } catch (error) {
+    console.error('getBdaStatusBreakdown error:', error);
+    return res.status(500).json({ success: false, message: error.message || 'Failed to load BDA status breakdown' });
+  }
+};
