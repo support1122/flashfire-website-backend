@@ -957,10 +957,11 @@ function fmtISTStamp(date) {
 /**
  * Build the daily call-leads summary for the 24h window ending at `end`.
  *
- * - Called / time / BDA breakdown come from Zoom CallLog rows in the window
- *   (internal calls excluded — a BDA ringing a teammate is not lead calling).
- *   "Called" is UNIQUE leads dialed; the per-BDA numbers are call counts, so
- *   the breakdown can legitimately sum past the headline.
+ * - Only the fixed assignee's calls count: every call lead is Kalpataru's, so
+ *   other people's Zoom calls (admins, other teams) are noise here, not lead
+ *   calling. Internal calls are excluded for the same reason.
+ *   Both the headline and the per-BDA numbers count UNIQUE leads dialed (a
+ *   redial is one lead), so the breakdown always sums to "Called".
  * - "Left to call" is the callable queue from the last 3 days: call leads
  *   created in the past 72h, already past the 24h cool-off, never called.
  */
@@ -970,6 +971,7 @@ export async function buildCallLeadsDailySummary(end = new Date()) {
   const calls = await CallLogModel.find({
     startedAt: { $gte: windowStart, $lt: end },
     direction: { $ne: 'internal' },
+    salesEmail: FIXED_ASSIGNEE_EMAIL,
   })
     .select('salesEmail salesName leadNumberNormalized durationSec')
     .lean();
@@ -981,9 +983,11 @@ export async function buildCallLeadsDailySummary(end = new Date()) {
     if (c.leadNumberNormalized) uniqueLeads.add(c.leadNumberNormalized);
     totalSec += c.durationSec || 0;
     const key = (c.salesEmail || 'unknown').toLowerCase();
-    const row = byBda.get(key) || { name: c.salesName || c.salesEmail || 'Unknown', calls: 0, sec: 0 };
+    const row = byBda.get(key) || { name: c.salesName || c.salesEmail || 'Unknown', leads: new Set(), sec: 0 };
     if (c.salesName) row.name = c.salesName;
-    row.calls += 1;
+    // Unique leads, same as the headline — a redial is one lead, not two, so the
+    // breakdown always sums to "Called".
+    if (c.leadNumberNormalized) row.leads.add(c.leadNumberNormalized);
     row.sec += c.durationSec || 0;
     byBda.set(key, row);
   }
@@ -1013,7 +1017,7 @@ export async function buildCallLeadsDailySummary(end = new Date()) {
     if (!called) leftToCall += 1;
   }
 
-  const breakdown = [...byBda.values()].sort((a, b) => b.calls - a.calls);
+  const breakdown = [...byBda.values()].sort((a, b) => b.leads.size - a.leads.size);
   const lines = [
     `📞 Call Leads Summary — ${fmtISTStamp(windowStart)} → ${fmtISTStamp(end)} IST`,
     `✅ Called: ${uniqueLeads.size}`,
@@ -1022,7 +1026,7 @@ export async function buildCallLeadsDailySummary(end = new Date()) {
   ];
   if (breakdown.length > 0) {
     lines.push('', 'BDA Breakdown:');
-    for (const r of breakdown) lines.push(`• ${r.name}: ${r.calls} call${r.calls === 1 ? '' : 's'} · ${fmtCallTime(r.sec)}`);
+    for (const r of breakdown) lines.push(`• ${r.name}: ${r.leads.size} call${r.leads.size === 1 ? '' : 's'} · ${fmtCallTime(r.sec)}`);
   }
 
   return {
