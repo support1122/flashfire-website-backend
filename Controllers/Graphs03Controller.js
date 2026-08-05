@@ -747,10 +747,7 @@ export const getBdaStatusBreakdown = async (req, res) => {
       {
         $match: {
           bookingStatus: { $in: ['completed', 'paid', 'no-show', 'rescheduled', 'canceled', 'scheduled', 'not-scheduled', 'ignored'] },
-          $or: [
-            { scheduledEventStartTime: { $gte: from, $lte: to } },
-            { bookingCreatedAt: { $gte: from, $lte: to } },
-          ],
+          scheduledEventStartTime: { $gte: from, $lte: to },
         },
       },
       OWNER_EMAILS_STAGE,
