@@ -43,6 +43,84 @@ function applyBdaOwnLeadScope(matchQuery, req) {
   return matchQuery;
 }
 
+/**
+ * Applies the fromDate/toDate range to matchQuery for the leads list (getLeadsPaginated /
+ * getLeadsIds). Leads with a scheduled meeting are matched by scheduledEventStartTime.
+ * Leads with no meeting booked yet (not-scheduled status, or a Meta lead that hasn't
+ * booked) have no scheduledEventStartTime to range against, so without this they'd
+ * silently vanish the moment any date filter is applied — they're matched by
+ * bookingCreatedAt (when the lead came in) instead so the date range still applies to them.
+ * With no date filter at all, every eligible lead type is shown, no range check needed.
+ */
+function applyLeadsDateRange(matchQuery, fromDate, toDate) {
+  matchQuery.$and = matchQuery.$and || [];
+
+  if (!fromDate && !toDate) {
+    matchQuery.$and.push({
+      $or: [
+        { scheduledEventStartTime: { $exists: true, $ne: null } },
+        { leadSource: 'meta_lead_ad' },
+        { metaLeadId: { $exists: true, $ne: null } },
+        { bookingStatus: 'not-scheduled' },
+      ],
+    });
+    return matchQuery;
+  }
+
+  const range = {};
+  if (fromDate) {
+    const from = new Date(fromDate);
+    from.setHours(0, 0, 0, 0);
+    range.$gte = from;
+  }
+  if (toDate) {
+    const to = new Date(toDate);
+    to.setHours(23, 59, 59, 999);
+    range.$lte = to;
+  }
+
+  matchQuery.$and.push({
+    $or: [
+      { scheduledEventStartTime: range },
+      {
+        $and: [
+          { $or: [{ scheduledEventStartTime: { $exists: false } }, { scheduledEventStartTime: null }] },
+          { $or: [{ bookingStatus: 'not-scheduled' }, { leadSource: 'meta_lead_ad' }, { metaLeadId: { $exists: true, $ne: null } }] },
+          { bookingCreatedAt: range },
+        ],
+      },
+    ],
+  });
+  return matchQuery;
+}
+
+/**
+ * Strict "Booked Date" filter — separate from applyLeadsDateRange. Filters only by
+ * scheduledEventStartTime (the actual meeting time), no bookingCreatedAt fallback.
+ * A lead with no scheduledEventStartTime (not-scheduled status, or a Meta lead that
+ * hasn't booked a meeting) can never match a $gte/$lte range on that field, so it's
+ * naturally excluded — no explicit status exclusion needed.
+ */
+function applyBookedDateRange(matchQuery, bookedFromDate, bookedToDate) {
+  if (!bookedFromDate && !bookedToDate) return matchQuery;
+
+  const range = {};
+  if (bookedFromDate) {
+    const from = new Date(bookedFromDate);
+    from.setHours(0, 0, 0, 0);
+    range.$gte = from;
+  }
+  if (bookedToDate) {
+    const to = new Date(bookedToDate);
+    to.setHours(23, 59, 59, 999);
+    range.$lte = to;
+  }
+
+  matchQuery.$and = matchQuery.$and || [];
+  matchQuery.$and.push({ scheduledEventStartTime: range });
+  return matchQuery;
+}
+
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibility.js';
 
@@ -2026,6 +2104,8 @@ export const getLeadsPaginated = async (req, res) => {
       search,
       fromDate,
       toDate,
+      bookedFromDate,
+      bookedToDate,
       planName,
       utmMedium,
       utmCampaign,
@@ -2097,20 +2177,6 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
 
-    if (fromDate || toDate) {
-      matchQuery.scheduledEventStartTime = {};
-      if (fromDate) {
-        const from = new Date(fromDate);
-        from.setHours(0, 0, 0, 0);
-        matchQuery.scheduledEventStartTime.$gte = from;
-      }
-      if (toDate) {
-        const to = new Date(toDate);
-        to.setHours(23, 59, 59, 999);
-        matchQuery.scheduledEventStartTime.$lte = to;
-      }
-    }
-
     if (search) {
       // Trim the search term
       const trimmedSearch = search.trim();
@@ -2131,21 +2197,8 @@ export const getLeadsPaginated = async (req, res) => {
       }
     }
 
-    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad, not-scheduled) to appear
-    // Only enforce scheduledEventStartTime filter when no date filter is already applied
-    if (!matchQuery.scheduledEventStartTime) {
-      // Show all leads: those with scheduled times + meta leads (native or merged) without meetings + not-scheduled leads
-      if (!matchQuery.$and) matchQuery.$and = [];
-      matchQuery.$and.push({
-        $or: [
-          { scheduledEventStartTime: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' },
-          { metaLeadId: { $exists: true, $ne: null } },
-          { bookingStatus: 'not-scheduled' }
-        ]
-      });
-    }
-
+    applyLeadsDateRange(matchQuery, fromDate, toDate);
+    applyBookedDateRange(matchQuery, bookedFromDate, bookedToDate);
     applyBdaOwnLeadScope(matchQuery, req);
 
     // For Meta leads (meta_lead_ad), show ALL leads including duplicates
@@ -2392,6 +2445,8 @@ export const getLeadsIds = async (req, res) => {
       search,
       fromDate,
       toDate,
+      bookedFromDate,
+      bookedToDate,
       planName,
       utmMedium,
       utmCampaign,
@@ -2449,19 +2504,6 @@ export const getLeadsIds = async (req, res) => {
       if (minAmount) matchQuery['paymentPlan.price'].$gte = parseFloat(minAmount);
       if (maxAmount) matchQuery['paymentPlan.price'].$lte = parseFloat(maxAmount);
     }
-    if (fromDate || toDate) {
-      matchQuery.scheduledEventStartTime = {};
-      if (fromDate) {
-        const from = new Date(fromDate);
-        from.setHours(0, 0, 0, 0);
-        matchQuery.scheduledEventStartTime.$gte = from;
-      }
-      if (toDate) {
-        const to = new Date(toDate);
-        to.setHours(23, 59, 59, 999);
-        matchQuery.scheduledEventStartTime.$lte = to;
-      }
-    }
     if (search && String(search).trim()) {
       const escapedSearch = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       matchQuery.$or = [
@@ -2473,21 +2515,8 @@ export const getLeadsIds = async (req, res) => {
         { utmCampaign: { $regex: escapedSearch, $options: 'i' } }
       ];
     }
-    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad, not-scheduled) to appear
-    // Only enforce scheduledEventStartTime filter when no date filter is already applied
-    if (!matchQuery.scheduledEventStartTime) {
-      // Show all leads: those with scheduled times + meta leads without meetings + not-scheduled leads
-      if (!matchQuery.$and) matchQuery.$and = [];
-      matchQuery.$and.push({
-        $or: [
-          { scheduledEventStartTime: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' },
-          { metaLeadId: { $exists: true, $ne: null } },
-          { bookingStatus: 'not-scheduled' }
-        ]
-      });
-    }
-
+    applyLeadsDateRange(matchQuery, fromDate, toDate);
+    applyBookedDateRange(matchQuery, bookedFromDate, bookedToDate);
     applyBdaOwnLeadScope(matchQuery, req);
 
     const idsPipeline = [
