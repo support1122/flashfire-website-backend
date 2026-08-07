@@ -658,20 +658,6 @@ export const getAllBookingsPaginated = async (req, res) => {
       query['paymentPlan.name'] = normalizedPlanName;
     }
 
-    if (fromDate || toDate) {
-      query.scheduledEventStartTime = {};
-      if (fromDate) {
-        const from = new Date(fromDate);
-        from.setHours(0, 0, 0, 0);
-        query.scheduledEventStartTime.$gte = from;
-      }
-      if (toDate) {
-        const to = new Date(toDate);
-        to.setHours(23, 59, 59, 999);
-        query.scheduledEventStartTime.$lte = to;
-      }
-    }
-
     if (search) {
       query.$or = [
         { clientName: { $regex: search, $options: 'i' } },
@@ -680,19 +666,7 @@ export const getAllBookingsPaginated = async (req, res) => {
       ];
     }
 
-    // Allow leads without scheduledEventStartTime (e.g. meta_lead_ad, not-scheduled) to appear
-    // Only enforce scheduledEventStartTime filter when no date filter is already applied
-    if (!query.scheduledEventStartTime) {
-      // Show all leads: those with scheduled times + meta leads without meetings + not-scheduled leads
-      if (!query.$and) query.$and = [];
-      query.$and.push({
-        $or: [
-          { scheduledEventStartTime: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' },
-          { bookingStatus: 'not-scheduled' }
-        ]
-      });
-    }
+    applyLeadsDateRange(query, fromDate, toDate);
 
     const total = await CampaignBookingModel.countDocuments(query);
 
@@ -2329,13 +2303,18 @@ export const getLeadsPaginated = async (req, res) => {
     const sqlCount = qualStatsResult.find((r) => r._id === 'SQL')?.count ?? 0;
     const convertedCount = qualStatsResult.find((r) => r._id === 'Converted')?.count ?? 0;
 
-    // Status breakdown for "Meetings from X to Y" - deduplicated by client, respects qualification/status filter
+    // Status breakdown for "Meetings from X to Y".
+    // Counts DISTINCT (client, status) pairs — i.e. per status, how many unique clients had
+    // that status in range. This is exactly what the UI shows when you filter the table to a
+    // single status, so the unfiltered chart now equals the per-status numbers.
+    // (The old version collapsed each client to their latest row only, so a client who was
+    // canceled and later rescheduled counted once under "rescheduled" and vanished from
+    // "canceled" — which is why unfiltered showed 13 canceled but filtering showed 22.)
     const statusBreakdownPipeline = [
       { $match: matchQuery },
       { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
-      { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
-      { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
-      { $group: { _id: '$bookingStatus', count: { $sum: 1 } } }
+      { $group: { _id: { groupKey: '$groupKey', bookingStatus: '$bookingStatus' } } },
+      { $group: { _id: '$_id.bookingStatus', count: { $sum: 1 } } }
     ];
     const statusBreakdownResult = await CampaignBookingModel.aggregate(statusBreakdownPipeline);
     const statusBreakdown = {};
@@ -2343,20 +2322,20 @@ export const getLeadsPaginated = async (req, res) => {
       statusBreakdown[row._id] = row.count;
     }
 
-    // Monthly breakdown by status for bar chart
-    // Global dedup: each client appears once with their latest status, bucketed by scheduledEventStartTime month
-    // This matches the table exactly — same logic as the client list
+    // Monthly breakdown by status for the bar chart.
+    // Same counting rule as statusBreakdown above: DISTINCT (client, status) pairs, bucketed
+    // into the month of that client's most recent row carrying that status. Summing a status
+    // across months therefore equals what the table shows when filtered to that status.
     const monthlyStatusPipeline = [
       { $match: matchQuery },
       { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
       { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
       { $group: {
-        _id: '$groupKey',
-        bookingStatus: { $first: '$bookingStatus' },
+        _id: { groupKey: '$groupKey', bookingStatus: '$bookingStatus' },
         monthDate: { $first: { $ifNull: ['$scheduledEventStartTime', '$bookingCreatedAt'] } }
       }},
       { $addFields: { month: { $dateToString: { format: '%Y-%m', date: '$monthDate' } } } },
-      { $group: { _id: { month: '$month', bookingStatus: '$bookingStatus' }, count: { $sum: 1 } } },
+      { $group: { _id: { month: '$month', bookingStatus: '$_id.bookingStatus' }, count: { $sum: 1 } } },
       { $sort: { '_id.month': 1 } }
     ];
     const flatMonthlyStatusResult = await CampaignBookingModel.aggregate(monthlyStatusPipeline);
@@ -2932,19 +2911,6 @@ export const getLeadsAnalytics = async (req, res) => {
 
     // Build base match query - use scheduledEventStartTime for date (matches "Meetings from X to Y" / table)
     const matchQuery = {};
-    if (fromDate || toDate) {
-      matchQuery.scheduledEventStartTime = {};
-      if (fromDate) {
-        const from = new Date(fromDate);
-        from.setHours(0, 0, 0, 0);
-        matchQuery.scheduledEventStartTime.$gte = from;
-      }
-      if (toDate) {
-        const to = new Date(toDate);
-        to.setHours(23, 59, 59, 999);
-        matchQuery.scheduledEventStartTime.$lte = to;
-      }
-    }
     if (qualification && qualification !== 'all') {
       const q = String(qualification).toLowerCase();
       if (q === 'mql' || q === 'sql' || q === 'converted') {
@@ -3005,19 +2971,7 @@ export const getLeadsAnalytics = async (req, res) => {
       matchQuery.$and.push(sourceType === 'paid' ? paidMarkers : { $nor: [paidMarkers] });
     }
 
-    // When no date filter, include leads without scheduledEventStartTime (meta leads, not-scheduled)
-    if (!matchQuery.scheduledEventStartTime) {
-      matchQuery.$and = matchQuery.$and || [];
-      matchQuery.$and.push({
-        $or: [
-          { scheduledEventStartTime: { $exists: true, $ne: null } },
-          { leadSource: 'meta_lead_ad' },
-          { metaLeadId: { $exists: true, $ne: null } },
-          { bookingStatus: 'not-scheduled' }
-        ]
-      });
-    }
-
+    applyLeadsDateRange(matchQuery, fromDate, toDate);
     applyBdaOwnLeadScope(matchQuery, req);
 
     // Qualification add-fields expression (reusable)
@@ -3243,13 +3197,14 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: 1 } }
       ]),
 
-      // 10. STATUS BREAKDOWN (detailed, deduplicated by client)
+      // 10. STATUS BREAKDOWN — distinct (client, status) pairs, so each status counts every
+      // unique client who held it in range. Matches the per-status filtered table count,
+      // same rule as statusBreakdown in getLeadsPaginated.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
-        { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
-        { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
-        { $group: { _id: '$bookingStatus', count: { $sum: 1 } } },
+        { $group: { _id: { groupKey: '$groupKey', bookingStatus: '$bookingStatus' } } },
+        { $group: { _id: '$_id.bookingStatus', count: { $sum: 1 } } },
         { $sort: { count: -1 } }
       ]),
 
