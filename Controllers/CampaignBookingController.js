@@ -19,6 +19,7 @@ import { sendScheduleEvent } from '../Services/FacebookConversionAPI.js';
 import { sendScheduleEvent as sendGoogleAdsScheduleEvent } from '../Services/GoogleAdsConversionAPI.js';
 import { sendScheduleEvent as sendLinkedInScheduleEvent } from '../Services/LinkedInConversionAPI.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
+import { normalizeCurrency, formatMoney } from '../Utils/currency.js';
 import { crmUserMetaLeadsOnly, crmUserBdaOwnEmailScope } from '../Middlewares/CrmAuth.js';
 
 /**
@@ -1042,18 +1043,17 @@ export const updateBookingStatus = async (req, res) => {
           lines.push({
             planName: planKey,
             amount,
-            currency: line.currency || 'USD'
+            currency: normalizeCurrency(line.currency)
           });
           totalAmount += amount;
         }
         if (lines.length > 0) {
-          const currency = lines[0].currency || 'USD';
-          const symbol = currency === 'CAD' ? 'CA$' : '$';
+          const currency = normalizeCurrency(lines[0].currency);
           paymentPlanUpdate = {
             name: lines[0].planName,
             price: totalAmount,
             currency,
-            displayPrice: plan?.displayPrice || `${symbol}${totalAmount}`,
+            displayPrice: formatMoney(totalAmount, currency),
             selectedAt: new Date()
           };
           paymentBreakdownToSet = lines;
@@ -1075,11 +1075,14 @@ export const updateBookingStatus = async (req, res) => {
           });
         }
         const catalogPlan = PLAN_CATALOG[normalizedPlanName];
+        const paidCurrency = normalizeCurrency(plan?.currency || catalogPlan.currency);
         paymentPlanUpdate = {
           name: normalizedPlanName,
           price: amountPaid,
-          currency: plan?.currency || catalogPlan.currency,
-          displayPrice: plan?.displayPrice || `$${amountPaid}`,
+          currency: paidCurrency,
+          // Derived, never taken from the request: a client-supplied displayPrice could
+          // disagree with the currency and strand a "$" label on a EUR/CAD record.
+          displayPrice: formatMoney(amountPaid, paidCurrency),
           selectedAt: new Date()
         };
         paymentBreakdownToSet = []; // single plan = no breakdown
@@ -2554,11 +2557,15 @@ export const updateBookingAmount = async (req, res) => {
     const catalogPlan = PLAN_CATALOG[normalizedPlanName];
     const newAmount = amount ? parseFloat(amount) : catalogPlan.price;
 
+    // Keep the currency the client actually paid in. PLAN_CATALOG is USD-only, so taking the
+    // currency from there silently converted CAD/EUR clients to USD on every amount edit.
+    const existingCurrency = normalizeCurrency(booking.paymentPlan?.currency);
+
     const paymentPlanUpdate = {
       name: normalizedPlanName,
       price: newAmount,
-      currency: catalogPlan.currency,
-      displayPrice: `$${newAmount}`,
+      currency: existingCurrency,
+      displayPrice: formatMoney(newAmount, existingCurrency),
       selectedAt: booking.paymentPlan?.selectedAt || new Date()
     };
 
