@@ -45,6 +45,38 @@ function applyBdaOwnLeadScope(matchQuery, req) {
 }
 
 /**
+ * Applies the post-meeting lead rating filter (hot/warm/cold, or 'unrated') to the
+ * leads list. Unknown values are ignored rather than rejected, matching how the other
+ * optional list filters behave.
+ *
+ * 'unrated' has to cover three shapes, not just a null value: leads that predate the
+ * field entirely (no subdocument), leads whose subdocument exists with value null, and
+ * leads where the value was cleared — otherwise the rated and unrated counts would not
+ * add up to the total.
+ */
+function applyTemperatureFilter(matchQuery, temperature) {
+  const t = temperature ? String(temperature).trim().toLowerCase() : null;
+  if (!t || t === 'all') return matchQuery;
+
+  if (t === 'unrated') {
+    matchQuery.$and = matchQuery.$and || [];
+    matchQuery.$and.push({
+      $or: [
+        { leadTemperature: { $exists: false } },
+        { 'leadTemperature.value': { $in: [null, ''] } },
+        { 'leadTemperature.value': { $exists: false } }
+      ]
+    });
+    return matchQuery;
+  }
+
+  if (['hot', 'warm', 'cold'].includes(t)) {
+    matchQuery['leadTemperature.value'] = t;
+  }
+  return matchQuery;
+}
+
+/**
  * Applies the fromDate/toDate range to matchQuery for the leads list (getLeadsPaginated /
  * getLeadsIds). Leads with a scheduled meeting are matched by scheduledEventStartTime.
  * Leads with no meeting booked yet (not-scheduled status, or a Meta lead that hasn't
@@ -1898,6 +1930,68 @@ export const updateBookingNotes = async (req, res) => {
   }
 };
 
+// ==================== LEAD TEMPERATURE (post-meeting rating) ====================
+
+const LEAD_TEMPERATURES = ['hot', 'warm', 'cold'];
+
+/**
+ * PUT /api/campaign-bookings/:bookingId/temperature
+ *
+ * Records how warm the lead felt to the BDA, captured right after the meeting is
+ * marked completed. Re-rating simply overwrites, with fresh attribution — a BDA
+ * changing their mind is expected, and the status history already carries the
+ * meeting timeline.
+ */
+export const updateBookingTemperature = async (req, res) => {
+  try {
+    const { bookingId } = req.params;
+    const raw = req.body?.temperature;
+    const temperature = typeof raw === 'string' ? raw.trim().toLowerCase() : '';
+
+    if (!LEAD_TEMPERATURES.includes(temperature)) {
+      return res.status(400).json({
+        success: false,
+        message: `temperature must be one of: ${LEAD_TEMPERATURES.join(', ')}`
+      });
+    }
+
+    // Same trust rule as the status endpoint: a CRM token wins over body fields.
+    const authedEmail = req.crmUser?.email ? String(req.crmUser.email).toLowerCase() : null;
+    const ratedByEmail = authedEmail || (req.body?.ratedByEmail ? String(req.body.ratedByEmail).toLowerCase() : null);
+    const ratedByName = (authedEmail ? req.crmUser.name : null) || req.body?.ratedByName || ratedByEmail || null;
+
+    const booking = await CampaignBookingModel.findOneAndUpdate(
+      { bookingId },
+      {
+        $set: {
+          'leadTemperature.value': temperature,
+          'leadTemperature.ratedByEmail': ratedByEmail,
+          'leadTemperature.ratedByName': ratedByName,
+          'leadTemperature.ratedAt': new Date()
+        }
+      },
+      { new: true }
+    );
+
+    if (!booking) {
+      return res.status(404).json({ success: false, message: 'Booking not found' });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Lead rating saved',
+      data: { bookingId: booking.bookingId, leadTemperature: booking.leadTemperature }
+    });
+  } catch (error) {
+    console.error('Error updating lead temperature:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to save lead rating',
+      error: error.message
+    });
+  }
+};
+
 // ==================== CREATE BOOKING MANUALLY ====================
 export const createBookingManually = async (req, res) => {
   try {
@@ -2089,7 +2183,8 @@ export const getLeadsPaginated = async (req, res) => {
       minAmount,
       maxAmount,
       status,
-      qualification
+      qualification,
+      temperature
     } = req.query;
 
     let utmSource = req.query.utmSource;
@@ -2176,6 +2271,7 @@ export const getLeadsPaginated = async (req, res) => {
 
     applyLeadsDateRange(matchQuery, fromDate, toDate);
     applyBookedDateRange(matchQuery, bookedFromDate, bookedToDate);
+    applyTemperatureFilter(matchQuery, temperature);
     applyBdaOwnLeadScope(matchQuery, req);
 
     // For Meta leads (meta_lead_ad), show ALL leads including duplicates
@@ -2436,6 +2532,7 @@ export const getLeadsIds = async (req, res) => {
       maxAmount,
       status,
       qualification,
+      temperature,
       limit = '5000'
     } = req.query;
 
@@ -2499,6 +2596,7 @@ export const getLeadsIds = async (req, res) => {
     }
     applyLeadsDateRange(matchQuery, fromDate, toDate);
     applyBookedDateRange(matchQuery, bookedFromDate, bookedToDate);
+    applyTemperatureFilter(matchQuery, temperature);
     applyBdaOwnLeadScope(matchQuery, req);
 
     const idsPipeline = [

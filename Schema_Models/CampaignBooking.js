@@ -363,6 +363,31 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  // --- Post-meeting lead rating ----------------------------------------------
+  // How warm the lead felt to the BDA who ran the meeting. Captured right after
+  // the meeting is marked completed. Deliberately separate from `qualification`
+  // (MQL/SQL/Converted), which is derived from status and never hand-set.
+  leadTemperature: {
+    value: {
+      type: String,
+      enum: ['hot', 'warm', 'cold', null],
+      default: null
+    },
+    ratedByEmail: {
+      type: String,
+      default: null,
+      lowercase: true,
+      trim: true
+    },
+    ratedByName: {
+      type: String,
+      default: null
+    },
+    ratedAt: {
+      type: Date,
+      default: null
+    }
+  },
   // --- Call Leads tab --------------------------------------------------------
   // A Meta lead that never booked has no owner anywhere else: claimLead() rejects
   // the 'not-scheduled' status outright, and Calendly never runs so calendlyHost
@@ -641,6 +666,8 @@ CampaignBookingSchema.index({ 'scheduledWorkflows.status': 1, 'scheduledWorkflow
 // Call Leads tab: Meta leads still on 'not-scheduled', newest first.
 CampaignBookingSchema.index({ leadSource: 1, bookingStatus: 1, bookingCreatedAt: -1 });
 CampaignBookingSchema.index({ 'callLeadAssignee.email': 1 });
+// Leads list: filter by the post-meeting rating (hot/warm/cold).
+CampaignBookingSchema.index({ 'leadTemperature.value': 1 });
 
 export const CampaignBookingModel = mongoose.model('CampaignBooking', CampaignBookingSchema);
 
