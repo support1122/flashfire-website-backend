@@ -50,6 +50,7 @@ import {
   captureFrontendBooking,
   rescheduleBooking,
   updateBookingNotes,
+  updateBookingTemperature,
   createBookingManually,
   getLeadsPaginated,
   getLeadsIds,
@@ -484,6 +485,7 @@ export default function Routes(app) {
   app.put('/api/campaign-bookings/:bookingId/status', attachCrmUserOptional, updateBookingStatus); // Update booking status (status-ownership enforced inside)
   app.post('/api/campaign-bookings/:bookingId/reschedule', rescheduleBooking); // Reschedule booking and refresh queue
   app.put('/api/campaign-bookings/:bookingId/notes', updateBookingNotes); // Update booking notes
+  app.put('/api/campaign-bookings/:bookingId/temperature', attachCrmUserOptional, updateBookingTemperature); // Rate lead hot/warm/cold after the meeting
   app.post('/api/campaign-bookings/:bookingId/meeting-notes', getMeetingNotes); // Get meeting notes from Fireflies
   app.put('/api/campaign-bookings/:bookingId/amount', updateBookingAmount); // Update booking amount (leads only)
   app.post('/api/campaign-bookings/:bookingId/follow-up', ScheduleFollowUp); // Schedule follow-up (email, call, WhatsApp)
