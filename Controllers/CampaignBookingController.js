@@ -669,7 +669,8 @@ export const getAllBookingsPaginated = async (req, res) => {
       fromDate,
       toDate,
       type = 'all',
-      planName
+      planName,
+      temperature
     } = req.query;
 
     const pageNum = parseInt(page);
@@ -700,6 +701,7 @@ export const getAllBookingsPaginated = async (req, res) => {
     }
 
     applyLeadsDateRange(query, fromDate, toDate);
+    applyTemperatureFilter(query, temperature);
 
     const total = await CampaignBookingModel.countDocuments(query);
 
@@ -729,7 +731,8 @@ export const getAllBookingsPaginated = async (req, res) => {
         reminderCallJobId: 1,
         paymentReminders: 1,
         rescheduledCount: 1,
-        whatsappReminderSent: 1
+        whatsappReminderSent: 1,
+        leadTemperature: 1
       })
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .skip(skip)
@@ -793,7 +796,8 @@ export const getMeetingsBookedToday = async (req, res) => {
         reminderCallJobId: 1,
         paymentReminders: 1,
         rescheduledCount: 1,
-        whatsappReminderSent: 1
+        whatsappReminderSent: 1,
+        leadTemperature: 1
       })
       .sort({ scheduledEventStartTime: 1 })
       .lean();
@@ -870,7 +874,8 @@ export const getMeetingsByDate = async (req, res) => {
         reminderCallJobId: 1,
         paymentReminders: 1,
         rescheduledCount: 1,
-        whatsappReminderSent: 1
+        whatsappReminderSent: 1,
+        leadTemperature: 1
       })
       .sort({ scheduledEventStartTime: 1 })
       .lean();
