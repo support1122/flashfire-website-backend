@@ -44,6 +44,9 @@ function applyBdaOwnLeadScope(matchQuery, req) {
   return matchQuery;
 }
 
+/** The post-meeting lead ratings a BDA can pick. */
+const LEAD_TEMPERATURES = ['hot', 'warm', 'cold'];
+
 /**
  * Applies the post-meeting lead rating filter (hot/warm/cold, or 'unrated') to the
  * leads list. Unknown values are ignored rather than rejected, matching how the other
@@ -70,7 +73,7 @@ function applyTemperatureFilter(matchQuery, temperature) {
     return matchQuery;
   }
 
-  if (['hot', 'warm', 'cold'].includes(t)) {
+  if (LEAD_TEMPERATURES.includes(t)) {
     matchQuery['leadTemperature.value'] = t;
   }
   return matchQuery;
@@ -1056,6 +1059,22 @@ export const updateBookingStatus = async (req, res) => {
       });
     }
 
+    // A completed meeting must carry a hot/warm/cold rating. The CRM asks for it before
+    // sending this request, so this is the server-side backstop that keeps the rule true
+    // no matter which client calls the API. Only blocks the transition INTO completed —
+    // a booking already completed (rated or not, including everything from before this
+    // rule existed) can still be moved to any other status.
+    if (status === 'completed' && existingBooking.bookingStatus !== 'completed') {
+      const rated = existingBooking.leadTemperature?.value;
+      if (!LEAD_TEMPERATURES.includes(rated)) {
+        return res.status(400).json({
+          success: false,
+          message: 'Rate the lead hot, warm or cold before marking the meeting completed.',
+          code: 'RATING_REQUIRED',
+        });
+      }
+    }
+
     let paymentPlanUpdate = null;
     let planDetailsUpdate = null;
 
@@ -1936,8 +1955,6 @@ export const updateBookingNotes = async (req, res) => {
 };
 
 // ==================== LEAD TEMPERATURE (post-meeting rating) ====================
-
-const LEAD_TEMPERATURES = ['hot', 'warm', 'cold'];
 
 /**
  * PUT /api/campaign-bookings/:bookingId/temperature
