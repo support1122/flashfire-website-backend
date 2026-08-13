@@ -89,7 +89,7 @@ export async function generatePaymentLink(req, res) {
     }
 
     const baseUrl = process.env.CAMPAIGN_BASE_URL || 'https://www.flashfirejobs.com';
-    const expiresAt = Math.floor(Date.now() / 1000) + 5 * 60 * 60;
+    const expiresAt = Math.floor(Date.now() / 1000) + 6 * 60 * 60;
 
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
