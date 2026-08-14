@@ -2,6 +2,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { Logger } from '../Utils/Logger.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 import { triggerWorkflow } from './WorkflowController.js';
+import { sanitizeMetaField, sanitizeMetaFields } from '../Utils/sanitizeMetaField.js';
 
 const FB_VERIFY_TOKEN = process.env.FB_WEBHOOK_VERIFY_TOKEN || 'flashfire_meta_leads_verify';
 const FB_PAGE_ACCESS_TOKEN = process.env.FB_PAGE_ACCESS_TOKEN;
@@ -313,7 +314,9 @@ export const handleMetaLeadWebhook = async (req, res) => {
         const existingLead = await CampaignBookingModel.findOne({ $or: orConditions }).sort({ bookingCreatedAt: -1 });
 
         if (existingLead) {
-          const mergeSet = {
+          // sanitizeMetaFields drops Meta permission-error text so it can never be stored
+          // as a campaign/ad name. See Utils/sanitizeMetaField.js.
+          const mergeSet = sanitizeMetaFields({
             metaLeadId: leadgen_id,
             metaFormId: form_id || null,
             metaAdId: ad_id || null,
@@ -327,8 +330,10 @@ export const handleMetaLeadWebhook = async (req, res) => {
             metaPlatform: leadValue.platform || leadData?.platform || null,
             metaIsOrganic: typeof leadValue.is_organic === 'boolean' ? leadValue.is_organic : null,
             metaLeadStatus: leadValue.lead_status || null,
-            metaRawData: leadData || leadValue
-          };
+          });
+          // Kept verbatim on purpose: the raw payload is the debugging record, so it must
+          // not be scrubbed even when it contains the permission error.
+          mergeSet.metaRawData = leadData || leadValue;
           if (clientPhone) {
             mergeSet.clientPhone = clientPhone;
             mergeSet.normalizedClientPhone = normalizedPhone || null;
@@ -357,10 +362,13 @@ export const handleMetaLeadWebhook = async (req, res) => {
             console.log(`Skipped workflow re-trigger for ${existingLead.bookingId} — active upcoming meeting scheduled`);
           }
         } else {
-          const metaCampaignName = leadValue.campaign_name || leadData?.campaign_name || null;
-          const metaAdName = leadValue.ad_name || leadData?.ad_name || null;
-          const metaAdsetName = leadValue.adset_name || leadData?.adset_name || null;
-          const metaPlatform = leadValue.platform || leadData?.platform || null;
+          // sanitizeMetaField drops Meta permission-error text so it can never be stored
+          // as a campaign/ad name. See Utils/sanitizeMetaField.js.
+          const metaCampaignName = sanitizeMetaField(leadValue.campaign_name || leadData?.campaign_name || null);
+          const metaAdName = sanitizeMetaField(leadValue.ad_name || leadData?.ad_name || null);
+          const metaAdsetName = sanitizeMetaField(leadValue.adset_name || leadData?.adset_name || null);
+          const metaPlatform = sanitizeMetaField(leadValue.platform || leadData?.platform || null);
+          const safeAdId = sanitizeMetaField(ad_id || null);
           const newBooking = new CampaignBookingModel({
             clientName: clientName.trim(),
             clientEmail: normalizedEmail,
@@ -368,18 +376,18 @@ export const handleMetaLeadWebhook = async (req, res) => {
             normalizedClientPhone: normalizedPhone || null,
             utmSource: parsedFields.utmSource || metaPlatform || 'meta_lead_ad',
             utmMedium: parsedFields.utmMedium || 'paid',
-            utmCampaign: parsedFields.utmCampaign || metaCampaignName || (ad_id ? `meta_ad_${ad_id}` : 'meta_lead_form'),
+            utmCampaign: parsedFields.utmCampaign || metaCampaignName || (safeAdId ? `meta_ad_${safeAdId}` : 'meta_lead_form'),
             bookingStatus: 'not-scheduled',
             leadSource: 'meta_lead_ad',
             metaLeadId: leadgen_id,
             metaFormId: form_id || null,
-            metaAdId: ad_id || null,
+            metaAdId: safeAdId,
             metaAdName,
-            metaAdsetId: adgroup_id || null,
+            metaAdsetId: sanitizeMetaField(adgroup_id || null),
             metaAdsetName,
             metaPageId: pageId || null,
-            metaFormName: formName || null,
-            metaCampaignId: leadValue.campaign_id || null,
+            metaFormName: sanitizeMetaField(formName || null),
+            metaCampaignId: sanitizeMetaField(leadValue.campaign_id || null),
             metaCampaignName,
             metaPlatform,
             metaIsOrganic: typeof leadValue.is_organic === 'boolean' ? leadValue.is_organic : null,
@@ -629,23 +637,28 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
     const clientPhone = phone != null && String(phone).trim() !== '' ? String(phone).trim() : null;
     const normalizedClientPhone = normalizedPhoneLast10(clientPhone);
 
-    const resolvedCampaignName = campaign_name != null && String(campaign_name).trim() !== '' ? String(campaign_name).trim() : null;
+    // Meta writes a permission-error sentence into these columns when the synced FB user
+    // cannot read the ad account. sanitizeMetaField turns that into null so it never
+    // becomes a campaign name in the CRM. See Utils/sanitizeMetaField.js.
+    const rawCampaignName = sanitizeMetaField(campaign_name);
+    const resolvedCampaignName = rawCampaignName != null && String(rawCampaignName).trim() !== '' ? String(rawCampaignName).trim() : null;
+    const safeAdId = sanitizeMetaField(ad_id);
     const utmCampaign = resolvedCampaignName
-      || (ad_id != null && String(ad_id).trim() !== '' ? `meta_ad_${String(ad_id).trim()}` : 'meta_lead_form');
+      || (safeAdId != null && String(safeAdId).trim() !== '' ? `meta_ad_${String(safeAdId).trim()}` : 'meta_lead_form');
 
     const anythingToKnow = `Job type: ${sanitizeJobType(job_type)}`;
 
     const metaFields = {
       metaLeadId,
       metaFormId: form_id != null ? String(form_id) : null,
-      metaAdId: ad_id != null ? String(ad_id) : null,
-      metaAdName: ad_name != null ? String(ad_name) : null,
-      metaCampaignId: campaign_id != null ? String(campaign_id) : null,
+      metaAdId: sanitizeMetaField(ad_id != null ? String(ad_id) : null),
+      metaAdName: sanitizeMetaField(ad_name != null ? String(ad_name) : null),
+      metaCampaignId: sanitizeMetaField(campaign_id != null ? String(campaign_id) : null),
       metaCampaignName: resolvedCampaignName,
-      metaAdsetId: adset_id != null ? String(adset_id) : null,
-      metaAdsetName: adset_name != null ? String(adset_name) : null,
-      metaFormName: form_name != null ? String(form_name) : null,
-      metaPlatform: platform != null ? String(platform) : null,
+      metaAdsetId: sanitizeMetaField(adset_id != null ? String(adset_id) : null),
+      metaAdsetName: sanitizeMetaField(adset_name != null ? String(adset_name) : null),
+      metaFormName: sanitizeMetaField(form_name != null ? String(form_name) : null),
+      metaPlatform: sanitizeMetaField(platform != null ? String(platform) : null),
       metaIsOrganic: typeof is_organic === 'boolean' ? is_organic : (is_organic === 'true' ? true : (is_organic === 'false' ? false : null)),
       metaLeadStatus: lead_status != null ? String(lead_status) : null,
       metaRawData: body
