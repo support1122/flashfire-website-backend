@@ -3,6 +3,7 @@ import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js'
 import { BdaClaimApprovalModel } from '../Schema_Models/BdaClaimApproval.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { sendBdaClaimApprovalEmail } from '../Utils/SendGridHelper.js';
+import { currencySymbol } from '../Utils/currency.js';
 import crypto from 'crypto';
 
 // Current plan prices (fallback when basePriceUsd not in DB). Admin can override via BdaIncentiveConfig.basePriceUsd.
@@ -196,12 +197,11 @@ export const claimLead = async (req, res) => {
       }
       booking.paymentBreakdown = lines;
       const currency = lines[0].currency || 'USD';
-      const symbol = currency === 'CAD' ? 'CA$' : '$';
       booking.paymentPlan = {
         name: lines[0].planName,
         price: totalAmount,
         currency,
-        displayPrice: paymentPlan?.displayPrice || `${symbol}${totalAmount}`,
+        displayPrice: paymentPlan?.displayPrice || `${currencySymbol(currency)}${totalAmount}`,
         selectedAt: new Date()
       };
     } else if (paymentPlan && paymentPlan.name) {
@@ -214,11 +214,12 @@ export const claimLead = async (req, res) => {
       }
       const planKey = String(paymentPlan.name).toUpperCase();
       if (allowed.includes(planKey)) {
+        const planCurrency = paymentPlan.currency || 'USD';
         booking.paymentPlan = {
           name: planKey,
           price: amountPaid,
-          currency: paymentPlan.currency || 'USD',
-          displayPrice: paymentPlan.displayPrice || `$${amountPaid}`,
+          currency: planCurrency,
+          displayPrice: paymentPlan.displayPrice || `${currencySymbol(planCurrency)}${amountPaid}`,
           selectedAt: new Date()
         };
         booking.paymentBreakdown = undefined;
@@ -348,12 +349,11 @@ export const updateLeadDetails = async (req, res) => {
       if (lines.length > 0) {
         booking.paymentBreakdown = lines;
         const currency = lines[0].currency || 'USD';
-        const symbol = currency === 'CAD' ? 'CA$' : '$';
         booking.paymentPlan = {
           name: lines[0].planName,
           price: totalAmount,
           currency,
-          displayPrice: paymentPlan?.displayPrice || `${symbol}${totalAmount}`,
+          displayPrice: paymentPlan?.displayPrice || `${currencySymbol(currency)}${totalAmount}`,
           selectedAt: new Date()
         };
       }
@@ -367,11 +367,12 @@ export const updateLeadDetails = async (req, res) => {
             message: 'Amount paid by client must be greater than 0'
           });
         }
+        const planCurrency = paymentPlan.currency || 'USD';
         booking.paymentPlan = {
           name,
           price: amountPaid,
-          currency: paymentPlan.currency || 'USD',
-          displayPrice: paymentPlan.displayPrice || `$${amountPaid}`,
+          currency: planCurrency,
+          displayPrice: paymentPlan.displayPrice || `${currencySymbol(planCurrency)}${amountPaid}`,
           selectedAt: new Date()
         };
         booking.paymentBreakdown = undefined;
