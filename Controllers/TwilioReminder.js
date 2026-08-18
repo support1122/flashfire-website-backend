@@ -50,11 +50,11 @@ export default async function TwilioReminder(req, res) {
 
     // Use a clear, natural voice and brand introduction
     twiml.say({ voice: "alice", language: "en-US" },
-      `Hi, this is FlashFire. This is a quick reminder for your meeting scheduled at ${meetingTime}.`
+      `Hello! This is a friendly reminder from FlashFire. Your meeting is starting in 10 minutes at ${meetingTime}. Please join on time.`
     );
 
     twiml.say({ voice: "alice", language: "en-US" },
-      "See You in the meeting. Thank you and Good luck."
+      "We look forward to speaking with you. See you soon!"
     );
 
     res.status(200).type("text/xml").send(twiml.toString());
