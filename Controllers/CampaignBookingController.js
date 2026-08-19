@@ -2272,16 +2272,24 @@ export const getLeadsPaginated = async (req, res) => {
     }
 
     if (search) {
-      // Trim the search term
       const trimmedSearch = search.trim();
       if (trimmedSearch) {
-        // Escape special regex characters to prevent regex errors
-        // This allows literal search while preventing regex injection
         const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Build a flexible phone regex: strip all non-digits from the search term,
+        // then allow any formatting characters between each digit so that
+        // "6605805378", "+1 660 580-5378", "(660)580-5378", etc. all match
+        // the stored value regardless of how it was formatted.
+        const digitsOnly = trimmedSearch.replace(/\D/g, '');
+        const phoneOrConditions = [];
+        if (digitsOnly.length >= 4) {
+          const flexPhoneRegex = digitsOnly.split('').join('[\\s().+\\-]*');
+          phoneOrConditions.push({ clientPhone: { $regex: flexPhoneRegex, $options: 'i' } });
+        }
         matchQuery.$or = [
           { clientName: { $regex: escapedSearch, $options: 'i' } },
           { clientEmail: { $regex: escapedSearch, $options: 'i' } },
           { clientPhone: { $regex: escapedSearch, $options: 'i' } },
+          ...phoneOrConditions,
           { utmSource: { $regex: escapedSearch, $options: 'i' } },
           { utmMedium: { $regex: escapedSearch, $options: 'i' } },
           { utmCampaign: { $regex: escapedSearch, $options: 'i' } },
