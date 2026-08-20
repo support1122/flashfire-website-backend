@@ -5,9 +5,20 @@ const BdaIncentiveConfigSchema = new mongoose.Schema(
     planName: {
       type: String,
       enum: ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'],
-      required: true,
-      unique: true
+      required: true
     },
+    currency: {
+      type: String,
+      enum: ['USD', 'CAD', 'GBP', 'EUR', 'INR'],
+      required: true,
+      default: 'USD'
+    },
+    basePrice: {
+      type: Number,
+      default: null,
+      min: 0
+    },
+    // Legacy field kept for backward compatibility
     basePriceUsd: {
       type: Number,
       default: null,
@@ -25,6 +36,8 @@ const BdaIncentiveConfigSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+BdaIncentiveConfigSchema.index({ planName: 1, currency: 1 }, { unique: true });
 
 export const BdaIncentiveConfigModel =
   mongoose.models.BdaIncentiveConfig || mongoose.model('BdaIncentiveConfig', BdaIncentiveConfigSchema);
