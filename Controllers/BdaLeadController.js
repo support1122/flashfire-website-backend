@@ -171,6 +171,18 @@ export const claimLead = async (req, res) => {
       claimedAt: new Date()
     };
 
+    // A manual claim is also a first assignment. Pin it only when the lead has no
+    // owner yet — never overwrite, so a Calendly-assigned lead keeps its first BDA.
+    if (!booking.originalBda?.email) {
+      booking.originalBda = {
+        email,
+        name,
+        calendlyUserUri: null,
+        source: 'claim',
+        assignedAt: new Date(),
+      };
+    }
+
     const paymentPlan = req.body?.paymentPlan;
     const paymentBreakdown = req.body?.paymentBreakdown;
     const allowed = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];

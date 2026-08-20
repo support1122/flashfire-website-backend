@@ -535,6 +535,42 @@ export const CampaignBookingSchema = new mongoose.Schema({
       default: false
     }
   },
+
+  // The BDA who OWNS this lead for credit purposes — the first one it was ever
+  // assigned to. Written once and never overwritten.
+  //
+  // Why this exists: calendlyHost is replaced on every booking, so when a client
+  // cancels and rebooks, Calendly round-robins to a different BDA and the original
+  // one silently loses the lead — including the paid conversion they earned. Keeping
+  // the first assignment separate means calendlyHost can stay accurate for "who is
+  // hosting the meeting happening now" (reminders, attendance) while credit stays put.
+  originalBda: {
+    email: {
+      type: String,
+      default: null,
+      lowercase: true,
+      trim: true,
+      index: true
+    },
+    name: {
+      type: String,
+      default: null
+    },
+    calendlyUserUri: {
+      type: String,
+      default: null
+    },
+    // 'calendly' when it came from the round-robin host, 'claim' when a BDA claimed
+    // the lead manually, 'backfill' when reconstructed from the webhook log archive.
+    source: {
+      type: String,
+      default: null
+    },
+    assignedAt: {
+      type: Date,
+      default: null
+    }
+  },
   attachedCustomWorkflowIds: {
     type: [String],
     default: []

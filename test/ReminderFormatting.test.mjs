@@ -48,6 +48,17 @@ describe('resolveUnknownWhatsAppMeetingDisplay', () => {
     assert.ok(d.resolvedMeetingTime.length > 0);
   });
 
+  it('derives the meeting window from the 1h reminder type', () => {
+    const meetingStart = new Date('2026-06-15T17:00:00.000Z');
+    const scheduledFor = new Date(meetingStart.getTime() - 60 * 60 * 1000);
+    const d = resolveUnknownWhatsAppMeetingDisplay({
+      meetingStartISO: '',
+      scheduledFor,
+      metadata: { reminderType: '1h', inviteeTimezone: 'UTC' },
+    });
+    assert.equal(d.resolvedMeetingTime, '5pm \u2013 5:15pm');
+  });
+
   it('never returns Unknown as timezone label', () => {
     const d = resolveUnknownWhatsAppMeetingDisplay({
       meetingStartISO: '2026-06-15T17:00:00.000Z',

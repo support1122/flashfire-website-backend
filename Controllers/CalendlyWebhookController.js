@@ -238,6 +238,26 @@ async function handleCreatedEvent(req, res, payload) {
   const meetLink = payload?.scheduled_event?.location?.join_url || 'Not Provided';
   const bookedAt = new Date(payload?.created_at || new Date()).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
 
+  // Pin the FIRST BDA a lead is ever assigned to, so credit survives a rebooking.
+  //
+  // Calendly round-robins again whenever a client cancels and books a new slot, so
+  // calendlyHost legitimately changes to whoever hosts the new meeting. Attribution
+  // must not follow it: the BDA who worked the lead first keeps it. Returns an empty
+  // patch when the lead already has an owner, which is what makes this write-once.
+  const firstBdaPatch = (existing, host) => {
+    if (!host?.email) return {};
+    if (existing?.originalBda?.email) return {};
+    return {
+      originalBda: {
+        email: host.email,
+        name: host.name || null,
+        calendlyUserUri: host.calendlyUserUri || null,
+        source: 'calendly',
+        assignedAt: new Date(),
+      },
+    };
+  };
+
   // Resolve the Calendly round-robin host (the BDA this meeting is assigned to) and
   // match it to a CRM user by email so downstream views can show "Assigned BDA".
   let calendlyHost = null;
@@ -443,6 +463,7 @@ async function handleCreatedEvent(req, res, payload) {
           utmTerm: utmTerm ?? existingBooking.utmTerm,
           bookingStatus: 'scheduled',
           ...(calendlyHost ? { calendlyHost } : {}),
+          ...firstBdaPatch(existingBooking, calendlyHost),
         }
       },
       { new: true }
@@ -510,7 +531,8 @@ async function handleCreatedEvent(req, res, payload) {
           questionsAndAnswers: payload?.questions_and_answers || null,
           userAgent: req.headers['user-agent'],
           ipAddress: req.ip || req.connection.remoteAddress,
-          ...(calendlyHost ? { calendlyHost } : {})
+          ...(calendlyHost ? { calendlyHost } : {}),
+          ...firstBdaPatch(existingMetaLead, calendlyHost)
         }
       },
       { new: true }
@@ -753,7 +775,8 @@ async function handleCreatedEvent(req, res, payload) {
     userAgent: req.headers['user-agent'],
     ipAddress: req.ip || req.connection.remoteAddress,
     bookingStatus: 'scheduled',
-    ...(calendlyHost ? { calendlyHost } : {})
+    ...(calendlyHost ? { calendlyHost } : {}),
+    ...firstBdaPatch(null, calendlyHost)
   });
 
   await withMongoRetry(() => newBooking.save());
