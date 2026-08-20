@@ -735,7 +735,17 @@ export const getAllBookingsPaginated = async (req, res) => {
         paymentReminders: 1,
         rescheduledCount: 1,
         whatsappReminderSent: 1,
-        leadTemperature: 1
+        leadTemperature: 1,
+        // Status attribution. Without these the All Data tab cannot show who moved a
+        // lead last or render the status timeline — the fields simply never arrived.
+        statusChangedBy: 1,
+        statusChangedByName: 1,
+        statusChangedAt: 1,
+        statusChangeSource: 1,
+        statusHistory: 1,
+        originalBda: 1,
+        calendlyHost: 1,
+        claimedBy: 1
       })
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .skip(skip)
@@ -800,7 +810,17 @@ export const getMeetingsBookedToday = async (req, res) => {
         paymentReminders: 1,
         rescheduledCount: 1,
         whatsappReminderSent: 1,
-        leadTemperature: 1
+        leadTemperature: 1,
+        // Status attribution. Without these the All Data tab cannot show who moved a
+        // lead last or render the status timeline — the fields simply never arrived.
+        statusChangedBy: 1,
+        statusChangedByName: 1,
+        statusChangedAt: 1,
+        statusChangeSource: 1,
+        statusHistory: 1,
+        originalBda: 1,
+        calendlyHost: 1,
+        claimedBy: 1
       })
       .sort({ scheduledEventStartTime: 1 })
       .lean();
@@ -878,7 +898,17 @@ export const getMeetingsByDate = async (req, res) => {
         paymentReminders: 1,
         rescheduledCount: 1,
         whatsappReminderSent: 1,
-        leadTemperature: 1
+        leadTemperature: 1,
+        // Status attribution. Without these the All Data tab cannot show who moved a
+        // lead last or render the status timeline — the fields simply never arrived.
+        statusChangedBy: 1,
+        statusChangedByName: 1,
+        statusChangedAt: 1,
+        statusChangeSource: 1,
+        statusHistory: 1,
+        originalBda: 1,
+        calendlyHost: 1,
+        claimedBy: 1
       })
       .sort({ scheduledEventStartTime: 1 })
       .lean();

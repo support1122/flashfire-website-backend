@@ -289,18 +289,19 @@ export async function scheduleAllWhatsAppReminders({
   const results = {
     'immediate': { success: false, skipped: false },
     '3h': { success: false, skipped: false },
+    '1h': { success: false, skipped: false },
     '5min': { success: false, skipped: false }
   };
 
   const meetingStart = parseMeetingStartToDate(meetingStartISO);
   if (!meetingStart) {
     const e = { success: false, skipped: false, error: 'Invalid meeting start' };
-    return { immediate: e, '3h': e, '5min': e };
+    return { immediate: e, '3h': e, '1h': e, '5min': e };
   }
   const normalizedPhone = normalizePhoneForReminders(phoneNumber);
   if (!normalizedPhone || !/^\+?[1-9]\d{9,14}$/.test(normalizedPhone)) {
     const e = { success: false, skipped: false, error: 'Invalid phone' };
-    return { immediate: e, '3h': e, '5min': e };
+    return { immediate: e, '3h': e, '1h': e, '5min': e };
   }
   phoneNumber = normalizedPhone;
 
@@ -435,6 +436,38 @@ export async function scheduleAllWhatsAppReminders({
     }
   }
 
+  if (hoursUntilMeeting > 1) {
+    const result1h = await scheduleWhatsAppReminder({
+      phoneNumber,
+      meetingStartISO,
+      meetingTime,
+      meetingDate,
+      clientName,
+      clientEmail,
+      meetingLink,
+      rescheduleLink,
+      source,
+      metadata,
+      timezone,
+      reminderOffsetMinutes: 60,
+      reminderType: '1h'
+    });
+    results['1h'] = result1h;
+  } else {
+    console.log(`⏭️ [WhatsAppReminderScheduler] Skipping 1h reminder - meeting is ${hoursUntilMeeting.toFixed(1)}h away (< 1h)`);
+    results['1h'] = { success: false, skipped: true, reason: `Meeting is only ${hoursUntilMeeting.toFixed(1)}h away` };
+
+    if (DISCORD_WEBHOOK) {
+      await DiscordConnect(DISCORD_WEBHOOK,
+        `⏭️ WA reminder skipped: 1h\n` +
+        `📞 ${phoneNumber} • ${clientName || 'Unknown'}\n` +
+        `📧 ${clientEmail || 'Unknown'}\n` +
+        `🗓️ ${meetingDate} @ ${meetingTime}\n` +
+        `⚠️ Meeting is only ${hoursUntilMeeting.toFixed(1)}h away (booked within 1h)`
+      );
+    }
+  }
+
   if (minutesUntilMeeting > 5 - FIVE_MIN_SCHEDULE_EPS_MIN) {
     const result5min = await scheduleWhatsAppReminder({
       phoneNumber,
@@ -476,9 +509,10 @@ export async function scheduleAllWhatsAppReminders({
       `📞 ${phoneNumber} • ${clientName || 'Unknown'}\n` +
       `📧 ${clientEmail || 'Unknown'}\n` +
       `🗓️ ${meetingDate} @ ${meetingTime}\n` +
-      `✅ Scheduled: ${scheduledCount}/3\n` +
+      `✅ Scheduled: ${scheduledCount}/4\n` +
       `   • Immediate: ${results['immediate'].success ? '✅' : (results['immediate'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
       `   • 3h: ${results['3h'].success ? '✅' : (results['3h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
+      `   • 1h: ${results['1h'].success ? '✅' : (results['1h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
       `   • 5min: ${results['5min'].success ? '✅' : (results['5min'].skipped ? '⏭️ Skipped' : '❌ Failed')}`
     );
   }
@@ -535,7 +569,7 @@ export async function cancelWhatsAppReminder({ phoneNumber, meetingStartISO }) {
       return { success: false, error: 'Invalid meeting start time' };
     }
 
-    const reminderTypes = ['immediate', '3h', '5min'];
+    const reminderTypes = ['immediate', '3h', '1h', '5min'];
     const cancelledReminders = [];
 
     for (const reminderType of reminderTypes) {
@@ -691,7 +725,7 @@ export function resolveUnknownWhatsAppMeetingDisplay(scheduledReminder) {
 
   // Fallback: reverse from scheduledFor + offset stored at schedule time
   if (scheduledReminder.scheduledFor) {
-    const offsetMap = { immediate: 1, '5min': 5, '3h': 180, '2hour': 120, '24hour': 1440 };
+    const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '2hour': 120, '24hour': 1440 };
     const reminderType = meta.reminderType ?? scheduledReminder.reminderType;
     const offsetMin =
       Number.isFinite(meta.reminderOffsetMinutes) && meta.reminderOffsetMinutes > 0
@@ -721,7 +755,7 @@ export async function sendWhatsAppMessage(scheduledReminder) {
 
     // Template routing:
     //   1st message  (immediate confirmation) → old template, no buttons (5 params)
-    //   2nd/3rd (3h & 5min reminders)         → _b template: Reschedule URL button (6 params).
+    //   all later (3h / 1h / 5min reminders)   → _b template: Reschedule URL button (6 params).
     //     "I'll join" is a static Quick-reply button, so it needs no send-time variable.
     const reminderType = scheduledReminder.metadata?.reminderType ?? scheduledReminder.reminderType ?? 'immediate';
     const isImmediate = reminderType === 'immediate' || scheduledReminder.metadata?.isImmediateReminder === true;
@@ -766,7 +800,7 @@ export async function sendWhatsAppMessage(scheduledReminder) {
       if (startFromIso) {
         resolvedMeetingDate = DateTime.fromJSDate(startFromIso, { zone: 'utc' }).setZone(inviteeTz).toFormat('EEEE MMM d, yyyy');
       } else if (scheduledReminder.scheduledFor) {
-        const offsetMap = { immediate: 1, '5min': 5, '3h': 180, '2hour': 120, '24hour': 1440 };
+        const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '2hour': 120, '24hour': 1440 };
         const reminderType = meta.reminderType ?? scheduledReminder.reminderType;
         const offsetMin = offsetMap[reminderType] ?? 5;
         const derived = new Date(new Date(scheduledReminder.scheduledFor).getTime() + offsetMin * 60 * 1000);
@@ -777,7 +811,7 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     // Template parameters: {{1}} = name, {{2}} = date, {{3}} = time with timezone,
     // {{4}} = meeting link, {{5}} = reschedule link,
     // {{6}} = "Reschedule" button URL tail (button base is https://calendly.com/, so we
-    // send only the path after it). Only present on the _b template (2nd/3rd reminders).
+    // send only the path after it). Only present on the _b template (3h / 1h / 5min).
     const finalRescheduleLink = rescheduleLink || DEFAULT_RESCHEDULE_LINK;
     const finalMeetingLink = meetingLink || 'Not Provided';
     const parameters = [
@@ -787,7 +821,7 @@ export async function sendWhatsAppMessage(scheduledReminder) {
       finalMeetingLink, // {{4}}
       finalRescheduleLink // {{5}}
     ];
-    // Only the _b template (2nd/3rd reminders) has a dynamic URL button.
+    // Only the _b template (3h / 1h / 5min reminders) has a dynamic URL button.
     // {{6}} = "Reschedule" button URL tail. ("I'll join" is a static quick-reply — no variable.)
     if (useButtons) {
       parameters.push(calendlyButtonTail(finalRescheduleLink)); // {{6}}

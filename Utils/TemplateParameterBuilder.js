@@ -1,4 +1,4 @@
-import { DateTime } from 'luxon';
+import { DateTime, IANAZone } from 'luxon';
 import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 
 const DEFAULT_SCHEDULING_LINK = 'https://calendly.com/feedback-flashfire/15min';
@@ -57,11 +57,23 @@ function getTimezoneAbbreviation(timezone, meetingStart) {
       return offset === -7 ? 'MT' : 'MDT';
     }
 
+    // Anything not named above (non-US zones, America/Phoenix, US/Eastern aliases)
+    // gets its real abbreviation from the zone itself. Guessing from the UTC offset
+    // labelled every -5 zone "ET", so an Asia/Kolkata client was told "2:30am ET".
+    // An unparseable zone yields an invalid DateTime whose toFormat() returns the
+    // string "Invalid DateTime" rather than throwing — check before trusting it.
+    const realAbbr = meetingInTimezone.isValid ? meetingInTimezone.toFormat('ZZZZ') : '';
+    if (realAbbr && !realAbbr.startsWith('GMT') && !realAbbr.startsWith('UTC')) {
+      return realAbbr;
+    }
+    // Same India mapping the reminder path uses (sanitizeTimezoneLabel in
+    // WhatsAppReminderScheduler.js), so both paths print the identical label.
+    if (timezone.includes('Kolkata') || timezone.includes('Calcutta')) return 'IST';
     if (offset === -8 || offset === -7) return 'PST';
     if (offset === -5 || offset === -4) return 'ET';
     if (offset === -6) return 'CT';
 
-    return 'ET';
+    return realAbbr || 'ET';
   } catch {
     return 'ET';
   }
@@ -69,7 +81,8 @@ function getTimezoneAbbreviation(timezone, meetingStart) {
 
 /**
  * Builds meeting time parameters (date, time with timezone) from booking data.
- * Used by cancelled1 and flashfire_appointment_reminder templates.
+ * Used by cancelled1 and flashfire_appointment_reminder* templates.
+ * Both the clock and the timezone label are rendered in the invitee's own zone.
  */
 function buildMeetingTimeParams(booking) {
   const rawStart = booking.scheduledEventStartTime;
@@ -99,17 +112,29 @@ function buildMeetingTimeParams(booking) {
     meetingEndUTC = meetingStartUTC.plus({ minutes: 15 });
   }
 
-  const meetingDateFormatted = meetingStartUTC.setZone('America/New_York').toFormat('MMM d');
+  // Render the clock in the INVITEE's zone, not Eastern. The label below is derived
+  // from booking.inviteeTimezone, so formatting the time in New York produced
+  // "5pm PDT" for a 5pm-Eastern meeting — three hours off for a Pacific client, in
+  // the direction that guarantees a missed call. Fall back to Eastern only when the
+  // booking carries no usable zone.
+  const displayZone =
+    typeof booking.inviteeTimezone === 'string' &&
+    booking.inviteeTimezone.trim() &&
+    IANAZone.isValidZone(booking.inviteeTimezone.trim())
+      ? booking.inviteeTimezone.trim()
+      : 'America/New_York';
 
-  const startTimeET = meetingStartUTC.setZone('America/New_York');
-  const startTimeFormatted = startTimeET.minute === 0
-    ? startTimeET.toFormat('ha').toLowerCase()
-    : startTimeET.toFormat('h:mma').toLowerCase();
+  const meetingDateFormatted = meetingStartUTC.setZone(displayZone).toFormat('MMM d');
 
-  const endTimeET = meetingEndUTC.setZone('America/New_York');
-  const endTimeFormatted = endTimeET.minute === 0
-    ? endTimeET.toFormat('ha').toLowerCase()
-    : endTimeET.toFormat('h:mma').toLowerCase();
+  const startTimeLocal = meetingStartUTC.setZone(displayZone);
+  const startTimeFormatted = startTimeLocal.minute === 0
+    ? startTimeLocal.toFormat('ha').toLowerCase()
+    : startTimeLocal.toFormat('h:mma').toLowerCase();
+
+  const endTimeLocal = meetingEndUTC.setZone(displayZone);
+  const endTimeFormatted = endTimeLocal.minute === 0
+    ? endTimeLocal.toFormat('ha').toLowerCase()
+    : endTimeLocal.toFormat('h:mma').toLowerCase();
 
   const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 

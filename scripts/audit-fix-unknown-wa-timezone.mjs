@@ -29,7 +29,7 @@ function resolveMeetingStartDate(doc) {
   }
 
   if (doc?.scheduledFor) {
-    const offsetMap = { immediate: 1, '5min': 5, '3h': 180, '2hour': 120, '24hour': 1440 };
+    const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '2hour': 120, '24hour': 1440 };
     const reminderType = doc?.metadata?.reminderType ?? doc?.reminderType;
     const offsetMin = Number.isFinite(doc?.metadata?.reminderOffsetMinutes)
       ? doc.metadata.reminderOffsetMinutes

@@ -11,8 +11,12 @@ import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
  *  3. getBdaCallActivity         — calls made and time spent on calls, per BDA.
  *  4. getBdaScorecard            — meeting attendance, sales-cycle length, plan mix.
  *
- * Attribution: a booking's BDA is the Calendly round-robin host (`calendlyHost.email`,
- * set on invitee.created) and falls back to the manual claim (`claimedBy.email`).
+ * Attribution: a booking's BDA is the FIRST one it was assigned to
+ * (`originalBda.email`), falling back to the current Calendly round-robin host
+ * (`calendlyHost.email`) and then the manual claim (`claimedBy.email`). originalBda
+ * comes first on purpose: calendlyHost is re-rolled whenever a client cancels and
+ * rebooks, which would otherwise hand the whole lead, paid conversion included, to
+ * whoever happened to host the replacement meeting.
  * Bookings with neither are bucketed as `unassigned` rather than dropped, so the
  * charts never silently under-count. `coverage` in each response reports how much of
  * the data is actually attributed.
@@ -28,27 +32,38 @@ const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
 /** Lower-cased, trimmed host/claim emails, so the resolve stage can test for "". */
 const OWNER_EMAILS_STAGE = {
   $addFields: {
+    _orig: { $trim: { input: { $toLower: { $ifNull: ['$originalBda.email', ''] } } } },
     _host: { $trim: { input: { $toLower: { $ifNull: ['$calendlyHost.email', ''] } } } },
     _claim: { $trim: { input: { $toLower: { $ifNull: ['$claimedBy.email', ''] } } } },
   },
 };
 
-/** host → claim → unassigned. */
+/** first-assigned → current host → claim → unassigned. */
 const OWNER_RESOLVE_STAGE = {
   $addFields: {
     bdaEmail: {
       $cond: [
-        { $ne: ['$_host', ''] }, '$_host',
-        { $cond: [{ $ne: ['$_claim', ''] }, '$_claim', UNASSIGNED] },
+        { $ne: ['$_orig', ''] }, '$_orig',
+        {
+          $cond: [
+            { $ne: ['$_host', ''] }, '$_host',
+            { $cond: [{ $ne: ['$_claim', ''] }, '$_claim', UNASSIGNED] },
+          ],
+        },
       ],
     },
     bdaName: {
       $cond: [
-        { $ne: ['$_host', ''] }, { $ifNull: ['$calendlyHost.name', '$_host'] },
+        { $ne: ['$_orig', ''] }, { $ifNull: ['$originalBda.name', '$_orig'] },
         {
           $cond: [
-            { $ne: ['$_claim', ''] }, { $ifNull: ['$claimedBy.name', '$_claim'] },
-            UNASSIGNED_LABEL,
+            { $ne: ['$_host', ''] }, { $ifNull: ['$calendlyHost.name', '$_host'] },
+            {
+              $cond: [
+                { $ne: ['$_claim', ''] }, { $ifNull: ['$claimedBy.name', '$_claim'] },
+                UNASSIGNED_LABEL,
+              ],
+            },
           ],
         },
       ],

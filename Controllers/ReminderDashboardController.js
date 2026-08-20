@@ -396,9 +396,10 @@ function extractReminderType(reminderId) {
   if (!reminderId) return '—';
   if (reminderId.includes('immediate')) return 'Immediate';
   if (reminderId.includes('3h')) return '3h Before';
+  if (reminderId.includes('1h')) return '1h Before';
   if (reminderId.includes('5min')) return '5min Before';
-  if (reminderId.includes('2h')) return '2h Before';
   if (reminderId.includes('24h')) return '24h Before';
+  if (reminderId.includes('2h')) return '2h Before';
   return 'Custom';
 }
 
