@@ -7,54 +7,44 @@ import { sendBdaClaimApprovalEmail } from '../Utils/SendGridHelper.js';
 import { currencySymbol } from '../Utils/currency.js';
 import crypto from 'crypto';
 
-// Current plan prices (fallback when basePriceUsd not in DB). Admin can override via BdaIncentiveConfig.basePriceUsd.
-const PLAN_CATALOG = {
-  PRIME: { price: 99 },
-  IGNITE: { price: 199 },
-  PROFESSIONAL: { price: 349 },
-  EXECUTIVE: { price: 599 }
-};
-
-// Default CAD base prices (matching frontend defaults)
-const CAD_BASE_PRICES = {
-  PRIME: 139,
-  IGNITE: 239,
-  PROFESSIONAL: 409,
-  EXECUTIVE: 799
+// Fallback base prices per currency when not yet configured in DB
+const CURRENCY_BASE_PRICES = {
+  USD: { PRIME: 99,  IGNITE: 199, PROFESSIONAL: 349, EXECUTIVE: 599 },
+  CAD: { PRIME: 139, IGNITE: 239, PROFESSIONAL: 409, EXECUTIVE: 799 },
+  GBP: { PRIME: 79,  IGNITE: 149, PROFESSIONAL: 299, EXECUTIVE: 499 },
 };
 
 const BDA_ALLOWED_LEAD_STATUSES = ['paid', 'scheduled', 'completed', 'rescheduled'];
 
-/** Compute prorated incentive (INR) for one line. configByPlan: Map(planName -> { basePriceUsd, incentivePerLeadInr }). */
-function incentiveForLine(configByPlan, planName, amount, currency) {
+/**
+ * Compute prorated incentive (INR) for one line.
+ * configByKey: Map("planName|CURRENCY" -> { basePrice, incentivePerLeadInr })
+ */
+function incentiveForLine(configByKey, planName, amount, currency) {
   if (!planName || !amount || amount <= 0) return 0;
-  const config = configByPlan.get(planName);
+  const cur = (currency || 'USD').toUpperCase();
+  const key = `${planName}|${cur}`;
+  const config = configByKey.get(key) || configByKey.get(`${planName}|USD`);
   if (!config) return 0;
-  
-  // Use currency-specific base price if CAD, otherwise use USD base price
-  let base;
-  if (currency && currency.toUpperCase() === 'CAD') {
-    base = CAD_BASE_PRICES[planName] || PLAN_CATALOG[planName]?.price || 1;
-  } else {
-    base = config.basePriceUsd > 0 ? config.basePriceUsd : (PLAN_CATALOG[planName]?.price ?? 1);
-  }
-  
+
+  const fallback = (CURRENCY_BASE_PRICES[cur] || CURRENCY_BASE_PRICES.USD)[planName] || 1;
+  const base = config.basePrice > 0 ? config.basePrice : fallback;
   const ratio = Math.min(1, amount / base);
   return config.incentivePerLeadInr * ratio;
 }
 
 /** Total incentive (INR) for a paid booking: from paymentBreakdown (sum per line) or single paymentPlan. */
-function incentiveForBooking(configByPlan, booking) {
+function incentiveForBooking(configByKey, booking) {
   if (Array.isArray(booking.paymentBreakdown) && booking.paymentBreakdown.length > 0) {
     return booking.paymentBreakdown.reduce(
-      (sum, line) => sum + incentiveForLine(configByPlan, line.planName, line.amount, line.currency),
+      (sum, line) => sum + incentiveForLine(configByKey, line.planName, line.amount, line.currency),
       0
     );
   }
   const planName = booking.paymentPlan?.name;
   const amount = Number(booking.paymentPlan?.price);
   const currency = booking.paymentPlan?.currency || 'USD';
-  return incentiveForLine(configByPlan, planName, amount, currency);
+  return incentiveForLine(configByKey, planName, amount, currency);
 }
 
 export const getAvailableLeads = async (req, res) => {
@@ -540,19 +530,18 @@ export const getBdaAnalysis = async (req, res) => {
     );
 
     const incentiveRows = await BdaIncentiveConfigModel.find({}).lean();
-    const configByPlan = new Map();
+    const configByKey = new Map();
     incentiveRows.forEach((r) => {
-      configByPlan.set(r.planName, {
-        basePriceUsd: r.basePriceUsd != null ? r.basePriceUsd : (PLAN_CATALOG[r.planName]?.price ?? 0),
-        incentivePerLeadInr: r.incentivePerLeadInr != null ? r.incentivePerLeadInr : 0
-      });
+      const currency = (r.currency || 'USD').toUpperCase();
+      const basePrice = r.basePrice != null ? r.basePrice : (r.basePriceUsd ?? (CURRENCY_BASE_PRICES.USD[r.planName] ?? 0));
+      configByKey.set(`${r.planName}|${currency}`, { basePrice, incentivePerLeadInr: r.incentivePerLeadInr ?? 0 });
     });
 
     const incentiveByBda = new Map();
     for (const b of approvedPaidBookingsForIncentive) {
       const email = b.claimedBy?.email;
       if (!email) continue;
-      const inc = incentiveForBooking(configByPlan, b);
+      const inc = incentiveForBooking(configByKey, b);
       if (inc > 0) incentiveByBda.set(email, (incentiveByBda.get(email) ?? 0) + inc);
     }
 
@@ -692,16 +681,15 @@ export const getMyClaimedLeads = async (req, res) => {
     );
 
     const incentiveRows = await BdaIncentiveConfigModel.find({}).lean();
-    const configByPlan = new Map();
+    const configByKey = new Map();
     incentiveRows.forEach((r) => {
-      configByPlan.set(r.planName, {
-        basePriceUsd: r.basePriceUsd != null ? r.basePriceUsd : (PLAN_CATALOG[r.planName]?.price ?? 0),
-        incentivePerLeadInr: r.incentivePerLeadInr != null ? r.incentivePerLeadInr : 0
-      });
+      const currency = (r.currency || 'USD').toUpperCase();
+      const basePrice = r.basePrice != null ? r.basePrice : (r.basePriceUsd ?? (CURRENCY_BASE_PRICES.USD[r.planName] ?? 0));
+      configByKey.set(`${r.planName}|${currency}`, { basePrice, incentivePerLeadInr: r.incentivePerLeadInr ?? 0 });
     });
     let totalIncentivesForFilter = 0;
     for (const b of approvedPaidBookings) {
-      totalIncentivesForFilter += incentiveForBooking(configByPlan, b);
+      totalIncentivesForFilter += incentiveForBooking(configByKey, b);
     }
 
     return res.status(200).json({
