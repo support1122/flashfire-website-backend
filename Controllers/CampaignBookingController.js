@@ -1,4 +1,5 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { resolveLeadOwnersForPage } from '../Utils/clientIdentity.js';
 import { CampaignModel } from '../Schema_Models/Campaign.js';
 import { UserModel } from '../Schema_Models/User.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
@@ -751,6 +752,19 @@ export const getAllBookingsPaginated = async (req, res) => {
       .skip(skip)
       .limit(limitNum)
       .lean();
+
+    // Lead owner is a property of the CLIENT, so it is resolved across every booking
+    // that shares this one's email or phone. Without this each row shows whichever BDA
+    // hosted that particular meeting, and one client reads as several different owners.
+    try {
+      const owners = await resolveLeadOwnersForPage(CampaignBookingModel, bookings);
+      for (const b of bookings) {
+        const o = owners.get(b.bookingId);
+        if (o) b.leadOwner = { email: o.email, name: o.name, via: o.via, assignedAt: o.at };
+      }
+    } catch (e) {
+      console.warn('resolveLeadOwnersForPage failed (all-data):', e.message);
+    }
 
     return res.status(200).json({
       success: true,
@@ -2435,6 +2449,18 @@ export const getLeadsPaginated = async (req, res) => {
       if (bTime !== aTime) return bTime - aTime;
       return new Date(b.bookingCreatedAt).getTime() - new Date(a.bookingCreatedAt).getTime();
     }).map((b) => ({ ...b, qualification: getQualificationFromStatus(b.bookingStatus) }));
+
+    // Same client-level owner the All Data tab shows, so both tabs agree on who the
+    // lead belongs to rather than each row naming whoever hosted that meeting.
+    try {
+      const owners = await resolveLeadOwnersForPage(CampaignBookingModel, finalBookings);
+      finalBookings = finalBookings.map((b) => {
+        const o = owners.get(b.bookingId);
+        return o ? { ...b, leadOwner: { email: o.email, name: o.name, via: o.via, assignedAt: o.at } } : b;
+      });
+    } catch (e) {
+      console.warn('resolveLeadOwnersForPage failed (leads):', e.message);
+    }
 
     const baseMatchQuery = { ...matchQuery };
     delete baseMatchQuery.bookingStatus;

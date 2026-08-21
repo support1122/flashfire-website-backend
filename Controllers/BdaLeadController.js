@@ -1,4 +1,5 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { findClientBookings, resolveClientOwner } from '../Utils/clientIdentity.js';
 import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
 import { BdaClaimApprovalModel } from '../Schema_Models/BdaClaimApproval.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
@@ -162,6 +163,26 @@ export const claimLead = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'This lead has already been claimed by another BDA'
+      });
+    }
+
+    // Ownership is per CLIENT, not per booking row. A client who books four meetings
+    // produces four rows, and Calendly round-robins each one, so the last meeting is
+    // often hosted by someone other than the BDA who first worked the lead. The lead
+    // belongs to the first BDA; everyone else is locked out even if they took the most
+    // recent meeting. Identity is email-or-phone — see Utils/clientIdentity.js for why
+    // name is excluded.
+    const clientBookings = await findClientBookings(CampaignBookingModel, booking, {
+      bookingId: 1, bookingCreatedAt: 1, originalBda: 1, claimedBy: 1,
+    });
+    const owner = resolveClientOwner(clientBookings);
+    if (owner && owner.email !== String(email).trim().toLowerCase()) {
+      const when = owner.at ? new Date(owner.at).toISOString().slice(0, 10) : 'an earlier meeting';
+      return res.status(403).json({
+        success: false,
+        error: 'CLIENT_OWNED_BY_ANOTHER_BDA',
+        message: `This client belongs to ${owner.name} (first assigned ${when}). Only they can claim this lead, even if you hosted the latest meeting.`,
+        owner: { email: owner.email, name: owner.name, via: owner.via },
       });
     }
 
