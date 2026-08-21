@@ -282,9 +282,15 @@ async function handleCreatedEvent(req, res, payload) {
   }
   const bdaEmailForNotification = calendlyHost?.email || 'Not assigned';
 
+  // invitee.created puts the invitee URI at payload.uri — there is no payload.invitee
+  // object on this event, so every payload.invitee.uri read here resolved to null.
+  // That silently disabled webhook-log dedupe, the Calendly API fallback below, and
+  // the strongest duplicate-booking key.
+  const inviteeUri = payload?.invitee?.uri || payload?.uri || null;
+
   // Store raw webhook payload for debugging/audit (fire-and-forget)
-  const webhookLogId = payload?.invitee?.uri
-    ? `wh_${crypto.createHash('md5').update(payload.invitee.uri + (rawStartTime || '')).digest('hex')}`
+  const webhookLogId = inviteeUri
+    ? `wh_${crypto.createHash('md5').update(inviteeUri + (rawStartTime || '')).digest('hex')}`
     : `wh_${Date.now()}_${Math.random().toString(36).slice(2)}`;
   CalendlyWebhookLogModel.create({
     webhookId: webhookLogId,
@@ -294,20 +300,24 @@ async function handleCreatedEvent(req, res, payload) {
 
   // Extract and log reschedule link
   let rescheduleLink = payload?.reschedule_url || null;
+  // Calendly sends cancel_url beside reschedule_url on every invitee.created. Same
+  // invitee uuid, under /cancellations/ instead of /reschedulings/. Drives the
+  // "Cancel" button on flashfire_appointment_reminder_rc.
+  const cancelLink = payload?.cancel_url || null;
 
   Logger.info('Reschedule link from invitee.created webhook', {
     rescheduleLink,
     hasRescheduleLink: !!rescheduleLink,
     topLevelRescheduleUrl: payload?.reschedule_url,
-    inviteeUri: payload?.invitee?.uri
+    hasCancelLink: !!cancelLink,
+    inviteeUri
   });
 
   // If reschedule link is not in webhook, try fetching from Calendly API
-  // Note: Only if payload.invitee.uri is present
-  if (!rescheduleLink && payload?.invitee?.uri) {
+  if (!rescheduleLink && inviteeUri) {
     try {
       const { fetchRescheduleLinkFromCalendly } = await import('../Utils/CalendlyAPIHelper.js');
-      const fetchedLink = await fetchRescheduleLinkFromCalendly(payload.invitee.uri);
+      const fetchedLink = await fetchRescheduleLinkFromCalendly(inviteeUri);
       if (fetchedLink) {
         rescheduleLink = fetchedLink;
         console.log('✅ [Calendly Webhook] Fetched reschedule link from Calendly API:', rescheduleLink);
@@ -332,7 +342,6 @@ async function handleCreatedEvent(req, res, payload) {
   const scheduledStartISO = payload?.scheduled_event?.start_time;
 
   // DUPLICATE CHECK (include Calendly invitee URI — unique per scheduled invite)
-  const inviteeUri = payload?.invitee?.uri || null;
   const duplicateOr = [
     inviteeUri ? { calendlyInviteeUri: inviteeUri } : null,
     { clientEmail: inviteeEmail },
@@ -447,6 +456,7 @@ async function handleCreatedEvent(req, res, payload) {
           calendlyInviteeUri: inviteeUri,
           calendlyMeetLink: meetLink,
           calendlyRescheduleLink: rescheduleLink || null,
+          calendlyCancelLink: cancelLink || null,
           scheduledEventStartTime: payload?.scheduled_event?.start_time ?? existingBooking.scheduledEventStartTime,
           scheduledEventEndTime: payload?.scheduled_event?.end_time ?? null,
           inviteeTimezone: inviteeTimezone || null,
@@ -521,9 +531,10 @@ async function handleCreatedEvent(req, res, payload) {
           clientPhone: mergedPhone || existingMetaLead.clientPhone,
           normalizedClientPhone: normalizePhoneForMatching(mergedPhone) || null,
           calendlyEventUri: payload?.scheduled_event?.uri || null,
-          calendlyInviteeUri: payload?.invitee?.uri || null,
+          calendlyInviteeUri: inviteeUri,
           calendlyMeetLink: meetLink || null,
           calendlyRescheduleLink: rescheduleLink || null,
+          calendlyCancelLink: cancelLink || null,
           scheduledEventStartTime: payload?.scheduled_event?.start_time || null,
           scheduledEventEndTime: payload?.scheduled_event?.end_time || null,
           inviteeTimezone: inviteeTimezone || null,
@@ -763,9 +774,10 @@ async function handleCreatedEvent(req, res, payload) {
     clientEmail: inviteeEmail,
     clientPhone: inviteePhone,
     calendlyEventUri: payload?.scheduled_event?.uri,
-    calendlyInviteeUri: payload?.invitee?.uri,
+    calendlyInviteeUri: inviteeUri,
     calendlyMeetLink: meetLink,
     calendlyRescheduleLink: rescheduleLink, // ✅ Save reschedule link
+    calendlyCancelLink: cancelLink,
     scheduledEventStartTime: payload?.scheduled_event?.start_time,
     scheduledEventEndTime: payload?.scheduled_event?.end_time,
     inviteeTimezone: inviteeTimezone, // ✅ Save invitee timezone from webhook

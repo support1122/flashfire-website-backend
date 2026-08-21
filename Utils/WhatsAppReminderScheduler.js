@@ -12,7 +12,7 @@ import {
   buildWhatsAppReminderId,
   logReminderDrift,
 } from './MeetingReminderUtils.js';
-import { calendlyButtonTail } from './TemplateParameterBuilder.js';
+import { calendlyButtonTail, calendlyCancelTail } from './TemplateParameterBuilder.js';
 
 dotenv.config();
 
@@ -114,6 +114,7 @@ export async function scheduleWhatsAppReminder({
   clientEmail = null,
   meetingLink = null,
   rescheduleLink = null,
+  cancelLink = null,
   source = 'calendly',
   metadata = {},
   timezone = null, // Optional: if not provided, will be determined from meetingStartISO
@@ -173,6 +174,7 @@ export async function scheduleWhatsAppReminder({
             clientEmail,
             meetingLink: meetingLink || 'Not Provided',
             rescheduleLink: finalRescheduleLink,
+            cancelLink: cancelLink || null,
             timezone: meetingTimezone,
             source,
             metadata: { ...metadata, reminderType, reminderOffsetMinutes },
@@ -206,6 +208,7 @@ export async function scheduleWhatsAppReminder({
       clientEmail,
       meetingLink: meetingLink || 'Not Provided',
       rescheduleLink: finalRescheduleLink,
+      cancelLink: cancelLink || null,
       timezone: meetingTimezone,
       source,
       metadata: {
@@ -282,6 +285,7 @@ export async function scheduleAllWhatsAppReminders({
   clientEmail = null,
   meetingLink = null,
   rescheduleLink = null,
+  cancelLink = null,
   source = 'calendly',
   metadata = {},
   timezone = null
@@ -332,6 +336,7 @@ export async function scheduleAllWhatsAppReminders({
             clientEmail,
             meetingLink: meetingLink || 'Not Provided',
             rescheduleLink: rescheduleLink || DEFAULT_RESCHEDULE_LINK,
+            cancelLink: cancelLink || null,
             timezone: timezone || getTimezoneAbbreviation(meetingStartISO, metadata?.inviteeTimezone),
             source,
             metadata: { ...metadata, isImmediateReminder: true, actualMeetingTime: meetingStartISO },
@@ -357,6 +362,7 @@ export async function scheduleAllWhatsAppReminders({
         clientEmail,
         meetingLink: meetingLink || 'Not Provided',
         rescheduleLink: rescheduleLink || DEFAULT_RESCHEDULE_LINK,
+        cancelLink: cancelLink || null,
         timezone: timezone || getTimezoneAbbreviation(meetingStartISO, metadata?.inviteeTimezone),
         source,
         metadata: {
@@ -414,6 +420,7 @@ export async function scheduleAllWhatsAppReminders({
       clientEmail,
       meetingLink,
       rescheduleLink,
+      cancelLink,
       source,
       metadata,
       timezone,
@@ -446,6 +453,7 @@ export async function scheduleAllWhatsAppReminders({
       clientEmail,
       meetingLink,
       rescheduleLink,
+      cancelLink,
       source,
       metadata,
       timezone,
@@ -478,6 +486,7 @@ export async function scheduleAllWhatsAppReminders({
       clientEmail,
       meetingLink,
       rescheduleLink,
+      cancelLink,
       source,
       metadata,
       timezone,
@@ -746,7 +755,7 @@ export function resolveUnknownWhatsAppMeetingDisplay(scheduledReminder) {
  * Send the actual WhatsApp message using WATI template
  */
 export async function sendWhatsAppMessage(scheduledReminder) {
-  const { phoneNumber, clientName, meetingDate, meetingTime, meetingLink, rescheduleLink, reminderId, timezone } = scheduledReminder;
+  const { phoneNumber, clientName, meetingDate, meetingTime, meetingLink, rescheduleLink, cancelLink, reminderId, timezone } = scheduledReminder;
 
   try {
     if (!watiService) {
@@ -754,15 +763,20 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     }
 
     // Template routing:
-    //   1st message  (immediate confirmation) → old template, no buttons (5 params)
-    //   all later (3h / 1h / 5min reminders)   → _b template: Reschedule URL button (6 params).
-    //     "I'll join" is a static Quick-reply button, so it needs no send-time variable.
+    //   1st message (immediate confirmation) → old template, no buttons (5 params)
+    //   3h / 1h / 5min reminders             → _rc: Reschedule + Cancel URL buttons (7 params)
+    //   ...falling back to _b (Reschedule only, 6 params) when no genuine cancel target
+    //      can be derived, so a "Cancel" button never points at a booking page.
+    //   "I'll Join" is a static quick-reply on both, so it needs no send-time variable.
     const reminderType = scheduledReminder.metadata?.reminderType ?? scheduledReminder.reminderType ?? 'immediate';
     const isImmediate = reminderType === 'immediate' || scheduledReminder.metadata?.isImmediateReminder === true;
     const useButtons = !isImmediate;
-    const templateName = useButtons
-      ? 'flashfire_appointment_reminder_b'
-      : 'flashfire_appointment_reminder';
+    const cancelTail = useButtons ? calendlyCancelTail(cancelLink, rescheduleLink) : null;
+    const templateName = !useButtons
+      ? 'flashfire_appointment_reminder'
+      : cancelTail
+        ? 'flashfire_appointment_reminder_rc'
+        : 'flashfire_appointment_reminder_b';
 
     // Format meeting time with timezone: "4pm - 4:15pm ET" or "4pm - 4:15pm PST"
     // If meetingTime is missing/Unknown, use meetingStartISO or scheduledFor + metadata offset
@@ -821,10 +835,11 @@ export async function sendWhatsAppMessage(scheduledReminder) {
       finalMeetingLink, // {{4}}
       finalRescheduleLink // {{5}}
     ];
-    // Only the _b template (3h / 1h / 5min reminders) has a dynamic URL button.
-    // {{6}} = "Reschedule" button URL tail. ("I'll join" is a static quick-reply — no variable.)
+    // Reminder templates carry dynamic URL buttons; the immediate one does not.
+    // {{6}} = "Reschedule" tail, {{7}} = "Cancel" tail (only on _rc).
     if (useButtons) {
       parameters.push(calendlyButtonTail(finalRescheduleLink)); // {{6}}
+      if (cancelTail) parameters.push(cancelTail);              // {{7}}
     }
 
     // Send template message via WATI
@@ -840,6 +855,7 @@ export async function sendWhatsAppMessage(scheduledReminder) {
         reminderId,
         phoneNumber,
         templateName,
+        hasCancelButton: !!cancelTail,
         watiResponse: result.data
       });
 

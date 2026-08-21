@@ -34,6 +34,50 @@ export function calendlyButtonTail(link) {
 }
 
 /**
+ * Extracts the path after https://calendly.com/ for the "Cancel" dynamic URL button
+ * (fixed base https://calendly.com/, sent as {{7}} on flashfire_appointment_reminder_rc).
+ *
+ * Prefers an explicit cancel link. When only the reschedule link is on file — true for
+ * every booking created before cancel_url was captured from the webhook — it derives
+ * the cancel URL by swapping the path segment: Calendly issues
+ *   https://calendly.com/reschedulings/<invitee-uuid>
+ *   https://calendly.com/cancellations/<invitee-uuid>
+ * with the SAME uuid. Verified against 2000 stored invitee.created payloads, zero
+ * exceptions.
+ *
+ * Returns null when no genuine cancel target can be derived. Callers must treat null
+ * as "do not use the cancel template" rather than substituting a placeholder — a
+ * "Cancel" button that opens a booking page is worse than no button at all.
+ */
+export function calendlyCancelTail(cancelLink, rescheduleLink) {
+  const unwrap = (link) => {
+    if (typeof link !== 'string') return null;
+    let v = link.trim();
+    if (!v) return null;
+    // Unwrap Google redirect wrappers: .../url?q=<url-encoded calendly link>&sa=...
+    const q = v.match(/[?&]q=([^&]+)/i);
+    if (q) {
+      try { v = decodeURIComponent(q[1]); } catch { /* keep original */ }
+    }
+    return v;
+  };
+
+  const direct = unwrap(cancelLink);
+  if (direct) {
+    const m = direct.match(/https?:\/\/calendly\.com\/(cancellations\/[^/?#]+)/i);
+    if (m) return m[1];
+  }
+
+  const resched = unwrap(rescheduleLink);
+  if (resched) {
+    const m = resched.match(/https?:\/\/calendly\.com\/reschedulings\/([^/?#]+)/i);
+    if (m) return `cancellations/${m[1]}`;
+  }
+
+  return null;
+}
+
+/**
  * Resolves timezone abbreviation from IANA timezone name.
  */
 function getTimezoneAbbreviation(timezone, meetingStart) {
@@ -289,6 +333,36 @@ const builders = {
       meetingLink,
       rescheduleLink,
       calendlyButtonTail(rescheduleLink) // {{6}} → "Reschedule" button URL tail
+    ];
+  },
+
+  // Same body as _b, plus a second dynamic URL button:
+  // {{6}} = "Reschedule" tail, {{7}} = "Cancel" tail. Both sit on the fixed
+  // https://calendly.com/ base, so only the path after it is sent. ("I'll Join" is a
+  // static quick-reply — no variable.) Throws when no real cancel target exists, so a
+  // caller cannot accidentally ship a Cancel button pointing at a booking page.
+  flashfire_appointment_reminder_rc: async ({ booking }) => {
+    if (!booking.scheduledEventStartTime) {
+      throw new Error('Meeting date/time not available for flashfire_appointment_reminder_rc template');
+    }
+
+    const { meetingDateFormatted, meetingTimeWithTimezone } = buildMeetingTimeParams(booking);
+    const meetingLink = booking.calendlyMeetLink || booking.googleMeetUrl || booking.meetingVideoUrl || 'Not Provided';
+    const rescheduleLink = await resolveRescheduleLink(booking);
+    const cancelTail = calendlyCancelTail(booking.calendlyCancelLink, rescheduleLink);
+
+    if (!cancelTail) {
+      throw new Error('No cancel link available for flashfire_appointment_reminder_rc template');
+    }
+
+    return [
+      booking.clientName || 'Valued Client',
+      meetingDateFormatted,
+      meetingTimeWithTimezone,
+      meetingLink,
+      rescheduleLink,
+      calendlyButtonTail(rescheduleLink), // {{6}} → "Reschedule" button URL tail
+      cancelTail                          // {{7}} → "Cancel" button URL tail
     ];
   }
 };
