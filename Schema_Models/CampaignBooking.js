@@ -94,6 +94,12 @@ export const CampaignBookingSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  /** Calendly cancel URL from the invitee.created webhook (payload.cancel_url).
+   *  Same invitee uuid as the reschedule link, under /cancellations/ instead. */
+  calendlyCancelLink: {
+    type: String,
+    default: null
+  },
   scheduledEventStartTime: {
     type: Date,
     default: null

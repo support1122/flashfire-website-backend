@@ -50,6 +50,12 @@ const ScheduledWhatsAppReminderSchema = new mongoose.Schema({
     type: String,
     default: null
   },
+  /** Calendly cancel URL (https://calendly.com/cancellations/<uuid>) for the
+   *  "Cancel" button on flashfire_appointment_reminder_rc. */
+  cancelLink: {
+    type: String,
+    default: null
+  },
   timezone: {
     type: String,
     default: null // ET, PST, MT, CT, etc.

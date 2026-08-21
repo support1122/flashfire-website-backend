@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildTemplateParameters, calendlyButtonTail } from '../Utils/TemplateParameterBuilder.js';
+import { buildTemplateParameters, calendlyButtonTail, calendlyCancelTail } from '../Utils/TemplateParameterBuilder.js';
 
 // 2026-08-21T21:00Z is 5pm Eastern, 2pm Pacific, 4pm Central, 2:30am IST the next day.
 const START = new Date('2026-08-21T21:00:00.000Z');
@@ -82,5 +82,77 @@ describe('reschedule button tail', () => {
   it('is absent from the buttonless template', async () => {
     const p = await buildTemplateParameters('flashfire_appointment_reminder', { booking: booking('America/New_York') });
     assert.equal(p.length, 5);
+  });
+});
+
+describe('cancel button tail', () => {
+  it('uses an explicit cancel link when present', () => {
+    assert.equal(calendlyCancelTail('https://calendly.com/cancellations/abc-123', null), 'cancellations/abc-123');
+  });
+
+  it('derives the cancel tail from the reschedule link', () => {
+    // Calendly issues both URLs with the same invitee uuid.
+    assert.equal(calendlyCancelTail(null, 'https://calendly.com/reschedulings/abc-123'), 'cancellations/abc-123');
+  });
+
+  it('prefers the explicit cancel link over the derived one', () => {
+    assert.equal(
+      calendlyCancelTail('https://calendly.com/cancellations/aaa', 'https://calendly.com/reschedulings/bbb'),
+      'cancellations/aaa'
+    );
+  });
+
+  it('unwraps Google redirect wrappers before deriving', () => {
+    const wrapped = 'https://www.google.com/url?q=https%3A%2F%2Fcalendly.com%2Freschedulings%2Fxyz&sa=D';
+    assert.equal(calendlyCancelTail(null, wrapped), 'cancellations/xyz');
+  });
+
+  it('returns null rather than inventing a target', () => {
+    // A "Cancel" button pointing at a booking page is worse than no button.
+    assert.equal(calendlyCancelTail(null, 'https://calendly.com/feedback-flashfire/15min'), null);
+    assert.equal(calendlyCancelTail(null, 'https://meet.google.com/xyz'), null);
+    assert.equal(calendlyCancelTail(null, null), null);
+  });
+});
+
+describe('flashfire_appointment_reminder_rc', () => {
+  const rcBooking = (extra = {}) => ({
+    clientName: 'Test Client',
+    scheduledEventStartTime: START,
+    scheduledEventEndTime: END,
+    inviteeTimezone: 'America/New_York',
+    calendlyMeetLink: 'https://meet.google.com/abc-defg-hij',
+    calendlyRescheduleLink: 'https://calendly.com/reschedulings/8e172654',
+    ...extra,
+  });
+
+  it('sends 7 params with reschedule at {{6}} and cancel at {{7}}', async () => {
+    const p = await buildTemplateParameters('flashfire_appointment_reminder_rc', { booking: rcBooking() });
+    assert.equal(p.length, 7);
+    assert.equal(p[5], 'reschedulings/8e172654');
+    assert.equal(p[6], 'cancellations/8e172654');
+  });
+
+  it('uses the stored cancel link when the booking has one', async () => {
+    const p = await buildTemplateParameters('flashfire_appointment_reminder_rc', {
+      booking: rcBooking({ calendlyCancelLink: 'https://calendly.com/cancellations/from-webhook' }),
+    });
+    assert.equal(p[6], 'cancellations/from-webhook');
+  });
+
+  it('refuses to build when no cancel target can be derived', async () => {
+    await assert.rejects(
+      () => buildTemplateParameters('flashfire_appointment_reminder_rc', {
+        booking: rcBooking({ calendlyRescheduleLink: 'https://calendly.com/feedback-flashfire/15min' }),
+      }),
+      /No cancel link available/
+    );
+  });
+
+  it('renders the meeting time in the invitee zone, same as the other templates', async () => {
+    const p = await buildTemplateParameters('flashfire_appointment_reminder_rc', {
+      booking: rcBooking({ inviteeTimezone: 'America/Los_Angeles' }),
+    });
+    assert.equal(p[2], '2pm – 2:15pm PDT');
   });
 });
