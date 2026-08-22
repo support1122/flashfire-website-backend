@@ -56,6 +56,7 @@ export const saveIncentiveConfig = async (req, res) => {
       return res.status(400).json({ success: false, message: 'configs array is required' });
     }
 
+    const errors = [];
     for (const cfg of configs) {
       const planName = cfg.planName;
       if (!PLAN_NAMES.includes(planName)) continue;
@@ -74,15 +75,24 @@ export const saveIncentiveConfig = async (req, res) => {
         if (currency === 'USD') update.basePriceUsd = basePrice;
       }
 
-      await BdaIncentiveConfigModel.findOneAndUpdate(
-        { planName, currency },
-        update,
-        { upsert: true, new: true }
-      );
+      try {
+        await BdaIncentiveConfigModel.findOneAndUpdate(
+          { planName, currency },
+          update,
+          { upsert: true, new: true }
+        );
+      } catch (rowError) {
+        errors.push({ planName, currency, error: rowError.message });
+      }
     }
 
     const updated = await BdaIncentiveConfigModel.find({}).lean();
-    return res.status(200).json({ success: true, message: 'Incentive config saved', data: updated });
+    return res.status(errors.length ? 207 : 200).json({
+      success: errors.length === 0,
+      message: errors.length ? 'Some incentive configs failed to save' : 'Incentive config saved',
+      data: updated,
+      errors
+    });
   } catch (error) {
     return res.status(500).json({
       success: false,
