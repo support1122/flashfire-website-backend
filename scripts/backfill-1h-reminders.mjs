@@ -58,7 +58,7 @@ await mongoose.connect(URI, { serverSelectionTimeoutMS: 20000 });
 const { scheduleWhatsAppReminder } = await import('../Utils/WhatsAppReminderScheduler.js');
 const { CampaignBookingModel } = await import('../Schema_Models/CampaignBooking.js');
 const { ScheduledWhatsAppReminderModel } = await import('../Schema_Models/ScheduledWhatsAppReminder.js');
-const { normalizePhoneForReminders, buildWhatsAppReminderId } = await import('../Utils/MeetingReminderUtils.js');
+const { normalizePhoneForReminders, buildWhatsAppReminderId, buildMeetingDisplay } = await import('../Utils/MeetingReminderUtils.js');
 const { DiscordConnect } = await import('../Utils/DiscordConnect.js');
 
 const now = new Date();
@@ -98,17 +98,14 @@ for (const [day, n] of Object.entries(byDay)) console.log(`  ${day.padEnd(12)} $
 console.log('');
 
 const buildDisplay = (booking) => {
-  const tz = booking.inviteeTimezone || 'America/New_York';
-  const s = DateTime.fromJSDate(new Date(booking.scheduledEventStartTime)).setZone(tz);
-  const e = booking.scheduledEventEndTime
-    ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime)).setZone(tz)
-    : s.plus({ minutes: 15 });
-  const fmt = dt => (dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase());
-  return {
-    meetingTime: `${fmt(s)} – ${fmt(e)}`,
-    meetingDate: s.toFormat('EEEE MMM d, yyyy'),
-    tzAbbr: s.toFormat('ZZZZ') || 'ET',
-  };
+  const d = buildMeetingDisplay(
+    booking.scheduledEventStartTime,
+    booking.scheduledEventEndTime,
+    booking.inviteeTimezone
+  );
+  return d
+    ? { meetingTime: d.meetingTime, meetingDate: d.meetingDate, tzAbbr: d.tzLabel }
+    : { meetingTime: '', meetingDate: '', tzAbbr: 'EST' };
 };
 
 const results = { created: 0, existing: 0, tooClose: 0, noPhone: 0, failed: 0 };

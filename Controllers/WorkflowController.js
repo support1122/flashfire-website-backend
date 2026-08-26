@@ -140,28 +140,28 @@ function getTimezoneAbbreviationFromIANA(timezone, meetingStart) {
     const meetingInTimezone = meetingStartUTC.setZone(timezone);
     const offset = meetingInTimezone.offset / 60; // Offset in hours from UTC
 
-    // Check for PST/PDT (UTC-8 or UTC-7)
+    // Pacific — generic label, see normalizeTimezoneLabel()
     if (timezone.includes('Los_Angeles') || timezone.includes('Pacific')) {
-      return offset === -8 ? 'PST' : 'PDT';
+      return 'PT';
     }
     
-    // Check for ET/EDT (UTC-5 or UTC-4)
+    // Eastern — generic label, see normalizeTimezoneLabel()
     if (timezone.includes('New_York') || timezone.includes('Eastern')) {
-      return offset === -5 ? 'ET' : 'EDT';
+      return 'ET';
     }
     
-    // Check for CT/CDT (UTC-6 or UTC-5)
+    // Central — generic label, see normalizeTimezoneLabel()
     if (timezone.includes('Chicago') || timezone.includes('Central')) {
-      return offset === -6 ? 'CT' : 'CDT';
+      return 'CT';
     }
     
-    // Check for MT/MDT (UTC-7 or UTC-6)
+    // Mountain — generic label, see normalizeTimezoneLabel()
     if (timezone.includes('Denver') || timezone.includes('Mountain')) {
-      return offset === -7 ? 'MT' : 'MDT';
+      return 'MT';
     }
 
     // Default: try to determine from offset
-    if (offset === -8 || offset === -7) return 'PST';
+    if (offset === -8 || offset === -7) return 'PT';
     if (offset === -5 || offset === -4) return 'ET';
     if (offset === -6 || offset === -5) return 'CT';
     if (offset === -7 || offset === -6) return 'MT';

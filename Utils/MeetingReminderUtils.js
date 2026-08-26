@@ -2,7 +2,7 @@
  * Shared parsing, phone normalization, and reminder id helpers for
  * CallScheduler, WhatsAppReminderScheduler, DiscordMeetReminderScheduler, and Calendly webhooks.
  */
-import { DateTime } from 'luxon';
+import { DateTime, IANAZone } from 'luxon';
 
 /**
  * Parse Calendly / API instants reliably (correct UTC instant).
@@ -68,6 +68,86 @@ export function extractCalendlyPhoneFromInvitee(invitee) {
   const invQa = phoneFromQuestionsAndAnswers(invitee.questions_and_answers);
   const raw = invQa || invitee.phone_number;
   return normalizePhoneForReminders(raw);
+}
+
+/**
+ * Collapse a US daylight/standard timezone abbreviation to its generic form.
+ *
+ * "EDT" is factually right between March and November, but clients read it as a typo
+ * — almost nobody says "Eastern Daylight Time", they say EST year-round. Printing the
+ * literal "EST" instead would be wrong for eight months of the year, so we print the
+ * generic label, which is correct in every season and is what Calendly itself shows
+ * ("Eastern Time - US & Canada").
+ *
+ *   EST / EDT   -> ET
+ *   CST / CDT   -> CT
+ *   MST / MDT   -> MT
+ *   PST / PDT   -> PT
+ *
+ * Anything else (IST, HST, AKST, GMT+1, ...) is returned untouched: those are either
+ * unambiguous already or outside the US convention this addresses.
+ */
+const US_TZ_GENERIC = {
+  EST: 'ET', EDT: 'ET',
+  CST: 'CT', CDT: 'CT',
+  MST: 'MT', MDT: 'MT',
+  PST: 'PT', PDT: 'PT',
+};
+
+/**
+ * Display policy: show every client the meeting in ONE timezone, labelled "EST".
+ *
+ * Requested deliberately. The trade-off, stated plainly: a client outside Eastern
+ * reads a time that does not match their own clock — a 2pm Los Angeles meeting is
+ * announced as 5pm — so they must convert. "EST" is also the standard-time label,
+ * which is inaccurate between March and November when Eastern is on EDT.
+ *
+ * Set REMINDER_FORCE_EASTERN=false to go back to per-client local time with the
+ * generic labels (ET / CT / MT / PT) that normalizeTimezoneLabel produces.
+ */
+export const FORCE_EASTERN_DISPLAY =
+  String(process.env.REMINDER_FORCE_EASTERN ?? 'true').toLowerCase() !== 'false';
+export const EASTERN_DISPLAY_ZONE = 'America/New_York';
+export const EASTERN_DISPLAY_LABEL = 'EST';
+
+/** Zone the client-facing meeting time should be rendered in. */
+export function displayZoneFor(inviteeTimezone) {
+  if (FORCE_EASTERN_DISPLAY) return EASTERN_DISPLAY_ZONE;
+  const tz = typeof inviteeTimezone === 'string' ? inviteeTimezone.trim() : '';
+  return tz && IANAZone.isValidZone(tz) ? tz : EASTERN_DISPLAY_ZONE;
+}
+
+/**
+ * Render "2:30pm – 2:45pm" plus "Tuesday Aug 25, 2026" for a meeting, in the zone
+ * the display policy dictates. End defaults to start + 15 minutes.
+ */
+export function buildMeetingDisplay(meetingStartISO, meetingEndISO, inviteeTimezone) {
+  const start = parseMeetingStartToDate(meetingStartISO);
+  if (!start) return null;
+
+  const zone = displayZoneFor(inviteeTimezone);
+  const s = DateTime.fromJSDate(start, { zone: 'utc' }).setZone(zone);
+  if (!s.isValid) return null;
+
+  const rawEnd = parseMeetingStartToDate(meetingEndISO);
+  const e = rawEnd
+    ? DateTime.fromJSDate(rawEnd, { zone: 'utc' }).setZone(zone)
+    : s.plus({ minutes: 15 });
+
+  const fmt = (dt) => (dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase());
+
+  return {
+    meetingTime: `${fmt(s)} – ${fmt(e.isValid ? e : s.plus({ minutes: 15 }))}`,
+    meetingDate: s.toFormat('EEEE MMM d, yyyy'),
+    tzLabel: FORCE_EASTERN_DISPLAY ? EASTERN_DISPLAY_LABEL : normalizeTimezoneLabel(s.toFormat('ZZZZ')),
+  };
+}
+
+export function normalizeTimezoneLabel(label) {
+  if (label == null) return label;
+  const raw = String(label).trim();
+  if (!raw) return raw;
+  return US_TZ_GENERIC[raw.toUpperCase()] ?? raw;
 }
 
 export function buildCallId(phoneNumber, meetingStartMs) {

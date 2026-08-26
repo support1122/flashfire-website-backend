@@ -5,6 +5,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { Logger } from './Logger.js';
 import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
+import { normalizeTimezoneLabel, buildMeetingDisplay } from './MeetingReminderUtils.js';
 import { DateTime } from 'luxon';
 import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 import {
@@ -45,7 +46,7 @@ function getSafeTimezoneAbbreviation(meetingStartISO, ianaTimezone) {
     const zoneName = ianaTimezone.trim();
     const inZone = startUTC.setZone(zoneName);
     if (inZone.isValid) {
-      const abbr = inZone.toFormat('ZZZZ');
+      const abbr = normalizeTimezoneLabel(inZone.toFormat('ZZZZ'));
       if (abbr && !abbr.startsWith('GMT') && !abbr.startsWith('UTC') && abbr !== 'Unknown') {
         return abbr;
       }
@@ -59,8 +60,8 @@ function getSafeTimezoneAbbreviation(meetingStartISO, ianaTimezone) {
 
   const la = startUTC.setZone('America/Los_Angeles').offset / 60;
   const ny = startUTC.setZone('America/New_York').offset / 60;
-  if (la === -8 || la === -7) return la === -8 ? 'PST' : 'PDT';
-  if (ny === -5 || ny === -4) return ny === -5 ? 'EST' : 'EDT';
+  if (la === -8 || la === -7) return 'PT';
+  if (ny === -5 || ny === -4) return 'ET';
   return fallback;
 }
 
@@ -254,7 +255,6 @@ export async function scheduleCall({
       const meetingEnd = metadata?.meetingEndISO ? new Date(metadata.meetingEndISO) : new Date(meetingStart.getTime() + 15 * 60 * 1000); // Default 15 min if not provided
       
       const meetingStartUTC = DateTime.fromJSDate(meetingStart, { zone: 'utc' });
-      const meetingEndUTC = DateTime.fromJSDate(meetingEnd, { zone: 'utc' });
 
       // Decide which timezone to use for the client-facing meeting time:
       // 1) Prefer explicit invitee timezone from Calendly (metadata.inviteeTimezone)
@@ -276,26 +276,21 @@ export async function scheduleCall({
         }
       }
       
-      // Format date: "Saturday Dec 27, 2025" in the client's timezone
-      const meetingDateFormatted = meetingStartUTC.setZone(displayZone).toFormat('EEEE MMM d, yyyy');
-      
-      const startTimeET = meetingStartUTC.setZone(displayZone);
-      const startTimeFormatted = startTimeET.minute === 0 
-        ? startTimeET.toFormat('ha').toLowerCase()
-        : startTimeET.toFormat('h:mma').toLowerCase();
-      
-      // End time: always include minutes if present, in the same client timezone
-      const endTimeET = meetingEndUTC.setZone(displayZone);
-      const endTimeFormatted = endTimeET.minute === 0
-        ? endTimeET.toFormat('ha').toLowerCase()
-        : endTimeET.toFormat('h:mma').toLowerCase();
-      
-      const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
-
-      const meetingTimezone = getSafeTimezoneAbbreviation(
+      // buildMeetingDisplay applies the display policy: forced-Eastern renders every
+      // client's meeting in America/New_York labelled EST, otherwise it uses the
+      // client's own zone with a generic label.
+      const display = buildMeetingDisplay(
         meetingStartISO,
+        metadata?.meetingEndISO ?? meetingEnd.toISOString(),
         metadata?.inviteeTimezone || displayZone
       );
+      const meetingDateFormatted = display
+        ? display.meetingDate
+        : meetingStartUTC.setZone(displayZone).toFormat('EEEE MMM d, yyyy');
+      const meetingTimeFormatted = display ? display.meetingTime : '';
+      const meetingTimezone = display
+        ? display.tzLabel
+        : getSafeTimezoneAbbreviation(meetingStartISO, metadata?.inviteeTimezone || displayZone);
       console.log(`✅ [CallScheduler] timezone resolved: ${metadata?.inviteeTimezone || displayZone || 'fallback'} -> ${meetingTimezone}`);
 
       // Schedule all WhatsApp reminders (24h, 2h, 5min)

@@ -19,6 +19,7 @@ import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
 import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
 import { scheduleCall } from './CallScheduler.js';
 import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
+import { normalizeTimezoneLabel } from './MeetingReminderUtils.js';
 import { scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { normalizePhoneForReminders, buildCallId } from './MeetingReminderUtils.js';
@@ -797,7 +798,7 @@ async function runDailyReminderBackfill() {
         let tzAbbr = 'ET';
         if (inviteeTz) {
           const tz = DateTime.fromISO(meetingStartISO, { zone: inviteeTz });
-          tzAbbr = tz.isValid ? tz.toFormat('ZZZZ') : 'ET';
+          tzAbbr = tz.isValid ? normalizeTimezoneLabel(tz.toFormat('ZZZZ')) : 'ET';
         }
 
         const sharedMeta = {

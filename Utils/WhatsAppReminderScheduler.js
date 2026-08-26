@@ -11,6 +11,11 @@ import {
   normalizePhoneForReminders,
   buildWhatsAppReminderId,
   logReminderDrift,
+  normalizeTimezoneLabel,
+  buildMeetingDisplay,
+  displayZoneFor,
+  FORCE_EASTERN_DISPLAY,
+  EASTERN_DISPLAY_LABEL,
 } from './MeetingReminderUtils.js';
 import { calendlyButtonTail, calendlyCancelTail } from './TemplateParameterBuilder.js';
 
@@ -43,7 +48,7 @@ function isUnknownLike(value) {
 
 function sanitizeTimezoneLabel(label, inviteeTz = 'America/New_York') {
   if (label != null) {
-    const raw = String(label).trim();
+    const raw = normalizeTimezoneLabel(String(label).trim());
     if (raw && !UNKNOWN_LIKE_RE.test(raw) && !raw.includes('/')) {
       if (!raw.startsWith('GMT') && !raw.startsWith('UTC')) return raw;
       if (inviteeTz.includes('Kolkata') || inviteeTz.includes('Calcutta')) return 'IST';
@@ -63,7 +68,7 @@ function sanitizeTimezoneLabel(label, inviteeTz = 'America/New_York') {
 
 /**
  * Determine timezone abbreviation from IANA timezone name or meeting time.
- * Prefers the actual IANA timezone from Calendly (e.g. 'America/Chicago' → 'CDT').
+ * Prefers the actual IANA timezone from Calendly (e.g. 'America/Chicago' → 'CT').
  * Falls back to offset-based detection for backward compatibility.
  *
  * @param {string} meetingStartISO - ISO date string
@@ -79,18 +84,18 @@ function getTimezoneAbbreviation(meetingStartISO, ianaTimezone) {
     if (ianaTimezone && typeof ianaTimezone === 'string') {
       const inZone = meetingStartUTC.setZone(ianaTimezone);
       if (inZone.isValid) {
-        return sanitizeTimezoneLabel(inZone.toFormat('ZZZZ'), ianaTimezone); // e.g. "CDT", "PDT", "EST", "IST"
+        return sanitizeTimezoneLabel(inZone.toFormat('ZZZZ'), ianaTimezone); // e.g. "CT", "PT", "ET", "IST"
       }
     }
 
     // Fallback: detect from UTC offset (legacy behavior)
     const meetingPST = meetingStartUTC.setZone('America/Los_Angeles');
     const pstOffset = meetingPST.offset / 60;
-    if (pstOffset === -8 || pstOffset === -7) return pstOffset === -8 ? 'PST' : 'PDT';
+    if (pstOffset === -8 || pstOffset === -7) return 'PT';
 
     const meetingET = meetingStartUTC.setZone('America/New_York');
     const etOffset = meetingET.offset / 60;
-    if (etOffset === -5 || etOffset === -4) return etOffset === -5 ? 'EST' : 'EDT';
+    if (etOffset === -5 || etOffset === -4) return 'ET';
 
     return sanitizeTimezoneLabel(null, ianaTimezone || 'America/New_York');
   } catch (error) {
@@ -533,10 +538,13 @@ export async function scheduleAllWhatsAppReminders({
       timezone === 'ET'  ? 'America/New_York'  :
       timezone === 'EST' ? 'America/New_York'  :
       timezone === 'EDT' ? 'America/New_York'  :
+      timezone === 'PT'  ? 'America/Los_Angeles' :
       timezone === 'PST' ? 'America/Los_Angeles' :
       timezone === 'PDT' ? 'America/Los_Angeles' :
+      timezone === 'CT'  ? 'America/Chicago'   :
       timezone === 'CST' ? 'America/Chicago'   :
       timezone === 'CDT' ? 'America/Chicago'   :
+      timezone === 'MT'  ? 'America/Denver'    :
       timezone === 'MST' ? 'America/Denver'    :
       timezone === 'MDT' ? 'America/Denver'    :
       timezone === 'IST' ? 'Asia/Kolkata'      :
@@ -784,11 +792,31 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     const rawTz = meta.inviteeTimezone || scheduledReminder.inviteeTimezone || 'America/New_York';
     const inviteeTz = (typeof rawTz === 'string' && rawTz.trim() && IANAZone.isValidZone(rawTz.trim()))
       ? rawTz.trim() : 'America/New_York';
+    const displayZone = displayZoneFor(inviteeTz);
 
     const isUnknownTime = isUnknownLike(meetingTime) || String(meetingTime).trim().toLowerCase().startsWith('unknown');
     let resolvedMeetingTime = meetingTime;
     let resolvedTimezone = sanitizeTimezoneLabel(timezone, inviteeTz);
-    if (isUnknownTime) {
+
+    // Forced-Eastern policy: recompute from the real meeting instant rather than trust
+    // the stored strings, which were rendered in each client's own zone at schedule
+    // time. Doing it here means reminders already queued are corrected on send, with
+    // no database rewrite.
+    if (FORCE_EASTERN_DISPLAY) {
+      const forced = buildMeetingDisplay(
+        scheduledReminder.meetingStartISO,
+        meta.meetingEndISO ?? null,
+        inviteeTz
+      );
+      if (forced) {
+        resolvedMeetingTime = forced.meetingTime;
+        resolvedTimezone = forced.tzLabel;
+      } else {
+        resolvedTimezone = EASTERN_DISPLAY_LABEL;
+      }
+    }
+
+    if (isUnknownTime && !FORCE_EASTERN_DISPLAY) {
       const derived = resolveUnknownWhatsAppMeetingDisplay(scheduledReminder);
       if (derived.resolvedMeetingTime) {
         resolvedMeetingTime = derived.resolvedMeetingTime;
@@ -800,7 +828,9 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     if (isUnknownLike(resolvedMeetingTime) || String(resolvedMeetingTime).trim().toLowerCase().startsWith('unknown')) {
       const derived = resolveUnknownWhatsAppMeetingDisplay(scheduledReminder);
       resolvedMeetingTime = derived.resolvedMeetingTime || '';
-      resolvedTimezone = sanitizeTimezoneLabel(derived.resolvedTimezone || resolvedTimezone, inviteeTz);
+      resolvedTimezone = FORCE_EASTERN_DISPLAY
+        ? EASTERN_DISPLAY_LABEL
+        : sanitizeTimezoneLabel(derived.resolvedTimezone || resolvedTimezone, inviteeTz);
     }
 
     const meetingTimeWithTimezone = resolvedMeetingTime && resolvedTimezone
@@ -809,16 +839,20 @@ export async function sendWhatsAppMessage(scheduledReminder) {
 
     // Resolve meetingDate — if null/undefined, derive from meetingStartISO or scheduledFor
     let resolvedMeetingDate = meetingDate;
-    if (!meetingDate || meetingDate === 'undefined' || meetingDate === 'null') {
+    if (FORCE_EASTERN_DISPLAY) {
+      const forced = buildMeetingDisplay(scheduledReminder.meetingStartISO, meta.meetingEndISO ?? null, inviteeTz);
+      if (forced) resolvedMeetingDate = forced.meetingDate;
+    }
+    if (!resolvedMeetingDate || resolvedMeetingDate === 'undefined' || resolvedMeetingDate === 'null') {
       const startFromIso = parseMeetingStartToDate(scheduledReminder.meetingStartISO);
       if (startFromIso) {
-        resolvedMeetingDate = DateTime.fromJSDate(startFromIso, { zone: 'utc' }).setZone(inviteeTz).toFormat('EEEE MMM d, yyyy');
+        resolvedMeetingDate = DateTime.fromJSDate(startFromIso, { zone: 'utc' }).setZone(displayZone).toFormat('EEEE MMM d, yyyy');
       } else if (scheduledReminder.scheduledFor) {
         const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '2hour': 120, '24hour': 1440 };
         const reminderType = meta.reminderType ?? scheduledReminder.reminderType;
         const offsetMin = offsetMap[reminderType] ?? 5;
         const derived = new Date(new Date(scheduledReminder.scheduledFor).getTime() + offsetMin * 60 * 1000);
-        resolvedMeetingDate = DateTime.fromJSDate(derived, { zone: 'utc' }).setZone(inviteeTz).toFormat('EEEE MMM d, yyyy');
+        resolvedMeetingDate = DateTime.fromJSDate(derived, { zone: 'utc' }).setZone(displayZone).toFormat('EEEE MMM d, yyyy');
       }
     }
 
