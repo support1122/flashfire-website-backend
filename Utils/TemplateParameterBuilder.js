@@ -1,5 +1,6 @@
 import { DateTime, IANAZone } from 'luxon';
 import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
+import { normalizeTimezoneLabel, displayZoneFor, FORCE_EASTERN_DISPLAY, EASTERN_DISPLAY_LABEL } from './MeetingReminderUtils.js';
 
 const DEFAULT_SCHEDULING_LINK = 'https://calendly.com/feedback-flashfire/15min';
 
@@ -89,16 +90,16 @@ function getTimezoneAbbreviation(timezone, meetingStart) {
     const offset = meetingInTimezone.offset / 60;
 
     if (timezone.includes('Los_Angeles') || timezone.includes('Pacific')) {
-      return offset === -8 ? 'PST' : 'PDT';
+      return 'PT';
     }
     if (timezone.includes('New_York') || timezone.includes('Eastern')) {
-      return offset === -5 ? 'ET' : 'EDT';
+      return 'ET';
     }
     if (timezone.includes('Chicago') || timezone.includes('Central')) {
-      return offset === -6 ? 'CT' : 'CDT';
+      return 'CT';
     }
     if (timezone.includes('Denver') || timezone.includes('Mountain')) {
-      return offset === -7 ? 'MT' : 'MDT';
+      return 'MT';
     }
 
     // Anything not named above (non-US zones, America/Phoenix, US/Eastern aliases)
@@ -106,14 +107,16 @@ function getTimezoneAbbreviation(timezone, meetingStart) {
     // labelled every -5 zone "ET", so an Asia/Kolkata client was told "2:30am ET".
     // An unparseable zone yields an invalid DateTime whose toFormat() returns the
     // string "Invalid DateTime" rather than throwing — check before trusting it.
-    const realAbbr = meetingInTimezone.isValid ? meetingInTimezone.toFormat('ZZZZ') : '';
+    const realAbbr = meetingInTimezone.isValid
+      ? normalizeTimezoneLabel(meetingInTimezone.toFormat('ZZZZ'))
+      : '';
     if (realAbbr && !realAbbr.startsWith('GMT') && !realAbbr.startsWith('UTC')) {
       return realAbbr;
     }
     // Same India mapping the reminder path uses (sanitizeTimezoneLabel in
     // WhatsAppReminderScheduler.js), so both paths print the identical label.
     if (timezone.includes('Kolkata') || timezone.includes('Calcutta')) return 'IST';
-    if (offset === -8 || offset === -7) return 'PST';
+    if (offset === -8 || offset === -7) return 'PT';
     if (offset === -5 || offset === -4) return 'ET';
     if (offset === -6) return 'CT';
 
@@ -161,12 +164,9 @@ function buildMeetingTimeParams(booking) {
   // "5pm PDT" for a 5pm-Eastern meeting — three hours off for a Pacific client, in
   // the direction that guarantees a missed call. Fall back to Eastern only when the
   // booking carries no usable zone.
-  const displayZone =
-    typeof booking.inviteeTimezone === 'string' &&
-    booking.inviteeTimezone.trim() &&
-    IANAZone.isValidZone(booking.inviteeTimezone.trim())
-      ? booking.inviteeTimezone.trim()
-      : 'America/New_York';
+  // displayZoneFor() applies the forced-Eastern policy; without it this falls back to
+  // the invitee's own zone, and to Eastern when the booking carries no usable zone.
+  const displayZone = displayZoneFor(booking.inviteeTimezone);
 
   const meetingDateFormatted = meetingStartUTC.setZone(displayZone).toFormat('MMM d');
 
@@ -182,9 +182,11 @@ function buildMeetingTimeParams(booking) {
 
   const meetingTimeFormatted = `${startTimeFormatted} – ${endTimeFormatted}`;
 
-  const timezone = booking.inviteeTimezone
-    ? getTimezoneAbbreviation(booking.inviteeTimezone, booking.scheduledEventStartTime)
-    : 'ET';
+  const timezone = FORCE_EASTERN_DISPLAY
+    ? EASTERN_DISPLAY_LABEL
+    : booking.inviteeTimezone
+      ? getTimezoneAbbreviation(booking.inviteeTimezone, booking.scheduledEventStartTime)
+      : 'ET';
 
   return {
     meetingDateFormatted,

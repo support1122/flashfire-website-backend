@@ -19,6 +19,7 @@ import { DiscordConnect } from './DiscordConnect.js';
 import { logReminderDrift } from './MeetingReminderUtils.js';
 import { makeCall, scheduleCall } from './CallScheduler.js';
 import { sendWhatsAppMessage, scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
+import { normalizeTimezoneLabel, buildMeetingDisplay } from './MeetingReminderUtils.js';
 import { formatMeetingWallTime, headlineForSendTime, scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
 import { resolveCalendlyHostByEventUri } from './CalendlyAPIHelper.js';
 import { normalizePhoneForReminders } from './MeetingReminderUtils.js';
@@ -655,17 +656,13 @@ export class UnifiedScheduler {
   // ────────────────────────── Self-heal ──────────────────────────────────
 
   _buildDisplay(booking) {
-    const tz = booking.inviteeTimezone || 'America/New_York';
-    const s = DateTime.fromJSDate(new Date(booking.scheduledEventStartTime)).setZone(tz);
-    const e = booking.scheduledEventEndTime
-      ? DateTime.fromJSDate(new Date(booking.scheduledEventEndTime)).setZone(tz)
-      : s.plus({ minutes: 15 });
-    const fmt = dt => dt.minute === 0 ? dt.toFormat('ha').toLowerCase() : dt.toFormat('h:mma').toLowerCase();
-    return {
-      meetingTime: `${fmt(s)} – ${fmt(e)}`,
-      meetingDate: s.toFormat('EEEE MMM d, yyyy'),
-      tzAbbr: s.toFormat('ZZZZ') || 'ET',
-    };
+    const d = buildMeetingDisplay(
+      booking.scheduledEventStartTime,
+      booking.scheduledEventEndTime,
+      booking.inviteeTimezone
+    );
+    if (d) return { meetingTime: d.meetingTime, meetingDate: d.meetingDate, tzAbbr: d.tzLabel };
+    return { meetingTime: '', meetingDate: '', tzAbbr: 'EST' };
   }
 
   async _healMissingReminders() {

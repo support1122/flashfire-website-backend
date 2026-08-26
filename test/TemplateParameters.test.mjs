@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildTemplateParameters, calendlyButtonTail, calendlyCancelTail } from '../Utils/TemplateParameterBuilder.js';
+import { normalizeTimezoneLabel } from '../Utils/MeetingReminderUtils.js';
 
 // 2026-08-21T21:00Z is 5pm Eastern, 2pm Pacific, 4pm Central, 2:30am IST the next day.
 const START = new Date('2026-08-21T21:00:00.000Z');
@@ -21,40 +22,35 @@ const display = async (tz) => {
   return { date: p[1], time: p[2] };
 };
 
-describe('appointment reminder meeting time', () => {
-  it('renders the clock in the invitee timezone, not Eastern', async () => {
-    const pacific = await display('America/Los_Angeles');
-    assert.equal(pacific.time, '2pm – 2:15pm PDT');
-
-    const central = await display('America/Chicago');
-    assert.equal(central.time, '4pm – 4:15pm CDT');
-
-    const eastern = await display('America/New_York');
-    assert.equal(eastern.time, '5pm – 5:15pm EDT');
-  });
-
-  it('rolls the date when the invitee timezone crosses midnight', async () => {
-    const india = await display('Asia/Kolkata');
-    assert.equal(india.date, 'Aug 22');
-    assert.equal(india.time, '2:30am – 2:45am IST');
-  });
-
-  it('does not label a non-Eastern zone as ET', async () => {
-    for (const tz of ['America/Los_Angeles', 'America/Chicago', 'America/Phoenix', 'Asia/Kolkata']) {
+describe('appointment reminder meeting time (forced-Eastern policy)', () => {
+  // REMINDER_FORCE_EASTERN defaults to true: every client is shown the meeting in
+  // America/New_York labelled EST, whatever zone they are actually in.
+  // The per-client-zone behaviour is covered in TemplateParametersLocalZone.test.mjs.
+  it('renders every timezone as the same Eastern clock', async () => {
+    for (const tz of ['America/Los_Angeles', 'America/Chicago', 'America/Denver', 'America/New_York', 'Asia/Kolkata', 'Europe/London']) {
       const { time } = await display(tz);
-      assert.ok(!/\bET\b/.test(time), `${tz} was labelled ET: ${time}`);
+      assert.equal(time, '5pm – 5:15pm EST', `${tz} rendered "${time}"`);
     }
   });
 
-  it('uses the real abbreviation for zones the US offset heuristic mislabelled', async () => {
-    // Phoenix does not observe DST — the -7 offset guess used to call it PST.
-    const { time } = await display('America/Phoenix');
-    assert.match(time, /MST$/);
+  it('labels every reminder EST, never a generic or daylight variant', async () => {
+    for (const tz of ['America/Los_Angeles', 'America/Chicago', 'America/Phoenix', 'Asia/Kolkata', null]) {
+      const { time } = await display(tz);
+      assert.ok(time.endsWith(' EST'), `${tz} rendered "${time}"`);
+      assert.ok(!/\b(EDT|CST|CDT|MST|MDT|PST|PDT|ET|CT|MT|PT|IST)\b/.test(time), `${tz} leaked a non-EST label: ${time}`);
+    }
+  });
+
+  it('dates the meeting by the Eastern calendar day', async () => {
+    // 21:00Z on Aug 21 is still Aug 21 in New York, even for an India client whose
+    // own clock has already rolled over to Aug 22.
+    assert.equal((await display('Asia/Kolkata')).date, 'Aug 21');
+    assert.equal((await display('America/Los_Angeles')).date, 'Aug 21');
   });
 
   it('falls back to Eastern when the booking carries no usable zone', async () => {
-    assert.equal((await display(null)).time, '5pm – 5:15pm ET');
-    assert.equal((await display('Not/AZone')).time, '5pm – 5:15pm ET');
+    assert.equal((await display(null)).time, '5pm – 5:15pm EST');
+    assert.equal((await display('Not/AZone')).time, '5pm – 5:15pm EST');
   });
 });
 
@@ -149,10 +145,35 @@ describe('flashfire_appointment_reminder_rc', () => {
     );
   });
 
-  it('renders the meeting time in the invitee zone, same as the other templates', async () => {
+  it('follows the same forced-Eastern display policy as the other templates', async () => {
     const p = await buildTemplateParameters('flashfire_appointment_reminder_rc', {
       booking: rcBooking({ inviteeTimezone: 'America/Los_Angeles' }),
     });
-    assert.equal(p[2], '2pm – 2:15pm PDT');
+    assert.equal(p[2], '5pm – 5:15pm EST');
+  });
+});
+
+describe('normalizeTimezoneLabel', () => {
+  it('collapses US daylight and standard variants to one generic label', () => {
+    assert.equal(normalizeTimezoneLabel('EDT'), 'ET');
+    assert.equal(normalizeTimezoneLabel('EST'), 'ET');
+    assert.equal(normalizeTimezoneLabel('PDT'), 'PT');
+    assert.equal(normalizeTimezoneLabel('PST'), 'PT');
+    assert.equal(normalizeTimezoneLabel('CDT'), 'CT');
+    assert.equal(normalizeTimezoneLabel('CST'), 'CT');
+    assert.equal(normalizeTimezoneLabel('MDT'), 'MT');
+    assert.equal(normalizeTimezoneLabel('MST'), 'MT');
+  });
+
+  it('leaves non-US and already-generic labels alone', () => {
+    for (const v of ['IST', 'HST', 'GMT+1', 'GMT+5:30', 'ET', 'PT']) {
+      assert.equal(normalizeTimezoneLabel(v), v);
+    }
+  });
+
+  it('is whitespace and case tolerant, and passes through empty values', () => {
+    assert.equal(normalizeTimezoneLabel('  edt '), 'ET');
+    assert.equal(normalizeTimezoneLabel(null), null);
+    assert.equal(normalizeTimezoneLabel(''), '');
   });
 });
