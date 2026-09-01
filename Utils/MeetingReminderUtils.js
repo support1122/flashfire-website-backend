@@ -94,6 +94,29 @@ const US_TZ_GENERIC = {
   PST: 'PT', PDT: 'PT',
 };
 
+// Map GMT offset labels → readable abbreviations for non-US timezones
+const OFFSET_TO_ABBR = {
+  'GMT+0': 'GMT', 'GMT-0': 'GMT',
+  'GMT+1': 'BST',   // UK summer (British Summer Time)
+  'GMT+2': 'CEST',  // Central Europe summer
+  'GMT+3': 'MSK',   // Moscow
+  'GMT+4': 'GST',   // Gulf
+  'GMT+5': 'PKT',   // Pakistan
+  'GMT+5:30': 'IST', // India
+  'GMT+6': 'BST',   // Bangladesh
+  'GMT+7': 'ICT',   // Indochina
+  'GMT+8': 'SGT',   // Singapore/HK
+  'GMT+9': 'JST',   // Japan
+  'GMT+10': 'AEST', // Australia East
+  'GMT+11': 'AEDT', // Australia East DST
+  'GMT-3': 'ART',   // Argentina
+  'GMT-4': 'AST',   // Atlantic
+  'GMT-5': 'ET',    // Eastern (standard)
+  'GMT-6': 'CT',    // Central (standard)
+  'GMT-7': 'MT',    // Mountain (standard)
+  'GMT-8': 'PT',    // Pacific (standard)
+};
+
 /**
  * Display policy: show every client the meeting in ONE timezone, labelled "EST".
  *
@@ -110,8 +133,31 @@ export const FORCE_EASTERN_DISPLAY =
 export const EASTERN_DISPLAY_ZONE = 'America/New_York';
 export const EASTERN_DISPLAY_LABEL = 'EST';
 
+// UK timezones — show in their own time instead of EST
+const UK_ZONES = new Map([
+  ['Europe/London', 'UK, Ireland, Lisbon Time'],
+  ['Europe/Dublin', 'UK, Ireland, Lisbon Time'],
+  ['Atlantic/Reykjavik', 'UK, Ireland, Lisbon Time'],
+]);
+
+/** Returns true if the invitee is in a UK/Ireland timezone. */
+export function isUKTimezone(inviteeTimezone) {
+  const tz = typeof inviteeTimezone === 'string' ? inviteeTimezone.trim() : '';
+  return UK_ZONES.has(tz);
+}
+
+/** Returns the friendly UK label or null if not a UK timezone. */
+export function getUKTimezoneLabel(inviteeTimezone) {
+  const tz = typeof inviteeTimezone === 'string' ? inviteeTimezone.trim() : '';
+  return UK_ZONES.get(tz) ?? null;
+}
+
 /** Zone the client-facing meeting time should be rendered in. */
 export function displayZoneFor(inviteeTimezone) {
+  // UK clients always get their own timezone, regardless of FORCE_EASTERN_DISPLAY
+  if (isUKTimezone(inviteeTimezone)) {
+    return inviteeTimezone;
+  }
   if (FORCE_EASTERN_DISPLAY) return EASTERN_DISPLAY_ZONE;
   const tz = typeof inviteeTimezone === 'string' ? inviteeTimezone.trim() : '';
   return tz && IANAZone.isValidZone(tz) ? tz : EASTERN_DISPLAY_ZONE;
@@ -139,7 +185,7 @@ export function buildMeetingDisplay(meetingStartISO, meetingEndISO, inviteeTimez
   return {
     meetingTime: `${fmt(s)} – ${fmt(e.isValid ? e : s.plus({ minutes: 15 }))}`,
     meetingDate: s.toFormat('EEEE MMM d, yyyy'),
-    tzLabel: FORCE_EASTERN_DISPLAY ? EASTERN_DISPLAY_LABEL : normalizeTimezoneLabel(s.toFormat('ZZZZ')),
+    tzLabel: getUKTimezoneLabel(inviteeTimezone) ?? (FORCE_EASTERN_DISPLAY ? EASTERN_DISPLAY_LABEL : normalizeTimezoneLabel(s.toFormat('z'))),
   };
 }
 
@@ -147,7 +193,7 @@ export function normalizeTimezoneLabel(label) {
   if (label == null) return label;
   const raw = String(label).trim();
   if (!raw) return raw;
-  return US_TZ_GENERIC[raw.toUpperCase()] ?? raw;
+  return US_TZ_GENERIC[raw.toUpperCase()] ?? OFFSET_TO_ABBR[raw] ?? raw;
 }
 
 export function buildCallId(phoneNumber, meetingStartMs) {
