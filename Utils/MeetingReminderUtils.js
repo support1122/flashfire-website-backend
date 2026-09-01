@@ -133,33 +133,173 @@ export const FORCE_EASTERN_DISPLAY =
 export const EASTERN_DISPLAY_ZONE = 'America/New_York';
 export const EASTERN_DISPLAY_LABEL = 'EST';
 
-// UK timezones — show in their own time instead of EST
-const UK_ZONES = new Map([
-  ['Europe/London', 'UK, Ireland, Lisbon Time'],
-  ['Europe/Dublin', 'UK, Ireland, Lisbon Time'],
-  ['Atlantic/Reykjavik', 'UK, Ireland, Lisbon Time'],
-]);
+// IANA timezone → Calendly-style friendly label (matched exactly from Calendly UI)
+const IANA_TO_FRIENDLY = {
+  // US / Canada
+  'America/New_York':                   'Eastern Time - US & Canada',
+  'America/Detroit':                    'Eastern Time - US & Canada',
+  'America/Indiana/Indianapolis':       'Eastern Time - US & Canada',
+  'America/Toronto':                    'Eastern Time - US & Canada',
+  'America/Chicago':                    'Central Time - US & Canada',
+  'America/Winnipeg':                   'Central Time - US & Canada',
+  'America/Regina':                     'Saskatchewan, Guatemala, Costa Rica Time',
+  'America/Guatemala':                  'Saskatchewan, Guatemala, Costa Rica Time',
+  'America/Costa_Rica':                 'Saskatchewan, Guatemala, Costa Rica Time',
+  'America/Denver':                     'Mountain Time - US & Canada',
+  'America/Edmonton':                   'Mountain Time - US & Canada',
+  'America/Phoenix':                    'Arizona, Yukon Time',
+  'America/Whitehorse':                 'Arizona, Yukon Time',
+  'America/Los_Angeles':                'Pacific Time - US & Canada',
+  'America/Vancouver':                  'Vancouver Time',
+  'America/Anchorage':                  'Alaska Time',
+  'America/Juneau':                     'Alaska Time',
+  'Pacific/Honolulu':                   'Hawaii Time',
+  'America/Adak':                       'America/Adak',
+  'America/Halifax':                    'Atlantic Time',
+  'America/St_Johns':                   'Newfoundland Time',
+  'America/Godthab':                    'America/Godthab',
+  'America/Miquelon':                   'America/Miquelon',
+  'America/Noronha':                    'America/Noronha',
+  'America/Santa_Isabel':               'America/Santa Isabel',
+  'America/Mazatlan':                   'America/Mazatlan',
+  'America/Havana':                     'America/Havana',
+  // America
+  'America/Mexico_City':                'Mexico City Time',
+  'America/Monterrey':                  'Mexico City Time',
+  'America/Bogota':                     'Bogota, Jamaica, Lima Time',
+  'America/Jamaica':                    'Bogota, Jamaica, Lima Time',
+  'America/Lima':                       'Bogota, Jamaica, Lima Time',
+  'America/Caracas':                    'Caracas Time',
+  'America/Asuncion':                   'Asuncion Time',
+  'America/Campo_Grande':               'America/Campo Grande',
+  'America/Santiago':                   'Santiago Time',
+  'America/Sao_Paulo':                  'Brasilia Time',
+  'America/Argentina/Buenos_Aires':     'Buenos Aires Time',
+  'America/Montevideo':                 'Montevideo Time',
+  // Africa
+  'Africa/Lagos':                       'West Africa Time',
+  'Africa/Bangui':                      'West Africa Time',
+  'Africa/Cairo':                       'Africa/Cairo',
+  'Africa/Casablanca':                  'Africa/Cairo',
+  'Africa/Nairobi':                     'Baghdad, East Africa Time',
+  'Africa/Addis_Ababa':                 'Baghdad, East Africa Time',
+  'Africa/Johannesburg':                'Central Africa Time',
+  'Africa/Harare':                      'Central Africa Time',
+  'Africa/Abidjan':                     'UTC Time',
+  'Africa/Accra':                       'UTC Time',
+  // Europe
+  'Europe/London':                      'UK, Ireland, Lisbon Time',
+  'Europe/Dublin':                      'UK, Ireland, Lisbon Time',
+  'Atlantic/Reykjavik':                 'UK, Ireland, Lisbon Time',
+  'Europe/Lisbon':                      'UK, Ireland, Lisbon Time',
+  'Europe/Paris':                       'Central European Time',
+  'Europe/Berlin':                      'Central European Time',
+  'Europe/Rome':                        'Central European Time',
+  'Europe/Madrid':                      'Central European Time',
+  'Europe/Amsterdam':                   'Central European Time',
+  'Europe/Brussels':                    'Central European Time',
+  'Europe/Warsaw':                      'Central European Time',
+  'Europe/Stockholm':                   'Central European Time',
+  'Europe/Prague':                      'Central European Time',
+  'Europe/Vienna':                      'Central European Time',
+  'Europe/Athens':                      'Eastern European Time',
+  'Europe/Helsinki':                    'Eastern European Time',
+  'Europe/Bucharest':                   'Eastern European Time',
+  'Europe/Kiev':                        'Eastern European Time',
+  'Europe/Riga':                        'Eastern European Time',
+  'Europe/Sofia':                       'Eastern European Time',
+  'Europe/Tallinn':                     'Eastern European Time',
+  'Europe/Vilnius':                     'Eastern European Time',
+  'Europe/Minsk':                       'Minsk Time',
+  'Europe/Moscow':                      'Moscow Time',
+  'Europe/Kaliningrad':                 'Moscow Time',
+  'Europe/Volgograd':                   'Moscow Time',
+  // Asia
+  'Asia/Baghdad':                       'Baghdad, East Africa Time',
+  'Asia/Kuwait':                        'Baghdad, East Africa Time',
+  'Asia/Riyadh':                        'Baghdad, East Africa Time',
+  'Asia/Jordan':                        'Jordan Time',
+  'Asia/Beirut':                        'Lebanon Time',
+  'Asia/Damascus':                      'Syria Time',
+  'Asia/Gaza':                          'Asia/Gaza',
+  'Asia/Dubai':                         'Dubai Time',
+  'Asia/Muscat':                        'Dubai Time',
+  'Asia/Baku':                          'Asia/Baku',
+  'Asia/Tehran':                        'Tehran Time',
+  'Asia/Kabul':                         'Kabul Time',
+  'Asia/Karachi':                       'India, Sri Lanka Time',
+  'Asia/Kolkata':                       'India, Sri Lanka Time',
+  'Asia/Calcutta':                      'India, Sri Lanka Time',
+  'Asia/Colombo':                       'India, Sri Lanka Time',
+  'Asia/Kathmandu':                     'Kathmandu Time',
+  'Asia/Katmandu':                      'Kathmandu Time',
+  'Asia/Dhaka':                         'Asia/Dhaka',
+  'Asia/Yekaterinburg':                 'Yekaterinburg Time',
+  'Asia/Tashkent':                      'India, Sri Lanka Time',
+  'Asia/Almaty':                        'India, Sri Lanka Time',
+  'Asia/Rangoon':                       'Asia/Rangoon',
+  'Asia/Bangkok':                       'Indochina Time',
+  'Asia/Jakarta':                       'Indochina Time',
+  'Asia/Krasnoyarsk':                   'Krasnoyarsk Time',
+  'Asia/Omsk':                          'Asia/Omsk',
+  'Asia/Shanghai':                      'China, Singapore, Perth',
+  'Asia/Singapore':                     'China, Singapore, Perth',
+  'Asia/Hong_Kong':                     'China, Singapore, Perth',
+  'Asia/Kuala_Lumpur':                  'China, Singapore, Perth',
+  'Asia/Manila':                        'China, Singapore, Perth',
+  'Asia/Taipei':                        'China, Singapore, Perth',
+  'Asia/Irkutsk':                       'Asia/Irkutsk',
+  'Asia/Tokyo':                         'Japan, Korea Time',
+  'Asia/Seoul':                         'Japan, Korea Time',
+  'Asia/Vladivostok':                   'Asia/Vladivostok',
+  'Asia/Yakutsk':                       'Asia/Yakutsk',
+  // Australia
+  'Australia/Perth':                    'Australia/Perth',
+  'Australia/Darwin':                   'Australia/Darwin',
+  'Australia/Eucla':                    'Australia/Eucla',
+  'Australia/Adelaide':                 'Adelaide Time',
+  'Australia/Brisbane':                 'Brisbane Time',
+  'Australia/Sydney':                   'Sydney, Melbourne Time',
+  'Australia/Melbourne':                'Sydney, Melbourne Time',
+  'Australia/Lord_Howe':                'Australia/Lord Howe',
+  // Pacific
+  'Pacific/Auckland':                   'Auckland Time',
+  'Pacific/Fiji':                       'Pacific/Fiji',
+  'Pacific/Apia':                       'Pacific/Apia',
+  'Pacific/Chatham':                    'Pacific/Chatham',
+  'Pacific/Easter':                     'Pacific/Easter',
+  'Pacific/Gambier':                    'Pacific/Gambier',
+  'Pacific/Kiritimati':                 'Pacific/Kiritimati',
+  'Pacific/Majuro':                     'Pacific/Majuro',
+  'Pacific/Marquesas':                  'Pacific/Marquesas',
+  'Pacific/Norfolk':                    'Pacific/Norfolk',
+  'Pacific/Noumea':                     'Pacific/Noumea',
+  'Pacific/Pago_Pago':                  'Pacific/Pago Pago',
+  'Pacific/Pitcairn':                   'Pacific/Pitcairn',
+  'Pacific/Tarawa':                     'Pacific/Tarawa',
+  'Pacific/Tongatapu':                  'Pacific/Tongatapu',
+  'Pacific/Guam':                       'Pacific/Guam',
+  // UTC
+  'UTC':                                'UTC Time',
+  'Etc/UTC':                            'UTC Time',
+  'Etc/GMT':                            'UTC Time',
+  // Atlantic
+  'Atlantic/Azores':                    'Azores Time',
+  'Atlantic/Cape_Verde':                'Cape Verde Time',
+};
 
-/** Returns true if the invitee is in a UK/Ireland timezone. */
-export function isUKTimezone(inviteeTimezone) {
+/** Returns the Calendly-style friendly timezone label for any IANA zone, or null. */
+export function getFriendlyTimezoneLabel(inviteeTimezone) {
   const tz = typeof inviteeTimezone === 'string' ? inviteeTimezone.trim() : '';
-  return UK_ZONES.has(tz);
-}
-
-/** Returns the friendly UK label or null if not a UK timezone. */
-export function getUKTimezoneLabel(inviteeTimezone) {
-  const tz = typeof inviteeTimezone === 'string' ? inviteeTimezone.trim() : '';
-  return UK_ZONES.get(tz) ?? null;
+  return IANA_TO_FRIENDLY[tz] ?? null;
 }
 
 /** Zone the client-facing meeting time should be rendered in. */
 export function displayZoneFor(inviteeTimezone) {
-  // UK clients always get their own timezone, regardless of FORCE_EASTERN_DISPLAY
-  if (isUKTimezone(inviteeTimezone)) {
-    return inviteeTimezone;
-  }
-  if (FORCE_EASTERN_DISPLAY) return EASTERN_DISPLAY_ZONE;
   const tz = typeof inviteeTimezone === 'string' ? inviteeTimezone.trim() : '';
+  // If we have a friendly label for this timezone, show in their own zone
+  if (IANA_TO_FRIENDLY[tz] && IANAZone.isValidZone(tz)) return tz;
+  if (FORCE_EASTERN_DISPLAY) return EASTERN_DISPLAY_ZONE;
   return tz && IANAZone.isValidZone(tz) ? tz : EASTERN_DISPLAY_ZONE;
 }
 
@@ -185,7 +325,7 @@ export function buildMeetingDisplay(meetingStartISO, meetingEndISO, inviteeTimez
   return {
     meetingTime: `${fmt(s)} – ${fmt(e.isValid ? e : s.plus({ minutes: 15 }))}`,
     meetingDate: s.toFormat('EEEE MMM d, yyyy'),
-    tzLabel: getUKTimezoneLabel(inviteeTimezone) ?? (FORCE_EASTERN_DISPLAY ? EASTERN_DISPLAY_LABEL : normalizeTimezoneLabel(s.toFormat('z'))),
+    tzLabel: getFriendlyTimezoneLabel(inviteeTimezone) ?? (FORCE_EASTERN_DISPLAY ? EASTERN_DISPLAY_LABEL : normalizeTimezoneLabel(s.toFormat('z'))),
   };
 }
 
