@@ -74,12 +74,6 @@ import TestPayPalEmail from "./test/TestPayPalEmail.js";
 import { handleCalendlyWebhook, testWebhook } from "./Controllers/CalendlyWebhookController.js";
 import { handlePayPalWebhook } from "./Controllers/PayPalWebhookController.js";
 import { handleStripeWebhook } from "./Controllers/StripeWebhookController.js";
-import {
-  captureStripeWebhook,
-  listStripeWebhookEvents,
-  getStripeWebhookEventStats,
-  getStripeWebhookEvent,
-} from "./Controllers/StripeCaptureWebhookController.js";
 import { handleFirefliesWebhook } from "./Controllers/FirefliesWebhookController.js";
 import { handleGoogleMeetMetadataWebhook } from "./Controllers/GoogleMeetMetadataController.js";
 // BDA Attendance Controllers
@@ -298,12 +292,6 @@ export default function Routes(app) {
   app.get('/api/crm/stripe/payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaymentsByMonth);
   app.get('/api/crm/stripe/summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeAllMonthsSummary);
   app.get('/api/crm/stripe/paid-plan-summary', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaidPlanMonthlySummary);
-
-  // Raw Stripe webhook capture log — what Stripe is actually sending us.
-  // /stats is declared before /:id so it is not read as an event id.
-  app.get('/api/crm/stripe/webhook-events', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), listStripeWebhookEvents);
-  app.get('/api/crm/stripe/webhook-events/stats', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeWebhookEventStats);
-  app.get('/api/crm/stripe/webhook-events/:id', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeWebhookEvent);
 
   // Manual INR payment entries — merged into the Stripe Data tab alongside Stripe charges.
   app.get('/api/crm/stripe/manual-payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getManualPaymentsByMonth);
@@ -532,13 +520,6 @@ export default function Routes(app) {
   app.post('/api/webhooks/paypal', handlePayPalWebhook); // Handle PayPal webhook events (PAYMENT.CAPTURE.COMPLETED, etc.)
   // Stripe Webhooks
   app.post('/api/webhooks/stripe', handleStripeWebhook); // Handle Stripe payment events and send PDF invoice email
-  // Capture-only endpoint: records every delivery to the StripeWebhookEvent log
-  // and does nothing else. Add it in Stripe as a SEPARATE endpoint (its own
-  // signing secret → STRIPE_CAPTURE_WEBHOOK_SECRET) and subscribe it to every
-  // event type — it cannot double-charge or double-email, so over-subscribing
-  // is free. Raw body comes from the express.raw mount on the /api/webhooks/stripe
-  // prefix in index.js.
-  app.post('/api/webhooks/stripe/capture', captureStripeWebhook);
   // Google Meet / recording metadata (from n8n or other automations)
   app.post('/api/webhooks/google-meet-metadata', handleGoogleMeetMetadataWebhook); // Attach Google Meet / video URLs to CRM leads
   // Meta Lead Ads Webhooks
