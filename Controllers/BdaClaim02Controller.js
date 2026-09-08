@@ -221,7 +221,12 @@ export const searchLeads = async (req, res) => {
       .lean();
 
     const ids = bookings.map((b) => b.bookingId);
-    const claims = await BdaClaim02Model.find({ bookingId: { $in: ids } })
+    // Only an ACTIVE (non-denied) claim locks a lead. Denied rows are history —
+    // the lead is released and shows as claimable again.
+    const claims = await BdaClaim02Model.find({
+      bookingId: { $in: ids },
+      status: { $in: ['pending', 'approved'] },
+    })
       .select('bookingId claimedBy status')
       .lean();
     const claimByBooking = new Map(claims.map((c) => [c.bookingId, c]));
@@ -254,7 +259,11 @@ export const searchLeads = async (req, res) => {
 export const listMyClaims = async (req, res) => {
   try {
     const admin = isAdmin(req);
-    const filter = admin ? {} : { 'claimedBy.email': req.crmUser.email };
+    // A BDA sees only their own still-active claims — a denied claim means the
+    // lead was taken back, so it drops off their list (admins keep the history).
+    const filter = admin
+      ? {}
+      : { 'claimedBy.email': req.crmUser.email, status: { $in: ['pending', 'approved'] } };
     const rows = await BdaClaim02Model.find(filter).sort({ createdAt: -1 });
     return res.status(200).json({
       success: true,
@@ -293,12 +302,18 @@ export const claimLead = async (req, res) => {
       });
     }
 
-    const existing = await BdaClaim02Model.findOne({ bookingId });
-    if (existing) {
+    // Block only when there is an ACTIVE (pending/approved) claim. Denied rows
+    // are history — the lead is released, so this claim is allowed and a fresh
+    // row is created alongside them.
+    const activeClaim = await BdaClaim02Model.findOne({
+      bookingId,
+      status: { $in: ['pending', 'approved'] },
+    });
+    if (activeClaim) {
       return res.status(409).json({
         success: false,
-        message: `Already claimed by ${existing.claimedBy?.name || 'another BDA'}`,
-        claimedByName: existing.claimedBy?.name || null,
+        message: `Already claimed by ${activeClaim.claimedBy?.name || 'another BDA'}`,
+        claimedByName: activeClaim.claimedBy?.name || null,
       });
     }
 
@@ -340,6 +355,12 @@ export const updateOwnClaim = async (req, res) => {
     if (!row) return res.status(404).json({ success: false, message: 'Claim not found' });
     if (row.claimedBy?.email !== req.crmUser?.email) {
       return res.status(403).json({ success: false, message: 'You can only edit your own claimed leads' });
+    }
+    if (row.status === 'denied') {
+      return res.status(409).json({
+        success: false,
+        message: 'This claim was denied by an admin — the lead has been released.',
+      });
     }
 
     if (bdaCurrency != null) {

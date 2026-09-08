@@ -14,11 +14,14 @@ import mongoose from 'mongoose';
  */
 const BdaClaim02Schema = new mongoose.Schema(
   {
-    // Source CRM lead (CampaignBooking.bookingId). One claim per booking.
+    // Source CRM lead (CampaignBooking.bookingId). At most one ACTIVE
+    // (pending/approved) claim per booking — enforced by the partial unique
+    // index below. When a claim is denied the lead is released: the denied row
+    // is kept for history, and a new BDA can create a fresh row for the same
+    // bookingId.
     bookingId: {
       type: String,
       required: true,
-      unique: true,
       index: true,
     },
 
@@ -71,6 +74,13 @@ const BdaClaim02Schema = new mongoose.Schema(
 );
 
 BdaClaim02Schema.index({ 'claimedBy.email': 1, status: 1 });
+
+// At most one active (non-denied) claim per booking. Denied rows are exempt,
+// so a released lead can be claimed again while its denied history remains.
+BdaClaim02Schema.index(
+  { bookingId: 1 },
+  { unique: true, partialFilterExpression: { status: { $in: ['pending', 'approved'] } } }
+);
 
 export const BdaClaim02Model =
   mongoose.models.BdaClaim02 || mongoose.model('BdaClaim02', BdaClaim02Schema);
