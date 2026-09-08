@@ -402,10 +402,10 @@ export default function Routes(app) {
   app.get('/api/bda/claim02/my', requireCrmUser, claim02ListMyClaims);
   app.get('/api/bda/claim02/bdas', requireCrmUser, claim02AdminListBdas);
   app.get('/api/bda/claim02/admin/all', requireCrmUser, claim02AdminListAll);
-  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), claim02ClaimLead);
-  app.put('/api/bda/claim02/admin/:id', requireCrmUser, requireCrmEdit('claim_leads'), claim02AdminUpdateClaim);
-  app.post('/api/bda/claim02/admin/:id/approve', requireCrmUser, requireCrmEdit('claim_leads'), claim02AdminSetStatus);
-  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEdit('claim_leads'), claim02UpdateOwnClaim);
+  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02ClaimLead);
+  app.put('/api/bda/claim02/admin/:id', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02AdminUpdateClaim);
+  app.post('/api/bda/claim02/admin/:id/approve', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02AdminSetStatus);
+  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02UpdateOwnClaim);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
   app.get('/api/crm/admin/clients/claims', requireCrmAdmin, getAllClientsWithClaimInfo);
