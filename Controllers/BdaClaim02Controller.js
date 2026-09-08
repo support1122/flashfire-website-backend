@@ -457,17 +457,41 @@ export const adminUpdateClaim = async (req, res) => {
   }
 };
 
-/** GET /api/bda/claim02/bdas — admin: distinct BDAs who have claimed here (for the filter). */
+/**
+ * GET /api/bda/claim02/bdas — admin: per-BDA rollup for the summary bar +
+ * filter dropdown. `earnedIncentiveInr` counts only APPROVED rows (money the
+ * BDA has actually earned); `pendingIncentiveInr` is the not-yet-approved rest.
+ */
 export const adminListBdas = async (req, res) => {
   try {
     if (!isAdmin(req)) return res.status(403).json({ success: false, message: 'Admin only' });
     const rows = await BdaClaim02Model.aggregate([
-      { $group: { _id: '$claimedBy.email', name: { $first: '$claimedBy.name' }, count: { $sum: 1 } } },
+      {
+        $group: {
+          _id: '$claimedBy.email',
+          name: { $first: '$claimedBy.name' },
+          count: { $sum: 1 },
+          approvedCount: { $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] } },
+          earnedIncentiveInr: {
+            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, { $ifNull: ['$incentiveInr', 0] }, 0] },
+          },
+          pendingIncentiveInr: {
+            $sum: { $cond: [{ $ne: ['$status', 'approved'] }, { $ifNull: ['$incentiveInr', 0] }, 0] },
+          },
+        },
+      },
       { $sort: { name: 1 } },
     ]);
     return res.status(200).json({
       success: true,
-      data: rows.map((r) => ({ email: r._id, name: r.name, count: r.count })),
+      data: rows.map((r) => ({
+        email: r._id,
+        name: r.name,
+        count: r.count,
+        approvedCount: r.approvedCount,
+        earnedIncentiveInr: Math.round((r.earnedIncentiveInr || 0) * 100) / 100,
+        pendingIncentiveInr: Math.round((r.pendingIncentiveInr || 0) * 100) / 100,
+      })),
     });
   } catch (error) {
     console.error('[claim02] adminListBdas error:', error);
