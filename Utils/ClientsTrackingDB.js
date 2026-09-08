@@ -61,6 +61,9 @@ const clientTrackingRecordSchema = new mongoose.Schema(
     name: String,
     email: String,
     crmEmail: String,
+    // "Payment Email" from the registration form — the address the client
+    // actually paid Stripe with (may differ from email / crmEmail).
+    paymentEmail: String,
     planType: String,
     planPrice: Number,
     amountPaid: String,

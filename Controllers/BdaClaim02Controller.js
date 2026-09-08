@@ -1,3 +1,4 @@
+import Stripe from 'stripe';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { BdaClaim02Model } from '../Schema_Models/BdaClaim02.js';
 import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
@@ -6,6 +7,8 @@ import {
   getClientUserModel,
 } from '../Utils/ClientsTrackingDB.js';
 import { normalizeCurrency } from '../Utils/currency.js';
+
+const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
 /**
  * "Claim Leads 02" controller.
@@ -117,6 +120,47 @@ function incentiveForLine(configByKey, planKey, amount, currency) {
   return config.incentivePerLeadInr * ratio;
 }
 
+/**
+ * Most recent SUCCEEDED Stripe charge for a payment email → { amount, currency }.
+ * Returns null when Stripe is not configured, the email is empty, or there is
+ * no matching succeeded charge. `amount` is in major units (dollars/pounds),
+ * `currency` an uppercased ISO code.
+ */
+async function fetchStripePaymentByEmail(paymentEmail) {
+  const email = String(paymentEmail || '').toLowerCase().trim();
+  if (!stripe || !email) return null;
+
+  try {
+    // charges.search matches by billing_details.email; sort newest first.
+    const q = `status:'succeeded' AND billing_details.email:'${email.replace(/'/g, "\\'")}'`;
+    const res = await stripe.charges.search({ query: q, limit: 20 });
+    const charges = (res.data || [])
+      .filter((c) => c.status === 'succeeded' && c.amount > 0)
+      .sort((a, b) => (b.created || 0) - (a.created || 0));
+
+    // Fallback: receipt_email is not covered by charges.search — if nothing
+    // matched, scan a page of recent charges for it.
+    let best = charges[0];
+    if (!best) {
+      const page = await stripe.charges.list({ limit: 100 });
+      best = (page.data || [])
+        .filter(
+          (c) =>
+            c.status === 'succeeded' &&
+            c.amount > 0 &&
+            String(c.receipt_email || c.billing_details?.email || '').toLowerCase().trim() === email
+        )
+        .sort((a, b) => (b.created || 0) - (a.created || 0))[0];
+    }
+    if (!best) return null;
+
+    return { amount: best.amount / 100, currency: String(best.currency || '').toUpperCase() || null };
+  } catch (e) {
+    console.warn('[claim02] Stripe lookup failed for', email, '-', e?.message || e);
+    return null;
+  }
+}
+
 /** Look up the clients-tracking registration snapshot for a CRM email. */
 async function fetchRegisteredSnapshot(crmEmail) {
   const empty = { registeredPlan: '', registeredCurrency: null, registeredAmountPaid: null };
@@ -139,10 +183,22 @@ async function fetchRegisteredSnapshot(crmEmail) {
     userRow = await UserModel.findOne({ email: String(record.email).toLowerCase().trim() }).lean();
   }
 
+  // Registered Amount Paid: the actual Stripe charge for this client's
+  // `paymentEmail` (the "Payment Email" on the registration form), taking the
+  // most recent succeeded charge. Falls back to the hand-typed
+  // dashboardtrackings.amountPaid, then planPrice, when there is no Stripe
+  // match (or Stripe is unconfigured).
+  const stripePayment = await fetchStripePaymentByEmail(record.paymentEmail);
+  const fallbackAmount =
+    parseAmount(record.amountPaid) ?? (record.planPrice > 0 ? record.planPrice : null);
+
   return {
     registeredPlan: toPlanKey(record.planType),
-    registeredCurrency: resolveRegisteredCurrency(record, userRow),
-    registeredAmountPaid: parseAmount(record.amountPaid) ?? (record.planPrice > 0 ? record.planPrice : null),
+    registeredCurrency:
+      stripePayment?.currency
+        ? normalizeCurrency(stripePayment.currency)
+        : resolveRegisteredCurrency(record, userRow),
+    registeredAmountPaid: stripePayment?.amount ?? fallbackAmount,
   };
 }
 
