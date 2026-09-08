@@ -10,6 +10,7 @@ import mongoose from 'mongoose';
  */
 let conn = null;
 let clientUserModel = null;
+let clientTrackingRecordModel = null;
 
 export function getClientsTrackingConnection() {
   if (conn) return conn;
@@ -44,4 +45,42 @@ export function getClientUserModel() {
     clientUserModel = c.model('ClientTrackingUser', clientUserSchema, 'users');
   }
   return clientUserModel;
+}
+
+// `strict: false` — read-only. The authoritative schema (ClientModel /
+// 'DashboardTracking') lives in the clients-tracking repo. This is the
+// registration record written when a client pays. Verified against live data
+// (290 rows): `planType` is lowercase (ignite/professional/executive/prime),
+// `amountPaid` is a string that is usually symbol-prefixed ("£79", "$99",
+// "CAD749", "₹46629") but sometimes bare ("579"), the `currency` field is
+// never populated here (currency lives on the matching `users` row instead),
+// and `crmEmail` — the CRM email captured at registration — is our only
+// mapping key (set on ~135/290 rows).
+const clientTrackingRecordSchema = new mongoose.Schema(
+  {
+    name: String,
+    email: String,
+    crmEmail: String,
+    planType: String,
+    planPrice: Number,
+    amountPaid: String,
+    amountPaidDate: String,
+    currency: String,
+  },
+  { timestamps: true, strict: false }
+);
+
+export function getClientTrackingRecordModel() {
+  const c = getClientsTrackingConnection();
+  if (!c) return null;
+  if (!clientTrackingRecordModel) {
+    // ClientModel in the clients-tracking repo: mongoose.model('DashboardTracking', ...)
+    // with no explicit collection name -> collection 'dashboardtrackings'.
+    clientTrackingRecordModel = c.model(
+      'ClientTrackingRecord',
+      clientTrackingRecordSchema,
+      'dashboardtrackings'
+    );
+  }
+  return clientTrackingRecordModel;
 }

@@ -218,6 +218,16 @@ import {
   adminResolveBdaApproval
 } from './Controllers/BdaLeadController.js';
 import { getIncentiveConfig, saveIncentiveConfig } from './Controllers/BdaIncentiveController.js';
+import {
+  searchLeads as claim02SearchLeads,
+  listMyClaims as claim02ListMyClaims,
+  claimLead as claim02ClaimLead,
+  updateOwnClaim as claim02UpdateOwnClaim,
+  adminListAll as claim02AdminListAll,
+  adminSetStatus as claim02AdminSetStatus,
+  adminUpdateClaim as claim02AdminUpdateClaim,
+  adminListBdas as claim02AdminListBdas,
+} from './Controllers/BdaClaim02Controller.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -384,6 +394,18 @@ export default function Routes(app) {
   app.put('/api/bda/update-lead/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), updateLeadDetails);
   app.get('/api/bda/my-leads', requireCrmUser, getMyClaimedLeads);
   app.get('/api/bda/performance', requireCrmUser, getMyBdaPerformance);
+
+  // --- Claim Leads 02 (lightweight parallel claim flow) ---
+  // All under requireCrmUser; admin vs BDA is decided in-controller from
+  // req.crmUser.bdaRole. Mutations still require the claim_leads edit permission.
+  app.get('/api/bda/claim02/search', requireCrmUser, claim02SearchLeads);
+  app.get('/api/bda/claim02/my', requireCrmUser, claim02ListMyClaims);
+  app.get('/api/bda/claim02/bdas', requireCrmUser, claim02AdminListBdas);
+  app.get('/api/bda/claim02/admin/all', requireCrmUser, claim02AdminListAll);
+  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), claim02ClaimLead);
+  app.put('/api/bda/claim02/admin/:id', requireCrmUser, requireCrmEdit('claim_leads'), claim02AdminUpdateClaim);
+  app.post('/api/bda/claim02/admin/:id/approve', requireCrmUser, requireCrmEdit('claim_leads'), claim02AdminSetStatus);
+  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEdit('claim_leads'), claim02UpdateOwnClaim);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
   app.get('/api/crm/admin/clients/claims', requireCrmAdmin, getAllClientsWithClaimInfo);
