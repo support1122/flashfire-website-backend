@@ -10,6 +10,7 @@ const CRM_MODULE_KEYS = [
   'leads',
   'meta_leads',
   'claim_leads',
+  'claim_leads_02',
   'call_leads',
   'meeting_links',
   'bda_admin',
