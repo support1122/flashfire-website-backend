@@ -396,16 +396,17 @@ export default function Routes(app) {
   app.get('/api/bda/performance', requireCrmUser, getMyBdaPerformance);
 
   // --- Claim Leads 02 (lightweight parallel claim flow) ---
-  // All under requireCrmUser; admin vs BDA is decided in-controller from
-  // req.crmUser.bdaRole. Mutations still require the claim_leads edit permission.
+  // Own permission (claim_leads_02), independent of the original Claim Leads
+  // tab. All under requireCrmUser; admin vs BDA is decided in-controller from
+  // req.crmUser.bdaRole. Mutations require the claim_leads_02 edit permission.
   app.get('/api/bda/claim02/search', requireCrmUser, claim02SearchLeads);
   app.get('/api/bda/claim02/my', requireCrmUser, claim02ListMyClaims);
   app.get('/api/bda/claim02/bdas', requireCrmUser, claim02AdminListBdas);
   app.get('/api/bda/claim02/admin/all', requireCrmUser, claim02AdminListAll);
-  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), claim02ClaimLead);
-  app.put('/api/bda/claim02/admin/:id', requireCrmUser, requireCrmEdit('claim_leads'), claim02AdminUpdateClaim);
-  app.post('/api/bda/claim02/admin/:id/approve', requireCrmUser, requireCrmEdit('claim_leads'), claim02AdminSetStatus);
-  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEdit('claim_leads'), claim02UpdateOwnClaim);
+  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02ClaimLead);
+  app.put('/api/bda/claim02/admin/:id', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02AdminUpdateClaim);
+  app.post('/api/bda/claim02/admin/:id/approve', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02AdminSetStatus);
+  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02UpdateOwnClaim);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
   app.get('/api/crm/admin/clients/claims', requireCrmAdmin, getAllClientsWithClaimInfo);
