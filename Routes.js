@@ -200,7 +200,7 @@ import {
 } from './Controllers/CallLeadsController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe, getLoginApprovalStatus } from './Controllers/CrmAuthController.js';
 import { listPendingLoginApprovals, approveLoginApproval, denyLoginApproval } from './Controllers/CrmLoginApprovalController.js';
-import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit, attachCrmUserOptional } from './Middlewares/CrmAuth.js';
+import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit, requireCrmEditLive, attachCrmUserOptional } from './Middlewares/CrmAuth.js';
 import {
   getAvailableLeads,
   getLeadByEmail,
@@ -404,8 +404,8 @@ export default function Routes(app) {
   app.get('/api/bda/claim02/bdas', requireCrmUser, claim02AdminListBdas);
   app.get('/api/bda/claim02/admin/all', requireCrmUser, claim02AdminListAll);
   // Claiming + a BDA editing their own row needs claim_leads_02 edit.
-  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02ClaimLead);
-  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEdit('claim_leads_02'), claim02UpdateOwnClaim);
+  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEditLive('claim_leads_02'), claim02ClaimLead);
+  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEditLive('claim_leads_02'), claim02UpdateOwnClaim);
   // Admin-only actions (approve/deny, edit any row) are gated in-controller by
   // bdaRole === 'admin' — an admin does not need the claim_leads_02 edit grant.
   app.put('/api/bda/claim02/admin/:id', requireCrmUser, claim02AdminUpdateClaim);
