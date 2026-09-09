@@ -200,7 +200,7 @@ import {
 } from './Controllers/CallLeadsController.js';
 import { requestCrmOtp, verifyCrmOtp, crmMe, getLoginApprovalStatus } from './Controllers/CrmAuthController.js';
 import { listPendingLoginApprovals, approveLoginApproval, denyLoginApproval } from './Controllers/CrmLoginApprovalController.js';
-import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit, attachCrmUserOptional } from './Middlewares/CrmAuth.js';
+import { requireCrmAdmin, requireCrmUser, requireCrmPermission, requireCrmAnyPermission, requireCrmEdit, requireCrmEditLive, attachCrmUserOptional } from './Middlewares/CrmAuth.js';
 import {
   getAvailableLeads,
   getLeadByEmail,
@@ -218,6 +218,16 @@ import {
   adminResolveBdaApproval
 } from './Controllers/BdaLeadController.js';
 import { getIncentiveConfig, saveIncentiveConfig } from './Controllers/BdaIncentiveController.js';
+import {
+  searchLeads as claim02SearchLeads,
+  listMyClaims as claim02ListMyClaims,
+  claimLead as claim02ClaimLead,
+  updateOwnClaim as claim02UpdateOwnClaim,
+  adminListAll as claim02AdminListAll,
+  adminSetStatus as claim02AdminSetStatus,
+  adminUpdateClaim as claim02AdminUpdateClaim,
+  adminListBdas as claim02AdminListBdas,
+} from './Controllers/BdaClaim02Controller.js';
 // import {GetMeetDetails} from "./Utils/GetMeetDetails.js";
 // import Calendly_Meet_Integration from "./Controllers/Calendly_Meet_Integration.js";
 
@@ -384,6 +394,22 @@ export default function Routes(app) {
   app.put('/api/bda/update-lead/:bookingId', requireCrmUser, requireCrmEdit('claim_leads'), updateLeadDetails);
   app.get('/api/bda/my-leads', requireCrmUser, getMyClaimedLeads);
   app.get('/api/bda/performance', requireCrmUser, getMyBdaPerformance);
+
+  // --- Claim Leads 02 (lightweight parallel claim flow) ---
+  // Own permission (claim_leads_02), independent of the original Claim Leads
+  // tab. All under requireCrmUser; admin vs BDA is decided in-controller from
+  // req.crmUser.bdaRole. Mutations require the claim_leads_02 edit permission.
+  app.get('/api/bda/claim02/search', requireCrmUser, claim02SearchLeads);
+  app.get('/api/bda/claim02/my', requireCrmUser, claim02ListMyClaims);
+  app.get('/api/bda/claim02/bdas', requireCrmUser, claim02AdminListBdas);
+  app.get('/api/bda/claim02/admin/all', requireCrmUser, claim02AdminListAll);
+  // Claiming + a BDA editing their own row needs claim_leads_02 edit.
+  app.post('/api/bda/claim02/claim/:bookingId', requireCrmUser, requireCrmEditLive('claim_leads_02'), claim02ClaimLead);
+  app.put('/api/bda/claim02/:id', requireCrmUser, requireCrmEditLive('claim_leads_02'), claim02UpdateOwnClaim);
+  // Admin-only actions (approve/deny, edit any row) are gated in-controller by
+  // bdaRole === 'admin' — an admin does not need the claim_leads_02 edit grant.
+  app.put('/api/bda/claim02/admin/:id', requireCrmUser, claim02AdminUpdateClaim);
+  app.post('/api/bda/claim02/admin/:id/approve', requireCrmUser, claim02AdminSetStatus);
   app.get('/api/bda/analysis', requireCrmAdmin, getBdaAnalysis);
   app.get('/api/bda/leads/:email', requireCrmAdmin, getBdaLeadsByEmail);
   app.get('/api/crm/admin/clients/claims', requireCrmAdmin, getAllClientsWithClaimInfo);

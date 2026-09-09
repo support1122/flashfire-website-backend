@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import { CrmSessionModel } from '../Schema_Models/CrmSessionModel.js';
+import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 
 export function getCrmJwtSecret() {
   // Prefer a dedicated secret; fall back to existing long-lived secret in this repo if present.
@@ -121,6 +122,41 @@ export function requireCrmEdit(module) {
       return res.status(403).json({ success: false, error: 'Read-only access — edit permission required' });
     }
     return next();
+  };
+}
+
+/**
+ * Like requireCrmEdit, but if the JWT's permission list does not carry the
+ * grant, fall back to the current CrmUser record in the DB. This lets a
+ * freshly-granted permission take effect without the user logging out and
+ * back in (the JWT is a snapshot from login time). Admins (bdaRole === 'admin')
+ * pass automatically. One indexed findOne per request, only on the slow path.
+ */
+export function requireCrmEditLive(module) {
+  const editKey = `${module}_edit`;
+  return async (req, res, next) => {
+    if (req.crmUser?.bdaRole === 'admin') return next();
+
+    const jwtPerms = req.crmUser?.permissions;
+    if (Array.isArray(jwtPerms) && jwtPerms.includes(editKey)) return next();
+
+    try {
+      const email = req.crmUser?.email;
+      if (email) {
+        const user = await CrmUserModel.findOne({ email: String(email).toLowerCase().trim() })
+          .select('permissions isActive')
+          .lean();
+        if (user && user.isActive !== false && Array.isArray(user.permissions) && user.permissions.includes(editKey)) {
+          // Refresh the request's view of permissions for any downstream check.
+          req.crmUser.permissions = user.permissions;
+          return next();
+        }
+      }
+    } catch (e) {
+      console.error('[requireCrmEditLive] lookup failed:', e?.message || e);
+    }
+
+    return res.status(403).json({ success: false, error: 'Read-only access — edit permission required' });
   };
 }
 
