@@ -1,8 +1,12 @@
 import { DateTime, IANAZone } from 'luxon';
 import { getRescheduleLinkForBooking } from './CalendlyAPIHelper.js';
 import { normalizeTimezoneLabel, displayZoneFor, FORCE_EASTERN_DISPLAY, EASTERN_DISPLAY_LABEL } from './MeetingReminderUtils.js';
+import { PRODUCT_DEMO_LINK } from '../config/watiTemplates.js';
+
+export { PRODUCT_DEMO_LINK };
 
 const DEFAULT_SCHEDULING_LINK = 'https://calendly.com/feedback-flashfire/15min';
+
 
 // Fixed base of the "Reschedule" dynamic URL button on the
 // flashfire_appointment_reminder_b template. The button URL is
@@ -226,6 +230,15 @@ async function metaSchedulingParams({ booking, step }) {
 }
 
 /**
+ * The *_demo variants of the meta templates: identical to the originals plus
+ * {{3}} = the product demo video link.
+ */
+async function metaSchedulingParamsWithDemo(ctx) {
+  const params = await metaSchedulingParams(ctx);
+  return [...params, ctx?.step?.templateConfig?.demoLink || PRODUCT_DEMO_LINK];
+}
+
+/**
  * Template parameter builder registry.
  * Each builder takes { booking, step, executedAt } and returns an array of parameter values.
  */
@@ -280,6 +293,16 @@ const builders = {
   meta_2: metaSchedulingParams,
   meta_31: metaSchedulingParams,
   meta_41: metaSchedulingParams,
+
+  // Same copy plus "You can watch the Flashfire product demo video here: {{3}}".
+  // Which of these a workflow step fires is chosen in the CRM, not here.
+  meta_1_demo: metaSchedulingParamsWithDemo,
+  meta_2_demo: metaSchedulingParamsWithDemo,
+  meta_31_demo: metaSchedulingParamsWithDemo,
+  // meta_2_demo came back from Meta as MARKETING, which marketing opt-outs drop.
+  // meta_2_demo_u is the reworded UTILITY replacement and is what the workflow uses.
+  meta_2_demo_u: metaSchedulingParamsWithDemo,
+  meta_41_demo: metaSchedulingParamsWithDemo,
 
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
@@ -366,8 +389,40 @@ const builders = {
       calendlyButtonTail(rescheduleLink), // {{6}} → "Reschedule" button URL tail
       cancelTail                          // {{7}} → "Cancel" button URL tail
     ];
+  },
+
+  // Adds the demo video line to the body as {{6}}, which pushes both button
+  // variables along: {{7}} = "Reschedule" tail, {{8}} = "Cancel" tail.
+  flashfire_appointment_reminder_demo: async ({ booking, step }) => {
+    if (!booking.scheduledEventStartTime) {
+      throw new Error('Meeting date/time not available for flashfire_appointment_reminder_demo template');
+    }
+
+    const { meetingDateFormatted, meetingTimeWithTimezone } = buildMeetingTimeParams(booking);
+    const meetingLink = booking.calendlyMeetLink || booking.googleMeetUrl || booking.meetingVideoUrl || 'Not Provided';
+    const rescheduleLink = await resolveRescheduleLink(booking);
+    const cancelTail = calendlyCancelTail(booking.calendlyCancelLink, rescheduleLink);
+
+    if (!cancelTail) {
+      throw new Error('No cancel link available for flashfire_appointment_reminder_demo template');
+    }
+
+    return [
+      booking.clientName || 'Valued Client',
+      meetingDateFormatted,
+      meetingTimeWithTimezone,
+      meetingLink,
+      rescheduleLink,
+      step?.templateConfig?.demoLink || PRODUCT_DEMO_LINK, // {{6}} → demo video
+      calendlyButtonTail(rescheduleLink),                  // {{7}} → "Reschedule" tail
+      cancelTail                                           // {{8}} → "Cancel" tail
+    ];
   }
 };
+
+// The booking confirmation takes the identical 8 parameters as the reminder; only the
+// template differs (no "I'll Join" quick reply on the confirmation).
+builders.flashfire_appointment_booked_demo = builders.flashfire_appointment_reminder_demo;
 
 /**
  * Build template parameters for a given template name and booking context.

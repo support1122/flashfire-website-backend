@@ -177,3 +177,127 @@ describe('normalizeTimezoneLabel', () => {
     assert.equal(normalizeTimezoneLabel(''), '');
   });
 });
+
+describe('product demo link templates', () => {
+  const b = (extra = {}) => ({
+    clientName: 'Test Client',
+    scheduledEventStartTime: START,
+    scheduledEventEndTime: END,
+    inviteeTimezone: 'America/New_York',
+    calendlyMeetLink: 'https://meet.google.com/abc-defg-hij',
+    calendlyRescheduleLink: 'https://calendly.com/reschedulings/8e172654',
+    ...extra,
+  });
+
+  it('puts the demo link at {{6}} and pushes the buttons to {{7}} and {{8}}', async () => {
+    const p = await buildTemplateParameters('flashfire_appointment_reminder_demo', { booking: b() });
+    assert.equal(p.length, 8);
+    assert.equal(p[5], 'https://www.flashfirejobs.com/product-demo');
+    assert.equal(p[6], 'reschedulings/8e172654');
+    assert.equal(p[7], 'cancellations/8e172654');
+  });
+
+  it('keeps the first five parameters identical to the non-demo template', async () => {
+    const withDemo = await buildTemplateParameters('flashfire_appointment_reminder_demo', { booking: b() });
+    const without = await buildTemplateParameters('flashfire_appointment_reminder_rc', { booking: b() });
+    assert.deepEqual(withDemo.slice(0, 5), without.slice(0, 5));
+  });
+
+  it('still refuses to build without a cancel target', async () => {
+    await assert.rejects(
+      () => buildTemplateParameters('flashfire_appointment_reminder_demo', {
+        booking: b({ calendlyRescheduleLink: 'https://calendly.com/feedback-flashfire/15min' }),
+      }),
+      /No cancel link available/
+    );
+  });
+
+  it('adds the demo link as {{3}} on the meta_*_demo templates', async () => {
+    for (const name of ['meta_1_demo', 'meta_2_demo', 'meta_31_demo']) {
+      const p = await buildTemplateParameters(name, { booking: b(), step: {} });
+      assert.equal(p.length, 3, `${name} returned ${p.length} params`);
+      assert.equal(p[0], 'Test Client');
+      assert.equal(p[2], 'https://www.flashfirejobs.com/product-demo');
+    }
+  });
+
+  it('leaves the original meta templates at two parameters', async () => {
+    for (const name of ['meta_1', 'meta_2', 'meta_31', 'meta_41']) {
+      const p = await buildTemplateParameters(name, { booking: b(), step: {} });
+      assert.equal(p.length, 2, `${name} returned ${p.length} params`);
+    }
+  });
+
+  it('lets a workflow step override the demo link', async () => {
+    const p = await buildTemplateParameters('meta_1_demo', {
+      booking: b(),
+      step: { templateConfig: { demoLink: 'https://example.com/other-demo' } },
+    });
+    assert.equal(p[2], 'https://example.com/other-demo');
+  });
+});
+
+describe('meta_2_demo_u (UTILITY replacement)', () => {
+  it('takes the same three parameters as the other demo variants', async () => {
+    const p = await buildTemplateParameters('meta_2_demo_u', {
+      booking: { clientName: 'Test Client' },
+      step: {},
+    });
+    assert.equal(p.length, 3);
+    assert.equal(p[0], 'Test Client');
+    assert.equal(p[2], 'https://www.flashfirejobs.com/product-demo');
+  });
+
+  it('is registered, not falling through to the generic fallback', async () => {
+    // The generic fallback returns only the client name, which would send 1 param to
+    // a 3-param template. Guard against the builder being dropped.
+    const p = await buildTemplateParameters('meta_2_demo_u', {
+      booking: { clientName: 'Test Client' },
+      step: { templateConfig: { schedulingLink: 'https://calendly.com/x' } },
+    });
+    assert.equal(p[1], 'https://calendly.com/x');
+    assert.equal(p.length, 3);
+  });
+});
+
+describe('booking confirmation and meta_41 demo variants', () => {
+  const bk = (extra = {}) => ({
+    clientName: 'Test Client',
+    scheduledEventStartTime: START,
+    scheduledEventEndTime: END,
+    inviteeTimezone: 'America/New_York',
+    calendlyMeetLink: 'https://meet.google.com/abc-defg-hij',
+    calendlyRescheduleLink: 'https://calendly.com/reschedulings/8e172654',
+    ...extra,
+  });
+
+  it('sends the booking confirmation the same 8 params as a reminder', async () => {
+    const booked = await buildTemplateParameters('flashfire_appointment_booked_demo', { booking: bk() });
+    const reminder = await buildTemplateParameters('flashfire_appointment_reminder_demo', { booking: bk() });
+    assert.equal(booked.length, 8);
+    assert.deepEqual(booked, reminder);
+    assert.equal(booked[5], 'https://www.flashfirejobs.com/product-demo');
+    assert.equal(booked[6], 'reschedulings/8e172654');
+    assert.equal(booked[7], 'cancellations/8e172654');
+  });
+
+  it('refuses the booking confirmation without a cancel target', async () => {
+    await assert.rejects(
+      () => buildTemplateParameters('flashfire_appointment_booked_demo', {
+        booking: bk({ calendlyRescheduleLink: 'https://calendly.com/feedback-flashfire/15min' }),
+      }),
+      /No cancel link available/
+    );
+  });
+
+  it('adds the demo link as {{3}} on meta_41_demo', async () => {
+    const p = await buildTemplateParameters('meta_41_demo', { booking: bk(), step: {} });
+    assert.equal(p.length, 3);
+    assert.equal(p[2], 'https://www.flashfirejobs.com/product-demo');
+  });
+
+  it('leaves the original meta_41 at two parameters', async () => {
+    const p = await buildTemplateParameters('meta_41', { booking: bk(), step: {} });
+    assert.equal(p.length, 2);
+  });
+});

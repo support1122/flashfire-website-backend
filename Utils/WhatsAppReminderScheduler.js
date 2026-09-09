@@ -18,6 +18,7 @@ import {
   EASTERN_DISPLAY_LABEL,
 } from './MeetingReminderUtils.js';
 import { calendlyButtonTail, calendlyCancelTail } from './TemplateParameterBuilder.js';
+import { WatiTemplates, PRODUCT_DEMO_LINK } from '../config/watiTemplates.js';
 
 dotenv.config();
 
@@ -33,6 +34,17 @@ const DISCORD_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
 
 /** Schedule 5-min WA reminder if meeting is at least this many minutes away (allows small clock drift vs strict >5). */
 const FIVE_MIN_SCHEDULE_EPS_MIN = Number(process.env.WA_FIVE_MIN_SCHEDULE_EPS_MIN) || 0.25;
+/**
+ * flashfire_appointment_reminder_demo carries the product demo line at {{6}}, which
+ * pushes the Reschedule/Cancel button variables to {{7}}/{{8}}. APPROVED by Meta, so
+ * it is the default for the 3h / 1h / 5min reminders.
+ *
+ * Set WA_TEMPLATE_WITH_DEMO=false to fall back to flashfire_appointment_reminder_rc
+ * (same message without the demo line) without a code change.
+ */
+const USE_DEMO_TEMPLATE =
+  String(process.env.WA_TEMPLATE_WITH_DEMO ?? 'true').toLowerCase() !== 'false';
+
 const DEFAULT_RESCHEDULE_LINK = 'https://www.google.com/url?q=https%3A%2F%2Fcalendly.com%2Freschedulings%2F8e172654-1dfa-49ae-944e-e260067a0f1f&sa=D&source=calendar&usd=2&usg=AOvVaw0_ea9AmvIBNwPqLl0HSU0g'; // Default reschedule link
 
 let isRunning = false;
@@ -780,11 +792,19 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     const isImmediate = reminderType === 'immediate' || scheduledReminder.metadata?.isImmediateReminder === true;
     const useButtons = !isImmediate;
     const cancelTail = useButtons ? calendlyCancelTail(cancelLink, rescheduleLink) : null;
-    const templateName = !useButtons
-      ? 'flashfire_appointment_reminder'
-      : cancelTail
-        ? 'flashfire_appointment_reminder_rc'
-        : 'flashfire_appointment_reminder_b';
+    // The booking confirmation now carries the demo line and the two action buttons
+    // too, so it needs the same 8 parameters as a reminder. Both fall back to a
+    // buttonless / cancel-less template when no genuine cancel target can be derived,
+    // so a Cancel button never points somewhere wrong.
+    const cancelTailAny = calendlyCancelTail(cancelLink, rescheduleLink);
+    const useDemo = USE_DEMO_TEMPLATE && !!cancelTailAny;
+    const templateName = isImmediate
+      ? (useDemo ? WatiTemplates.bookingConfirmation : WatiTemplates.bookingConfirmationPlain)
+      : useDemo
+        ? WatiTemplates.reminderWithDemo
+        : cancelTail
+          ? WatiTemplates.reminderWithCancel
+          : WatiTemplates.reminderRescheduleOnly;
 
     // Format meeting time with timezone: "4pm - 4:15pm ET" or "4pm - 4:15pm PST"
     // If meetingTime is missing/Unknown, use meetingStartISO or scheduledFor + metadata offset
@@ -870,8 +890,13 @@ export async function sendWhatsAppMessage(scheduledReminder) {
       finalRescheduleLink // {{5}}
     ];
     // Reminder templates carry dynamic URL buttons; the immediate one does not.
-    // {{6}} = "Reschedule" tail, {{7}} = "Cancel" tail (only on _rc).
-    if (useButtons) {
+    // On _rc:   {{6}} = "Reschedule" tail, {{7}} = "Cancel" tail.
+    // On _demo: {{6}} = demo video link, which pushes the buttons to {{7}}/{{8}}.
+    if (useDemo) {
+      parameters.push(PRODUCT_DEMO_LINK);                       // {{6}}
+      parameters.push(calendlyButtonTail(finalRescheduleLink)); // {{7}}
+      parameters.push(cancelTailAny);                           // {{8}}
+    } else if (useButtons) {
       parameters.push(calendlyButtonTail(finalRescheduleLink)); // {{6}}
       if (cancelTail) parameters.push(cancelTail);              // {{7}}
     }
@@ -889,7 +914,8 @@ export async function sendWhatsAppMessage(scheduledReminder) {
         reminderId,
         phoneNumber,
         templateName,
-        hasCancelButton: !!cancelTail,
+        hasCancelButton: !!(useDemo || cancelTail),
+        hasDemoLink: !!useDemo,
         watiResponse: result.data
       });
 

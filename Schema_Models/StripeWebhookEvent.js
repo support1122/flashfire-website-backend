@@ -17,7 +17,9 @@ import mongoose from 'mongoose';
 const StripeWebhookEventSchema = new mongoose.Schema(
   {
     /** Stripe's event id (evt_…). Unique — a redelivery bumps deliveryCount instead of inserting again. */
-    eventId: { type: String, default: null, index: true },
+    // No `index: true` here; the unique+sparse index is declared below and
+    // mongoose warns about the duplicate definition otherwise.
+    eventId: { type: String, default: null },
     /** e.g. checkout.session.completed, invoice.paid, charge.refunded. */
     type: { type: String, default: null, index: true },
     apiVersion: { type: String, default: null },
