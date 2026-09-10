@@ -347,19 +347,13 @@ export const handleMetaLeadWebhook = async (req, res) => {
           await CampaignBookingModel.findOneAndUpdate({ bookingId: existingLead.bookingId }, { $set: mergeSet });
           console.log(`Meta lead merged: ${existingLead.bookingId} | ${existingLead.clientEmail} | ${existingLead.bookingStatus} | Form: ${formName}`);
 
-          const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled';
-
-          if (!hasActiveUpcomingMeeting) {
-            try {
-              const wfResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
-              if (wfResult.success && wfResult.triggered) {
-                console.log(`Not-scheduled workflows re-triggered for returning meta lead ${existingLead.bookingId}`);
-              }
-            } catch (wfError) {
-              console.error(`Failed to re-trigger workflows for returning meta lead ${existingLead.bookingId}:`, wfError.message);
+          try {
+            const wfResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
+            if (wfResult.success && wfResult.triggered) {
+              console.log(`Not-scheduled workflows re-triggered for returning meta lead ${existingLead.bookingId} (status: ${existingLead.bookingStatus})`);
             }
-          } else {
-            console.log(`Skipped workflow re-trigger for ${existingLead.bookingId} — active upcoming meeting scheduled`);
+          } catch (wfError) {
+            console.error(`Failed to re-trigger workflows for returning meta lead ${existingLead.bookingId}:`, wfError.message);
           }
         } else {
           // sanitizeMetaField drops Meta permission-error text so it can never be stored
@@ -720,20 +714,13 @@ export const upsertMetaLeadFromSheet = async (req, res) => {
         }
 
         let workflowResult = null;
-        const hasActiveUpcomingMeeting = existingLead.bookingStatus === 'scheduled'
-          && existingLead.scheduledEventStartTime
-          && new Date(existingLead.scheduledEventStartTime) > now;
-        if (!hasActiveUpcomingMeeting) {
-          try {
-            workflowResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
-            if (workflowResult.success && workflowResult.triggered) {
-              console.log(`meta-leads-from-sheet: workflows re-triggered for returning lead ${existingLead.bookingId}`);
-            }
-          } catch (wfError) {
-            console.error(`meta-leads-from-sheet: workflow re-trigger failed for ${existingLead.bookingId}:`, wfError.message);
+        try {
+          workflowResult = await triggerWorkflow(existingLead.bookingId, 'not-scheduled');
+          if (workflowResult.success && workflowResult.triggered) {
+            console.log(`meta-leads-from-sheet: workflows re-triggered for returning lead ${existingLead.bookingId} (status: ${existingLead.bookingStatus})`);
           }
-        } else {
-          console.log(`meta-leads-from-sheet: skipped re-trigger for ${existingLead.bookingId} — active scheduled meeting`);
+        } catch (wfError) {
+          console.error(`meta-leads-from-sheet: workflow re-trigger failed for ${existingLead.bookingId}:`, wfError.message);
         }
 
         return res.status(200).json({
