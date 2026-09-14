@@ -8,11 +8,12 @@ import mongoose from 'mongoose';
  * Set CLIENTS_TRACKING_MONGODB_URI in the backend .env to enable it.
  * When unset, paid-client analytics are simply disabled (no crash).
  */
+let connPromise = null;
 let conn = null;
 let clientUserModel = null;
 let clientTrackingRecordModel = null;
 
-export function getClientsTrackingConnection() {
+export async function getClientsTrackingConnection() {
   if (conn) return conn;
   const uri = process.env.CLIENTS_TRACKING_MONGODB_URI;
   if (!uri) {
@@ -21,10 +22,16 @@ export function getClientsTrackingConnection() {
     );
     return null;
   }
-  conn = mongoose.createConnection(uri);
-  conn.on('connected', () => console.log('✅ [ClientsTrackingDB] connected to clients-tracking DB'));
-  conn.on('error', (e) => console.error('[ClientsTrackingDB] connection error:', e.message));
-  return conn;
+  if (!connPromise) {
+    const c = mongoose.createConnection(uri);
+    c.on('error', (e) => console.error('[ClientsTrackingDB] connection error:', e.message));
+    connPromise = c.asPromise().then((ready) => {
+      conn = ready;
+      console.log('✅ [ClientsTrackingDB] connected to clients-tracking DB');
+      return ready;
+    });
+  }
+  return connPromise;
 }
 
 // `strict: false` — we only read; the real schema lives in the clients-tracking repo.
@@ -37,32 +44,20 @@ const clientUserSchema = new mongoose.Schema(
   { timestamps: true, strict: false }
 );
 
-export function getClientUserModel() {
-  const c = getClientsTrackingConnection();
+export async function getClientUserModel() {
+  const c = await getClientsTrackingConnection();
   if (!c) return null;
   if (!clientUserModel) {
-    // collection name is `users` in the clients-tracking DB
     clientUserModel = c.model('ClientTrackingUser', clientUserSchema, 'users');
   }
   return clientUserModel;
 }
 
-// `strict: false` — read-only. The authoritative schema (ClientModel /
-// 'DashboardTracking') lives in the clients-tracking repo. This is the
-// registration record written when a client pays. Verified against live data
-// (290 rows): `planType` is lowercase (ignite/professional/executive/prime),
-// `amountPaid` is a string that is usually symbol-prefixed ("£79", "$99",
-// "CAD749", "₹46629") but sometimes bare ("579"), the `currency` field is
-// never populated here (currency lives on the matching `users` row instead),
-// and `crmEmail` — the CRM email captured at registration — is our only
-// mapping key (set on ~135/290 rows).
 const clientTrackingRecordSchema = new mongoose.Schema(
   {
     name: String,
     email: String,
     crmEmail: String,
-    // "Payment Email" from the registration form — the address the client
-    // actually paid Stripe with (may differ from email / crmEmail).
     paymentEmail: String,
     planType: String,
     planPrice: Number,
@@ -73,12 +68,10 @@ const clientTrackingRecordSchema = new mongoose.Schema(
   { timestamps: true, strict: false }
 );
 
-export function getClientTrackingRecordModel() {
-  const c = getClientsTrackingConnection();
+export async function getClientTrackingRecordModel() {
+  const c = await getClientsTrackingConnection();
   if (!c) return null;
   if (!clientTrackingRecordModel) {
-    // ClientModel in the clients-tracking repo: mongoose.model('DashboardTracking', ...)
-    // with no explicit collection name -> collection 'dashboardtrackings'.
     clientTrackingRecordModel = c.model(
       'ClientTrackingRecord',
       clientTrackingRecordSchema,
