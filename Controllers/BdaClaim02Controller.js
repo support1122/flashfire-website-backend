@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { BdaClaim02Model } from '../Schema_Models/BdaClaim02.js';
 import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
+import { ManualPaymentModel } from '../Schema_Models/ManualPaymentModel.js';
 import {
   getClientTrackingRecordModel,
   getClientUserModel,
@@ -161,6 +162,26 @@ async function fetchStripePaymentByEmail(paymentEmail) {
   }
 }
 
+/**
+ * Most recent manual INR payment for an email → { amount, currency: 'INR' }.
+ * Used as a second fallback when Stripe has no charge (UPI/bank transfers).
+ */
+async function fetchManualPaymentByEmail(email) {
+  if (!email) return null;
+  try {
+    const record = await ManualPaymentModel.findOne({
+      customerEmail: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    })
+      .sort({ date: -1 })
+      .lean();
+    if (!record || !record.amount) return null;
+    return { amount: record.amount, currency: (record.currency || 'INR').toUpperCase() };
+  } catch (e) {
+    console.warn('[claim02] manual payment lookup failed for', email, '-', e?.message);
+    return null;
+  }
+}
+
 /** Look up the clients-tracking registration snapshot for a CRM email. */
 async function fetchRegisteredSnapshot(crmEmail) {
   const empty = { registeredPlan: '', registeredCurrency: null, registeredAmountPaid: null };
@@ -185,20 +206,26 @@ async function fetchRegisteredSnapshot(crmEmail) {
 
   // Payment Received (Stripe): the actual Stripe charge for this client's
   // `paymentEmail` (the "Payment Email" on the registration form), taking the
-  // most recent succeeded charge. Falls back to the hand-typed
-  // dashboardtrackings.amountPaid, then planPrice, when there is no Stripe
-  // match (or Stripe is unconfigured).
-  const stripePayment = await fetchStripePaymentByEmail(record.paymentEmail);
+  // most recent succeeded charge.
+  // Fallback 1: manualpayments collection (INR/UPI payments added manually).
+  // Fallback 2: hand-typed dashboardtrackings.amountPaid, then planPrice.
+  const paymentEmail = record.paymentEmail || crmEmail;
+  const [stripePayment, manualPayment] = await Promise.all([
+    fetchStripePaymentByEmail(paymentEmail),
+    fetchManualPaymentByEmail(paymentEmail),
+  ]);
+
+  const payment = stripePayment ?? manualPayment;
   const fallbackAmount =
     parseAmount(record.amountPaid) ?? (record.planPrice > 0 ? record.planPrice : null);
 
   return {
     registeredPlan: toPlanKey(record.planType),
     registeredCurrency:
-      stripePayment?.currency
-        ? normalizeCurrency(stripePayment.currency)
+      payment?.currency
+        ? normalizeCurrency(payment.currency)
         : resolveRegisteredCurrency(record, userRow),
-    registeredAmountPaid: stripePayment?.amount ?? fallbackAmount,
+    registeredAmountPaid: payment?.amount ?? fallbackAmount,
   };
 }
 
