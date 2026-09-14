@@ -457,6 +457,36 @@ export const adminListAll = async (req, res) => {
     if (status) filter.status = status;
 
     const rows = await BdaClaim02Model.find(filter).sort({ createdAt: -1 });
+
+    // For any row where the registered snapshot is missing (claim was made before
+    // the client had a dashboard record), re-fetch it now and persist it so the
+    // admin always sees up-to-date data on page load.
+    const needsRefresh = rows.filter((r) => !r.registeredPlan);
+    if (needsRefresh.length > 0) {
+      const configByKey = await buildIncentiveConfig();
+      await Promise.all(
+        needsRefresh.map(async (row) => {
+          try {
+            const snapshot = await fetchRegisteredSnapshot(row.crmEmail);
+            if (!snapshot.registeredPlan) return; // still nothing — skip
+            row.registeredPlan = snapshot.registeredPlan;
+            row.registeredCurrency = snapshot.registeredCurrency;
+            row.registeredAmountPaid = snapshot.registeredAmountPaid;
+            // Recompute incentive now that we have the registered plan
+            row.incentiveInr = incentiveForLine(
+              configByKey,
+              row.registeredPlan,
+              row.bdaAmountCollected,
+              row.bdaCurrency
+            );
+            await row.save();
+          } catch (e) {
+            console.warn('[claim02] snapshot refresh failed for', row.crmEmail, '-', e?.message);
+          }
+        })
+      );
+    }
+
     return res.status(200).json({
       success: true,
       data: rows.map((r) => serialize(r, { admin: true })),
