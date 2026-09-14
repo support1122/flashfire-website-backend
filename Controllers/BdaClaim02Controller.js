@@ -167,7 +167,7 @@ async function fetchRegisteredSnapshot(crmEmail) {
   const email = String(crmEmail || '').toLowerCase().trim();
   if (!email) return empty;
 
-  const RecordModel = getClientTrackingRecordModel();
+  const RecordModel = await getClientTrackingRecordModel();
   if (!RecordModel) return empty;
 
   // Match ONLY on crmEmail — the CRM email captured at registration. We do not
@@ -178,7 +178,7 @@ async function fetchRegisteredSnapshot(crmEmail) {
   if (!record) return empty;
 
   let userRow = null;
-  const UserModel = getClientUserModel();
+  const UserModel = await getClientUserModel();
   if (UserModel && record.email) {
     userRow = await UserModel.findOne({ email: String(record.email).toLowerCase().trim() }).lean();
   }
