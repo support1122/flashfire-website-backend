@@ -183,7 +183,7 @@ async function fetchRegisteredSnapshot(crmEmail) {
     userRow = await UserModel.findOne({ email: String(record.email).toLowerCase().trim() }).lean();
   }
 
-  // Registered Amount Paid: the actual Stripe charge for this client's
+  // Payment Received (Stripe): the actual Stripe charge for this client's
   // `paymentEmail` (the "Payment Email" on the registration form), taking the
   // most recent succeeded charge. Falls back to the hand-typed
   // dashboardtrackings.amountPaid, then planPrice, when there is no Stripe
