@@ -353,18 +353,34 @@ async function handleCreatedEvent(req, res, payload) {
     scheduledEventStartTime: scheduledStartISO,
     $or: duplicateOr,
   };
-  const existingBooking = await withMongoRetry(() => CampaignBookingModel.findOne(duplicateQuery));
+  let existingBooking = await withMongoRetry(() => CampaignBookingModel.findOne(duplicateQuery));
 
-  // Same invitee URI already stored = Calendly retry or duplicate delivery
+  // Same invitee URI already stored = Calendly retry/duplicate delivery, UNLESS the
+  // stored record is a placeholder from the frontend's early booking capture (fires on
+  // the client-side calendly.event_scheduled event, before this webhook lands, with no
+  // scheduledEventStartTime yet — which is why `duplicateQuery` above, keyed on that
+  // field, misses it and `existingBooking` comes back null even though the row exists).
+  // Treating that placeholder as a real duplicate here meant this webhook returned early
+  // and never wrote the invitee's actual name/email/phone/meeting time into it — silently
+  // dropping the booking (and any reminder/workflow keyed off it) even though the row
+  // existed in the DB the whole time. Route it into the same merge path as any other
+  // existing booking instead of bailing out.
   if (inviteeUri) {
-    const uriAlready = await withMongoRetry(() => CampaignBookingModel.findOne({ calendlyInviteeUri: inviteeUri }).lean());
-    if (uriAlready) {
+    const uriAlready = await withMongoRetry(() => CampaignBookingModel.findOne({ calendlyInviteeUri: inviteeUri }));
+    const isPlaceholder = uriAlready && (
+      uriAlready.clientName === 'Unknown Client' ||
+      /^unknown_\d+@calendly\.placeholder$/.test(uriAlready.clientEmail || '')
+    );
+    if (uriAlready && !isPlaceholder) {
       Logger.warn('Duplicate invitee.created — calendlyInviteeUri already in DB', { inviteeUri });
       return res.status(200).json({
         success: true,
         duplicate: true,
         message: 'Duplicate webhook (invitee uri already processed)',
       });
+    }
+    if (isPlaceholder && !existingBooking) {
+      existingBooking = uriAlready;
     }
   }
 
@@ -373,13 +389,24 @@ async function handleCreatedEvent(req, res, payload) {
     existingBooking &&
     String(inviteeEmail).trim().toLowerCase() === String(existingBooking.clientEmail || '').trim().toLowerCase();
 
-  /** Frontend capture often saves first without calendlyInviteeUri; merge webhook instead of skipping Discord. */
+  const existingIsPlaceholder = !!existingBooking && (
+    existingBooking.clientName === 'Unknown Client' ||
+    /^unknown_\d+@calendly\.placeholder$/.test(existingBooking.clientEmail || '')
+  );
+
+  /**
+   * Frontend capture often saves first without calendlyInviteeUri; merge webhook instead
+   * of skipping Discord. A placeholder capture (no real email yet, so `emailsMatch` can't
+   * apply) matched by calendlyInviteeUri above also belongs here — that's the record this
+   * webhook's real name/email/phone/meeting time need to land in.
+   */
   const mergedFromFrontendCapture =
     !!existingBooking &&
     !!inviteeUri &&
-    !existingBooking.calendlyInviteeUri &&
-    !!emailsMatch &&
-    sameScheduledInstant(existingBooking.scheduledEventStartTime, scheduledStartISO);
+    (
+      existingIsPlaceholder ||
+      (!existingBooking.calendlyInviteeUri && !!emailsMatch && sameScheduledInstant(existingBooking.scheduledEventStartTime, scheduledStartISO))
+    );
 
   /**
    * Cancel + rebook: client cancelled the original event and re-booked the same slot,
@@ -466,6 +493,9 @@ async function handleCreatedEvent(req, res, payload) {
           ipAddress: req.ip || req.connection.remoteAddress,
           clientPhone: inviteePhone || existingBooking.clientPhone,
           clientName: inviteeName || existingBooking.clientName,
+          clientEmail: inviteeEmail
+            ? String(inviteeEmail).trim().toLowerCase()
+            : existingBooking.clientEmail,
           utmSource: utmSource || existingBooking.utmSource,
           utmMedium: utmMedium ?? existingBooking.utmMedium,
           utmCampaign: utmCampaign ?? existingBooking.utmCampaign,
