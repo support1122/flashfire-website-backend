@@ -274,11 +274,8 @@ class WatiService {
         : `${this.apiBaseUrl}/api/v2/sendTemplateMessage`;
       const url = `${basePath}?whatsappNumber=${mobile}`;
 
-      // Normalize channel number: digits only, ensure starts with '91'
-      let digitsOnly = this.channelNumber ? this.channelNumber.replace(/\D/g, '') : '';
-      if (digitsOnly && !digitsOnly.startsWith('91')) {
-        digitsOnly = `91${digitsOnly}`;
-      }
+      // Normalize channel number: digits only (country code must already be included in WATI_CHANNEL_NUMBER)
+      const digitsOnly = this.channelNumber ? this.channelNumber.replace(/\D/g, '') : '';
 
       const formattedParameters = (parameters || []).map((value, idx) => ({
         name: `${idx + 1}`,
