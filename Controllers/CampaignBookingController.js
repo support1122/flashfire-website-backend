@@ -697,11 +697,14 @@ export const getAllBookingsPaginated = async (req, res) => {
     }
 
     if (search) {
-      query.$or = [
-        { clientName: { $regex: search, $options: 'i' } },
-        { clientEmail: { $regex: search, $options: 'i' } },
-        { utmSource: { $regex: search, $options: 'i' } }
-      ];
+      const escapedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (escapedSearch) {
+        query.$or = [
+          { clientName: { $regex: escapedSearch, $options: 'i' } },
+          { clientEmail: { $regex: escapedSearch, $options: 'i' } },
+          { utmSource: { $regex: escapedSearch, $options: 'i' } }
+        ];
+      }
     }
 
     applyLeadsDateRange(query, fromDate, toDate);

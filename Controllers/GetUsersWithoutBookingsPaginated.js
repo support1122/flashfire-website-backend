@@ -24,10 +24,13 @@ export default async function GetUsersWithoutBookingsPaginated(req, res) {
         };
 
         if (search) {
-            userQuery.$or = [
-                { fullName: { $regex: search, $options: 'i' } },
-                { email: { $regex: search, $options: 'i' } }
-            ];
+            const escapedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            if (escapedSearch) {
+                userQuery.$or = [
+                    { fullName: { $regex: escapedSearch, $options: 'i' } },
+                    { email: { $regex: escapedSearch, $options: 'i' } }
+                ];
+            }
         }
 
         if (fromDate || toDate) {
