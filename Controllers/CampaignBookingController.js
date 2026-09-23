@@ -2409,13 +2409,13 @@ export const getLeadsPaginated = async (req, res) => {
       { $count: 'total' }
     ];
 
-    const [countResult] = await CampaignBookingModel.aggregate(countPipeline);
+    const [countResult] = await CampaignBookingModel.aggregate(countPipeline, { allowDiskUse: true });
     const total = countResult?.total || 0;
 
     pipeline.push({ $skip: skip });
     pipeline.push({ $limit: limitNum });
 
-    const bookings = await CampaignBookingModel.aggregate(pipeline);
+    const bookings = await CampaignBookingModel.aggregate(pipeline, { allowDiskUse: true });
 
     // Only do additional grouping if NOT Meta leads (Meta leads already show all records)
     let finalBookings;
@@ -2523,7 +2523,7 @@ export const getLeadsPaginated = async (req, res) => {
       { $group: { _id: { month: '$month', bookingStatus: '$_id.bookingStatus' }, count: { $sum: 1 } } },
       { $sort: { '_id.month': 1 } }
     ];
-    const flatMonthlyStatusResult = await CampaignBookingModel.aggregate(monthlyStatusPipeline);
+    const flatMonthlyStatusResult = await CampaignBookingModel.aggregate(monthlyStatusPipeline, { allowDiskUse: true });
     const monthMap = new Map();
     for (const row of flatMonthlyStatusResult) {
       const { month, bookingStatus } = row._id;
