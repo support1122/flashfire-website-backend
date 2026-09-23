@@ -697,11 +697,20 @@ export const getAllBookingsPaginated = async (req, res) => {
     }
 
     if (search) {
-      const escapedSearch = search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const trimmedSearch = search.trim();
+      const escapedSearch = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       if (escapedSearch) {
+        const digitsOnly = trimmedSearch.replace(/\D/g, '');
+        const phoneOrConditions = [];
+        if (digitsOnly.length >= 4) {
+          const flexPhoneRegex = digitsOnly.split('').join('[\\s().+\\-]*');
+          phoneOrConditions.push({ clientPhone: { $regex: flexPhoneRegex, $options: 'i' } });
+        }
         query.$or = [
           { clientName: { $regex: escapedSearch, $options: 'i' } },
           { clientEmail: { $regex: escapedSearch, $options: 'i' } },
+          { clientPhone: { $regex: escapedSearch, $options: 'i' } },
+          ...phoneOrConditions,
           { utmSource: { $regex: escapedSearch, $options: 'i' } }
         ];
       }
