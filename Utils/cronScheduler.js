@@ -22,6 +22,7 @@ import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
 import { normalizeTimezoneLabel } from './MeetingReminderUtils.js';
 import { scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
 import { DiscordConnect } from './DiscordConnect.js';
+import { startWhatsAppFailureAlertCron } from './WhatsAppFailureAlert.js';
 import { normalizePhoneForReminders, buildCallId } from './MeetingReminderUtils.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
@@ -908,6 +909,9 @@ export function startCronScheduler() {
     scheduled: true,
     timezone: IST_TIMEZONE
   });
+
+  // 9am + 9pm IST: post WhatsApp (WATI) send failures from the last 12h to Discord
+  startWhatsAppFailureAlertCron();
 
   // NOTE: the 4am IST call summary lives in index.js (sendCallLeadsDailySummary).
   // The shift-window duplicate that used to be scheduled here was removed — it ran at the
