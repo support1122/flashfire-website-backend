@@ -53,6 +53,26 @@ async function sendAbsentDiscord(message) {
   await DiscordConnect(url, message, false);
 }
 
+/**
+ * Move a client-clock timestamp onto the server clock. The extension stamps
+ * each request with `clientNow` (its own Date.now() at send time); the gap to
+ * the server's now is the client's clock skew. Joins/leaves are measured on the
+ * BDA's machine, so without this a PC running 2 minutes fast recorded every
+ * join 2 minutes early. Returns the original value when no usable clientNow is
+ * sent (older builds) or the skew is negligible / implausible.
+ */
+const MIN_SKEW_MS = 5 * 1000;
+const MAX_SKEW_MS = 24 * 60 * 60 * 1000;
+function toServerClock(value, clientNow) {
+  if (value == null || value === '') return value;
+  const t = new Date(value).getTime();
+  const c = new Date(clientNow).getTime();
+  if (!Number.isFinite(t) || !Number.isFinite(c)) return value;
+  const skew = Date.now() - c;
+  if (Math.abs(skew) < MIN_SKEW_MS || Math.abs(skew) > MAX_SKEW_MS) return value;
+  return new Date(t + skew).toISOString();
+}
+
 // Simple in-memory rate limiter
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW = 60 * 60 * 1000; // 1 hour
@@ -138,6 +158,20 @@ function bdaDisplayNameFromUser(user) {
 function assertBookingClaimedBy(booking, bdaEmail) {
   const claimed = booking?.claimedBy?.email;
   return claimed && normalizeEmail(claimed) === normalizeEmail(bdaEmail);
+}
+
+/**
+ * True when the booking belongs to this BDA: the Calendly round-robin host
+ * (how ~all meetings are assigned) or a manual CRM claim. Every BDA's extension
+ * receives every meeting, so absence reminders/marks must be gated on this —
+ * otherwise each BDA gets reminded, and marked absent, for colleagues' meetings.
+ */
+function isBookingAssignedTo(booking, bdaEmail) {
+  const me = normalizeEmail(bdaEmail);
+  if (!me) return false;
+  return [booking?.calendlyHost?.email, booking?.claimedBy?.email]
+    .filter(Boolean)
+    .some((e) => normalizeEmail(e) === me);
 }
 
 // ==================== Meet link + session close helpers (join/leave/end) ====================
@@ -761,8 +795,16 @@ export async function getMyMeetings(req, res) {
     }
 
     const ids = bookings.map((b) => b.bookingId);
+    // Only the requesting BDA's own rows. The extension and panel treat
+    // `attendance` as "has MY attendance been recorded": returning another BDA's
+    // row (e.g. a colleague's absent mark) made the extension stop tracking the
+    // meeting, so the assigned BDA's real join was never recorded.
+    // 'unmarked' rows are server alert artifacts (no response yet), not a
+    // recorded attendance, so they must not block auto-join or Mark Present.
     const attendanceRecords = await BdaAttendanceModel.find({
       bookingId: { $in: ids },
+      bdaEmail: emailNorm,
+      status: { $ne: 'unmarked' },
     }).lean();
 
     const attendanceByBooking = Object.fromEntries(
@@ -807,6 +849,7 @@ export async function getMyMeetings(req, res) {
         calendlyHost: b.calendlyHost && (b.calendlyHost.name || b.calendlyHost.email)
           ? { name: b.calendlyHost.name, email: b.calendlyHost.email }
           : null,
+        assignedToMe: isBookingAssignedTo(b, emailNorm),
         attendance: attendanceByBooking[b.bookingId] || null,
       };
       if (start && start >= now) {
@@ -836,7 +879,8 @@ export async function reportJoin(req, res) {
   try {
     const { email, name } = req.bdaUser;
     const emailNorm = normalizeEmail(email);
-    const { bookingId, meetLink, joinedAt } = req.body;
+    const { bookingId, meetLink, clientNow } = req.body;
+    const joinedAt = toServerClock(req.body.joinedAt, clientNow);
 
     if (!bookingId) {
       return res.status(400).json({ success: false, error: 'bookingId is required' });
@@ -916,6 +960,8 @@ export async function reportJoin(req, res) {
     const joinDate = joinedAt ? new Date(joinedAt) : new Date();
     let doc = await BdaAttendanceModel.findOne({ bookingId, bdaEmail: emailNorm });
     let notifyJoin = false;
+    // A closed earlier segment means this is the BDA coming back into the call.
+    const isRejoin = Boolean(doc && (doc.cumulativeDurationMs > 0 || (doc.firstJoinedAt && doc.leftAt)));
 
     if (!doc) {
       notifyJoin = true;
@@ -972,7 +1018,7 @@ export async function reportJoin(req, res) {
 
     if (notifyJoin) {
       const message =
-        `✅ **BDA Joined Meeting**\n` +
+        (isRejoin ? `🔁 **BDA Rejoined Meeting**\n` : `✅ **BDA Joined Meeting**\n`) +
         `**BDA:** ${name} (${emailNorm})\n` +
         `**Client:** ${booking.clientName}\n` +
         `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
@@ -1007,7 +1053,8 @@ export async function reportLeave(req, res) {
   try {
     const { email, name } = req.bdaUser;
     const emailNorm = normalizeEmail(email);
-    const { bookingId, leftAt, durationMs } = req.body;
+    const { bookingId, durationMs, clientNow } = req.body;
+    const leftAt = toServerClock(req.body.leftAt, clientNow);
 
     if (!bookingId) {
       return res.status(400).json({ success: false, error: 'bookingId is required' });
@@ -1043,12 +1090,13 @@ export async function reportEndEvent(req, res) {
     const {
       bookingId,
       meetLink,
-      leftAt,
       endSource,
       requestId,
-      joinedAtSnapshot,
       durationMsSnapshot,
+      clientNow,
     } = req.body;
+    const leftAt = toServerClock(req.body.leftAt, clientNow);
+    const joinedAtSnapshot = toServerClock(req.body.joinedAtSnapshot, clientNow);
 
     const out = await processReportEndEventCore({
       emailNorm,
@@ -1208,15 +1256,24 @@ export async function markAbsent(req, res) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
-    // Any BDA can report for any meeting (claimedBy check removed)
+    // Joins may be reported for any meeting (a BDA can cover for a colleague),
+    // but absence only applies to the BDA the meeting is assigned to. Older
+    // extension builds call this for every meeting in the company; answer them
+    // with a skip so they stop, instead of writing a false absent row for the
+    // wrong BDA (88 such rows in 30 days before this guard).
+    if (!isBookingAssignedTo(booking, emailNorm)) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'not_assigned' });
+    }
 
-    // Don't overwrite any existing attendance record (present, manual, or already absent)
+    // Don't overwrite a recorded attendance (present, manual, or already absent).
+    // The absent-poller's 'unmarked' row is only a "no response yet" marker, so
+    // it is upgraded to absent here.
     const existing = await BdaAttendanceModel.findOne({
       bookingId,
       bdaEmail: emailNorm,
     });
 
-    if (existing) {
+    if (existing && existing.status !== 'unmarked') {
       // Already has a record - return success (idempotent) but don't re-notify
       return res.status(200).json({
         success: true,
@@ -1224,8 +1281,7 @@ export async function markAbsent(req, res) {
       });
     }
 
-    const attendance = await BdaAttendanceModel.create({
-      attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+    const absentFields = {
       bdaName: name,
       bdaEmail: emailNorm,
       bookingId,
@@ -1236,7 +1292,23 @@ export async function markAbsent(req, res) {
       meetingScheduledEnd: booking.scheduledEventEndTime || null,
       notes: reason || 'No response to popup',
       discordNotified: true,
-    });
+    };
+    // Conditional on status so a join landing between the read above and this
+    // write is never overwritten with absent.
+    const attendance = existing
+      ? await BdaAttendanceModel.findOneAndUpdate(
+          { _id: existing._id, status: 'unmarked' },
+          { $set: absentFields },
+          { new: true }
+        )
+      : await BdaAttendanceModel.create({
+          attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          ...absentFields,
+        });
+
+    if (!attendance) {
+      return res.status(200).json({ success: true, message: 'Attendance already recorded' });
+    }
 
     const message =
       `❌ **BDA Absent**\n` +
@@ -1274,7 +1346,10 @@ export async function warnAbsent(req, res) {
       return res.status(404).json({ success: false, error: 'Booking not found' });
     }
 
-    // Any BDA can report for any meeting (claimedBy check removed)
+    // Warnings only go to the assigned BDA (see markAbsent).
+    if (!isBookingAssignedTo(booking, emailNorm)) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'not_assigned' });
+    }
 
     const existing = await BdaAttendanceModel.findOne({
       bookingId,
@@ -1284,6 +1359,14 @@ export async function warnAbsent(req, res) {
 
     if (existing) {
       return res.status(200).json({ success: true, skipped: true, message: 'Already in meeting' });
+    }
+
+    // The warn message is intentionally blank (the absent-poller owns the
+    // Discord "no response" alert). Discord rejects empty content with a 400,
+    // which used to surface as a 502 and made every extension retry this call
+    // every 30s for two hours per meeting. Report a clean skip instead.
+    if (!WARN_DISCORD_LINE) {
+      return res.status(200).json({ success: true, skipped: true, reason: 'disabled' });
     }
 
     const webhookUrl =
@@ -1414,14 +1497,15 @@ export async function beaconLeave(req, res) {
   try {
     const {
       bookingId,
-      leftAt,
       token: bodyToken,
       endRequestId,
       endMeetLink,
       endSource,
-      joinedAtSnapshot,
       durationMsSnapshot,
+      clientNow,
     } = req.body;
+    const leftAt = toServerClock(req.body.leftAt, clientNow);
+    const joinedAtSnapshot = toServerClock(req.body.joinedAtSnapshot, clientNow);
 
     if (!bookingId || !bodyToken) {
       return res.status(200).json({ success: false, error: 'Missing required fields' });
@@ -1504,12 +1588,13 @@ export async function beaconReportEndEvent(req, res) {
     const {
       token: bodyToken,
       meetLink,
-      leftAt,
       endSource,
       requestId,
-      joinedAtSnapshot,
       durationMsSnapshot,
+      clientNow,
     } = req.body;
+    const leftAt = toServerClock(req.body.leftAt, clientNow);
+    const joinedAtSnapshot = toServerClock(req.body.joinedAtSnapshot, clientNow);
 
     if (!bodyToken || !requestId) {
       return res.status(200).json({ success: false, error: 'Missing required fields' });
