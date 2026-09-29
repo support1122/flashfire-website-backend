@@ -48,7 +48,7 @@ export const createPayroll = async (req, res) => {
 export const updatePayroll = async (req, res) => {
   try {
     const { id } = req.params;
-    const { month, employeeName, teamName, startDate, endDate, monthlySalary, incentive, deduction, isPaid } = req.body;
+    const { month, employeeName, teamName, startDate, endDate, monthlySalary, incentive, deduction, isPaid, leaves } = req.body;
 
     const record = await PayrollModel.findById(id);
     if (!record) {
@@ -64,6 +64,7 @@ export const updatePayroll = async (req, res) => {
     if (incentive !== undefined) record.incentive = incentive !== null ? Number(incentive) : null;
     if (deduction !== undefined) record.deduction = deduction !== null ? Number(deduction) : null;
     if (isPaid !== undefined) record.isPaid = Boolean(isPaid);
+    if (leaves !== undefined) record.leaves = Number(leaves) || 0;
 
     await record.save();
 
