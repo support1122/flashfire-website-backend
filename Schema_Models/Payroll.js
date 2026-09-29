@@ -11,6 +11,7 @@ const PayrollSchema = new mongoose.Schema(
     incentive: { type: Number, default: null },
     deduction: { type: Number, default: null },
     isPaid: { type: Boolean, default: false },
+    leaves: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
