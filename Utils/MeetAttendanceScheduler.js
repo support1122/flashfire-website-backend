@@ -389,17 +389,39 @@ export async function processBooking(booking, now) {
   }
 }
 
+function meetApiEnabled() {
+  return String(process.env.MEET_API_ATTENDANCE_ENABLED || '').trim().toLowerCase() !== 'false';
+}
+
+/**
+ * Sync one booking from Google's live conference records right now. The
+ * absent poller calls this before posting "No Response", so a BDA who is in
+ * the call but whose extension missed the join (other Chrome profile, logged
+ * out, phone) is marked present instead of getting a false alert.
+ * Never throws; a Meet API failure must not block the alert path.
+ */
+export async function syncBookingFromMeetNow(booking) {
+  if (!meetApiEnabled() || !hasMeetApiCredentials()) return;
+  try {
+    await processBooking(booking, new Date());
+  } catch (err) {
+    console.warn(`[MeetAttendance] live check failed for ${booking?.bookingId}: ${err?.message}`);
+  }
+}
+
 export async function pollMeetApiAttendance() {
-  if (process.env.MEET_API_ATTENDANCE_ENABLED !== 'true') {
+  // On by default: Google's conference records are the only source that
+  // catches joins the extension missed. Opt out with MEET_API_ATTENDANCE_ENABLED=false.
+  if (!meetApiEnabled()) {
     if (!disabledLogged) {
-      console.log('[MeetAttendance] Disabled (set MEET_API_ATTENDANCE_ENABLED=true after DWD setup)');
+      console.log('[MeetAttendance] Disabled by MEET_API_ATTENDANCE_ENABLED=false');
       disabledLogged = true;
     }
     return;
   }
   if (!hasMeetApiCredentials()) {
     if (!credsWarned) {
-      console.warn('[MeetAttendance] No Google credentials (GOOGLE_SERVICE_ACCOUNT_KEY_FILE or GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY) — skipping');
+      console.warn('[MeetAttendance] No Google credentials (GOOGLE_SERVICE_ACCOUNT_KEY_JSON, GOOGLE_SERVICE_ACCOUNT_KEY_FILE, or GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY) — attendance is NOT being verified against Google Meet');
       credsWarned = true;
     }
     return;

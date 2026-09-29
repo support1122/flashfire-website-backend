@@ -116,7 +116,7 @@ Add to `.env` and restart the backend:
 GOOGLE_SERVICE_ACCOUNT_KEY_FILE=./flashfire-466710-b708dcbfa5c3.json
 # 3. Separate GOOGLE_CLIENT_EMAIL + GOOGLE_PRIVATE_KEY vars (legacy).
 
-MEET_API_ATTENDANCE_ENABLED=true
+# On by default. Set MEET_API_ATTENDANCE_ENABLED=false only to switch it off.
 # Optional but recommended: a super-admin account for participant-email resolution.
 # Without it, non-admin Directory lookups return 403 and BDA matching falls back
 # to display-name comparison (calendlyHost.name vs the Meet display name).

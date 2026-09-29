@@ -3,6 +3,7 @@ import { DateTime } from 'luxon';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
+import { syncBookingFromMeetNow } from './MeetAttendanceScheduler.js';
 
 dotenv.config();
 
@@ -52,13 +53,21 @@ async function closeStaleOpenSessions() {
     });
 
     for (const attendance of staleSessions) {
-      const leaveTime = new Date();
+      // No leave signal ever arrived, so the real leave time is unknown. Close
+      // at the scheduled end (or now, if the session started after it) instead
+      // of "now": closing at poll time credited a full hour or more.
+      const now = new Date();
+      const joinedMs = new Date(attendance.joinedAt).getTime();
+      const endMs = attendance.meetingScheduledEnd ? new Date(attendance.meetingScheduledEnd).getTime() : NaN;
+      const leaveTime = Number.isFinite(endMs) && endMs > joinedMs && endMs < now.getTime()
+        ? new Date(endMs)
+        : now;
       const segmentMs = Math.max(0, leaveTime.getTime() - new Date(attendance.joinedAt).getTime());
       attendance.cumulativeDurationMs = (attendance.cumulativeDurationMs || 0) + segmentMs;
       attendance.durationMs = attendance.cumulativeDurationMs;
       attendance.leftAt = leaveTime;
       attendance.joinedAt = null;
-      attendance.notes = (attendance.notes || '') + ' [auto-closed: stale session > 1h]';
+      attendance.notes = (attendance.notes || '') + ' [auto-closed: no leave signal > 1h; left time estimated]';
       await attendance.save();
 
       const durationMin = Math.round(attendance.cumulativeDurationMs / 60000);
@@ -70,7 +79,7 @@ async function closeStaleOpenSessions() {
         `**Client:** ${booking?.clientName || 'Unknown'}\n` +
         `**Duration (total):** ${durationMin} min\n` +
         `**Left At:** ${formatIST(leaveTime)}\n` +
-        `_Session was open for >1 hour — auto-closed by server._`;
+        `_No leave signal for >1 hour — auto-closed by server; left time is estimated._`;
 
       await sendDurationDiscord(message);
       console.log(`[BdaAbsentScheduler] Auto-closed stale session for booking ${attendance.bookingId}`);
@@ -104,7 +113,7 @@ export async function pollForAbsentBDAs() {
       },
     })
       .select(
-        'bookingId clientName clientEmail clientPhone scheduledEventStartTime scheduledEventEndTime claimedBy'
+        'bookingId clientName clientEmail clientPhone bookingStatus scheduledEventStartTime scheduledEventEndTime claimedBy calendlyHost googleMeetCode googleMeetUrl calendlyMeetLink'
       )
       .lean();
 
@@ -146,6 +155,11 @@ export async function pollForAbsentBDAs() {
       // Already pinged for this meeting and still no present mark, don't repeat.
       if (alreadyPinged.has(meeting.bookingId)) continue;
 
+      // Ask Google directly before alerting: if the BDA is in the conference,
+      // this writes a present row and the re-check below skips the alert.
+      // The extension misses some real joins; Google's records do not.
+      await syncBookingFromMeetNow(meeting);
+
       // Re-check immediately before alerting. A join can land between the batch
       // read above and this iteration (the extension reports asynchronously), and
       // a recorded PRESENT mark must ALWAYS win over the "no response" alert.
@@ -162,9 +176,13 @@ export async function pollForAbsentBDAs() {
         continue;
       }
 
-      const isClaimed = !!(meeting.claimedBy?.email);
-      const bdaEmail = meeting.claimedBy?.email || 'unassigned';
-      const bdaName = meeting.claimedBy?.name || 'Unassigned';
+      // The assigned BDA is the Calendly round-robin host (nearly every booking
+      // has one and no manual claim); a CRM claim is the fallback. Reading only
+      // claimedBy posted "NO BDA ASSIGNED" for meetings that did have a BDA.
+      const assignee = meeting.calendlyHost?.email ? meeting.calendlyHost : meeting.claimedBy;
+      const isClaimed = !!(assignee?.email);
+      const bdaEmail = isClaimed ? String(assignee.email).trim().toLowerCase() : 'unassigned';
+      const bdaName = assignee?.name || (isClaimed ? bdaEmail : 'Unassigned');
 
       // No attendance record — record as "unmarked", NOT "absent".
       // The BDA may have attended but forgotten to mark; only an explicit
