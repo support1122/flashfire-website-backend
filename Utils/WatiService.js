@@ -203,6 +203,30 @@ class WatiService {
   }
 
   /**
+   * Fetch the most recent messages in a contact's WATI conversation (newest first).
+   * Template sends show up as eventType 'broadcastMessage' with the template name in
+   * eventDescription, e.g. 'Broadcast message with using "meta_1" template was received ...'.
+   * @param {string} whatsappNumber
+   * @param {number} pageSize
+   * @returns {Promise<{success: boolean, items?: Array, error?: string}>}
+   */
+  async getMessages(whatsappNumber, pageSize = 100) {
+    try {
+      const mobile = String(whatsappNumber || '').replace(/\D/g, '');
+      const basePath = this.tenantId
+        ? `${this.apiBaseUrl}/${this.tenantId}/api/v1/getMessages/${mobile}`
+        : `${this.apiBaseUrl}/api/v1/getMessages/${mobile}`;
+      const response = await axios.get(`${basePath}?pageSize=${pageSize}&pageNumber=1`, {
+        headers: this.headers,
+        timeout: 20000
+      });
+      return { success: true, items: response.data?.messages?.items || [] };
+    } catch (error) {
+      return { success: false, error: error.response?.data?.message || error.message };
+    }
+  }
+
+  /**
    * Fetch all contacts from WATI
    * @returns {Promise<{success: boolean, contacts?: Array, error?: string}>}
    */
