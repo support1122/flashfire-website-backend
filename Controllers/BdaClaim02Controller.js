@@ -8,6 +8,7 @@ import {
   getClientUserModel,
 } from '../Utils/ClientsTrackingDB.js';
 import { normalizeCurrency } from '../Utils/currency.js';
+import { seedAudDefaults } from '../Utils/bdaIncentiveDefaults.js';
 
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
@@ -31,10 +32,11 @@ const CURRENCY_BASE_PRICES = {
   USD: { PRIME: 99, IGNITE: 199, PROFESSIONAL: 349, EXECUTIVE: 599 },
   CAD: { PRIME: 139, IGNITE: 239, PROFESSIONAL: 409, EXECUTIVE: 799 },
   GBP: { PRIME: 79, IGNITE: 149, PROFESSIONAL: 299, EXECUTIVE: 499 },
+  AUD: { IGNITE: 299, PROFESSIONAL: 549, EXECUTIVE: 899 },
 };
 
 const PLAN_KEYS = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
-const BDA_CURRENCIES = ['USD', 'GBP', 'INR', 'CAD'];
+const BDA_CURRENCIES = ['USD', 'GBP', 'INR', 'CAD', 'AUD'];
 // Leads eligible to be claimed here — same set the original claim flow allows.
 const CLAIMABLE_STATUSES = ['paid', 'scheduled', 'completed', 'rescheduled'];
 
@@ -105,7 +107,7 @@ async function buildIncentiveConfig() {
       incentivePerLeadInr: r.incentivePerLeadInr ?? 0,
     });
   });
-  return configByKey;
+  return seedAudDefaults(configByKey);
 }
 
 /** Prorated incentive (INR) for one claim line — same formula as BdaLeadController.incentiveForLine. */

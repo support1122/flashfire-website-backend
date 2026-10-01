@@ -4,6 +4,7 @@ import { BdaClaimApprovalModel } from '../Schema_Models/BdaClaimApproval.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { sendBdaClaimApprovalEmail } from '../Utils/SendGridHelper.js';
 import { currencySymbol } from '../Utils/currency.js';
+import { seedAudDefaults } from '../Utils/bdaIncentiveDefaults.js';
 import crypto from 'crypto';
 
 // Fallback base prices per currency when not yet configured in DB
@@ -11,6 +12,7 @@ const CURRENCY_BASE_PRICES = {
   USD: { PRIME: 99,  IGNITE: 199, PROFESSIONAL: 349, EXECUTIVE: 599 },
   CAD: { PRIME: 139, IGNITE: 239, PROFESSIONAL: 409, EXECUTIVE: 799 },
   GBP: { PRIME: 79,  IGNITE: 149, PROFESSIONAL: 299, EXECUTIVE: 499 },
+  AUD: { IGNITE: 299, PROFESSIONAL: 549, EXECUTIVE: 899 },
 };
 
 const BDA_ALLOWED_LEAD_STATUSES = ['paid', 'scheduled', 'completed', 'rescheduled'];
@@ -519,6 +521,7 @@ export const getBdaAnalysis = async (req, res) => {
       const basePrice = r.basePrice != null ? r.basePrice : (r.basePriceUsd ?? (CURRENCY_BASE_PRICES.USD[r.planName] ?? 0));
       configByKey.set(`${r.planName}|${currency}`, { basePrice, incentivePerLeadInr: r.incentivePerLeadInr ?? 0 });
     });
+    seedAudDefaults(configByKey);
 
     const incentiveByBda = new Map();
     for (const b of approvedPaidBookingsForIncentive) {
@@ -670,6 +673,7 @@ export const getMyClaimedLeads = async (req, res) => {
       const basePrice = r.basePrice != null ? r.basePrice : (r.basePriceUsd ?? (CURRENCY_BASE_PRICES.USD[r.planName] ?? 0));
       configByKey.set(`${r.planName}|${currency}`, { basePrice, incentivePerLeadInr: r.incentivePerLeadInr ?? 0 });
     });
+    seedAudDefaults(configByKey);
     let totalIncentivesForFilter = 0;
     for (const b of approvedPaidBookings) {
       totalIncentivesForFilter += incentiveForBooking(configByKey, b);

@@ -33,7 +33,7 @@ const BdaClaim02Schema = new mongoose.Schema(
     // --- Registered* : read-only snapshot from clients-tracking DB (admin-only) ---
     // Uppercased plan key (PRIME/IGNITE/PROFESSIONAL/EXECUTIVE) or '' when unknown.
     registeredPlan: { type: String, default: '' },
-    // ISO code (USD/CAD/GBP/INR/EUR) or null when it could not be resolved.
+    // ISO code (USD/CAD/GBP/INR/EUR/AUD) or null when it could not be resolved.
     registeredCurrency: { type: String, default: null },
     // Numeric, symbols stripped. null when there was no usable amount.
     registeredAmountPaid: { type: Number, default: null },
@@ -41,7 +41,7 @@ const BdaClaim02Schema = new mongoose.Schema(
     // --- BDA-entered (BDA sees + edits; admin may also edit) ---
     bdaCurrency: {
       type: String,
-      enum: ['USD', 'GBP', 'INR', 'CAD'],
+      enum: ['USD', 'GBP', 'INR', 'CAD', 'AUD'],
       default: null,
     },
     bdaAmountCollected: { type: Number, default: null, min: 0 },
