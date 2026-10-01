@@ -12,7 +12,7 @@ await mongoose.connect(process.env.MONGODB_URI);
 try {
   const result = await runWhatsAppFailureCheck({ dryRun: !send });
   console.log(result.message);
-  console.log(`\n${result.failures} failure(s). Posted to Discord: ${result.posted}`);
+  console.log(`\n${result.failures} failure(s): ${result.sentAnyway} sent anyway, ${result.notSent} not sent. Posted to Discord: ${result.posted}`);
 } finally {
   await mongoose.disconnect();
 }
