@@ -14,11 +14,13 @@ export const WatiTemplates = {
   /**
    * Booking confirmation, sent ~1 minute after the booking.
    * 8 params: {{6}} = product demo link, {{7}} = Reschedule tail, {{8}} = Cancel tail.
-   * Two URL buttons and no quick reply — dropping "I'll Join" also keeps it rendering
-   * on WhatsApp Desktop, which breaks when a quick reply is mixed with CTA buttons.
+   * Buttons: Reschedule, Cancel, and an "I'll Join" quick reply.
+   *
+   * Same parameter layout as the reminder templates, so they share one builder.
+   * Override with WATI_TPL_BOOKED to swap it without a deploy.
    */
   bookingConfirmation:
-    process.env.WATI_TPL_BOOKED || 'flashfire_appointment_booked_demo',
+    process.env.WATI_TPL_BOOKED || 'new_meeting_booked_reminder',
 
   /**
    * Original buttonless confirmation, 5 params. Used when no genuine cancel target

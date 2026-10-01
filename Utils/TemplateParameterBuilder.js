@@ -420,9 +420,11 @@ const builders = {
   }
 };
 
-// The booking confirmation takes the identical 8 parameters as the reminder; only the
-// template differs (no "I'll Join" quick reply on the confirmation).
+// Every 8-parameter appointment template takes the identical arguments
+// ({{6}} = demo link, {{7}} = Reschedule tail, {{8}} = Cancel tail); only the Meta
+// template differs, so they all share one builder.
 builders.flashfire_appointment_booked_demo = builders.flashfire_appointment_reminder_demo;
+builders.new_meeting_booked_reminder = builders.flashfire_appointment_reminder_demo;
 
 /**
  * Build template parameters for a given template name and booking context.
