@@ -1,4 +1,5 @@
 import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
+import { AUD_INCENTIVE_DEFAULTS } from '../Utils/bdaIncentiveDefaults.js';
 
 const PLAN_NAMES = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
 
@@ -7,6 +8,7 @@ const CURRENCY_DEFAULTS = {
   USD: { PRIME: 99,  IGNITE: 199, PROFESSIONAL: 349, EXECUTIVE: 599 },
   CAD: { PRIME: 139, IGNITE: 239, PROFESSIONAL: 409, EXECUTIVE: 799 },
   GBP: { PRIME: 79,  IGNITE: 149, PROFESSIONAL: 299, EXECUTIVE: 499 },
+  AUD: { IGNITE: 299, PROFESSIONAL: 549, EXECUTIVE: 899 }, // no Prime plan in AUD
 };
 
 export const getIncentiveConfig = async (req, res) => {
@@ -25,6 +27,7 @@ export const getIncentiveConfig = async (req, res) => {
     const configs = [];
     for (const [currency, defaults] of Object.entries(CURRENCY_DEFAULTS)) {
       for (const planName of PLAN_NAMES) {
+        if (defaults[planName] == null) continue;
         const key = `${planName}|${currency}`;
         const row = map.get(key);
         configs.push({
@@ -33,7 +36,7 @@ export const getIncentiveConfig = async (req, res) => {
           basePrice: row?.basePrice != null ? row.basePrice : defaults[planName],
           // Legacy field for backward compat
           basePriceUsd: currency === 'USD' ? (row?.basePrice ?? defaults[planName]) : undefined,
-          incentivePerLeadInr: row?.incentivePerLeadInr ?? 0
+          incentivePerLeadInr: row?.incentivePerLeadInr ?? (currency === 'AUD' ? AUD_INCENTIVE_DEFAULTS[planName]?.incentivePerLeadInr : undefined) ?? 0
         });
       }
     }
