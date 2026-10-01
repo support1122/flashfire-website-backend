@@ -66,7 +66,7 @@ function parseAmount(raw) {
  *
  * Verified against live data (290 dashboardtrackings rows): the `currency`
  * field on dashboardtrackings is NEVER populated. The reliable source is the
- * matching `users` row (`currency` in {CAD,GBP,INR,USD}, set on 244/293 rows).
+ * matching `users` row (`currency` in {CAD,GBP,INR,USD,AUD}, set on 244/293 rows).
  * Failing that, the `amountPaid` string usually carries a symbol/code prefix
  * ("£79", "$99", "CAD749", "₹46629"). Bare values like "579" give nothing.
  *
@@ -81,6 +81,7 @@ function resolveRegisteredCurrency(record, userRow) {
 
   const amt = String(record?.amountPaid || '').trim().toUpperCase();
   if (amt.startsWith('CAD') || amt.startsWith('CA$')) return 'CAD';
+  if (amt.startsWith('AUD') || amt.startsWith('A$')) return 'AUD';
   if (amt.startsWith('₹') || amt.startsWith('INR')) return 'INR';
   if (amt.startsWith('£') || amt.startsWith('GBP')) return 'GBP';
   if (amt.startsWith('€') || amt.startsWith('EUR')) return 'EUR';
