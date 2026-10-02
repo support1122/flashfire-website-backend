@@ -298,11 +298,13 @@ class WatiService {
         : `${this.apiBaseUrl}/api/v2/sendTemplateMessage`;
       const url = `${basePath}?whatsappNumber=${mobile}`;
 
-      // Normalize channel number: digits only, ensure starts with '91'
-      let digitsOnly = this.channelNumber ? this.channelNumber.replace(/\D/g, '') : '';
-      if (digitsOnly && !digitsOnly.startsWith('91')) {
-        digitsOnly = `91${digitsOnly}`;
-      }
+      // Channel number: digits only, exactly as configured.
+      // This used to force a '91' prefix onto anything that did not already start
+      // with it, which was fine while the channel was an India number. When the
+      // channel moved to +1 435 666 7674 that rule rewrote it to 9114356667674 and
+      // every send failed with "Channel with phone number ... not found". Never
+      // infer a country code — the configured value is the channel.
+      const digitsOnly = this.channelNumber ? this.channelNumber.replace(/\D/g, '') : '';
 
       const formattedParameters = (parameters || []).map((value, idx) => ({
         name: `${idx + 1}`,
