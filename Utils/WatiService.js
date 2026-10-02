@@ -304,6 +304,7 @@ class WatiService {
       // channel moved to +1 435 666 7674 that rule rewrote it to 9114356667674 and
       // every send failed with "Channel with phone number ... not found". Never
       // infer a country code — the configured value is the channel.
+      // Normalize channel number: digits only (country code must already be included in WATI_CHANNEL_NUMBER)
       const digitsOnly = this.channelNumber ? this.channelNumber.replace(/\D/g, '') : '';
 
       const formattedParameters = (parameters || []).map((value, idx) => ({

@@ -163,6 +163,7 @@ import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js'
 import { getStripePaymentsByMonth, getStripeAllMonthsSummary, getStripePaidPlanMonthlySummary } from './Controllers/StripeDataController.js';
 import { getManualPaymentsByMonth, createManualPayment, updateManualPayment, deleteManualPayment } from './Controllers/ManualPaymentController.js';
 import { generatePaymentLink, redirectShortLink } from './Controllers/PaymentLinkController.js';
+import { getPayroll, createPayroll, updatePayroll, deletePayroll } from './Controllers/PayrollController.js';
 import { listMySessions, revokeMySession, listAllSessions, adminRevokeSession } from './Controllers/CrmSessionController.js';
 import {
   listDesignedTemplates,
@@ -325,6 +326,12 @@ export default function Routes(app) {
   app.post('/api/crm/generate-payment-link', requireCrmUser, requireCrmPermission('payment_links'), generatePaymentLink);
   // Public short-link redirect for generated payment links.
   app.get('/s/:code', redirectShortLink);
+
+  // Payroll — employee salary, incentives and deductions.
+  app.get('/api/payroll', requireCrmUser, requireCrmPermission('payroll'), getPayroll);
+  app.post('/api/payroll', requireCrmUser, requireCrmPermission('payroll'), createPayroll);
+  app.put('/api/payroll/:id', requireCrmUser, requireCrmPermission('payroll'), updatePayroll);
+  app.delete('/api/payroll/:id', requireCrmUser, requireCrmPermission('payroll'), deletePayroll);
 
   // Zoom Phone — webhook is public (HMAC-verified inside).
   app.post('/api/zoom-phone/webhook', zoomPhoneWebhook);

@@ -103,6 +103,7 @@ function buildEmailPayloadFallback(normalized) {
     transactionId,
     invoiceId,
     paymentDate,
+    stripeReceiptPdfUrl,
   } = normalized;
   const { firstName, lastName } = parseName(customerName, customerEmail);
 
@@ -119,6 +120,7 @@ function buildEmailPayloadFallback(normalized) {
     invoiceNumber: buildInvoiceNumber(invoiceId, transactionId),
     paymentDate: paymentDate || new Date(),
     includePdfInvoice: false,
+    stripeReceiptPdfUrl: stripeReceiptPdfUrl || null,
   };
 }
 
@@ -136,6 +138,7 @@ async function sendInvoiceEmailForStripe(normalized, event) {
     paymentDate = new Date(),
     metadata = {},
     candidateTransactionIds = [],
+    stripeReceiptPdfUrl = null,
   } = normalized;
 
   if (!customerEmail) {
@@ -185,6 +188,7 @@ async function sendInvoiceEmailForStripe(normalized, event) {
       invoiceNumber: buildInvoiceNumber(invoiceId, transactionId, event.id),
       paymentDate: paymentRecord.paymentDate || paymentDate || new Date(),
       includePdfInvoice: false,
+      stripeReceiptPdfUrl,
     };
   } else {
     emailPayload = buildEmailPayloadFallback({
@@ -197,6 +201,7 @@ async function sendInvoiceEmailForStripe(normalized, event) {
       transactionId,
       invoiceId,
       paymentDate,
+      stripeReceiptPdfUrl,
     });
   }
 
@@ -335,6 +340,7 @@ async function handleInvoicePaid(event) {
       paymentDate: new Date((invoice.status_transitions?.paid_at || Date.now()) * 1000),
       metadata: invoice.metadata || {},
       candidateTransactionIds: [paymentIntentId, invoice.charge, invoice.id],
+      stripeReceiptPdfUrl: invoice.invoice_pdf || null,
     },
     event
   );

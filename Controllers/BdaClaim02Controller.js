@@ -2,11 +2,13 @@ import Stripe from 'stripe';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { BdaClaim02Model } from '../Schema_Models/BdaClaim02.js';
 import { BdaIncentiveConfigModel } from '../Schema_Models/BdaIncentiveConfig.js';
+import { ManualPaymentModel } from '../Schema_Models/ManualPaymentModel.js';
 import {
   getClientTrackingRecordModel,
   getClientUserModel,
 } from '../Utils/ClientsTrackingDB.js';
 import { normalizeCurrency } from '../Utils/currency.js';
+import { seedAudDefaults } from '../Utils/bdaIncentiveDefaults.js';
 
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
@@ -30,10 +32,11 @@ const CURRENCY_BASE_PRICES = {
   USD: { PRIME: 99, IGNITE: 199, PROFESSIONAL: 349, EXECUTIVE: 599 },
   CAD: { PRIME: 139, IGNITE: 239, PROFESSIONAL: 409, EXECUTIVE: 799 },
   GBP: { PRIME: 79, IGNITE: 149, PROFESSIONAL: 299, EXECUTIVE: 499 },
+  AUD: { IGNITE: 299, PROFESSIONAL: 549, EXECUTIVE: 899 },
 };
 
 const PLAN_KEYS = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
-const BDA_CURRENCIES = ['USD', 'GBP', 'INR', 'CAD'];
+const BDA_CURRENCIES = ['USD', 'GBP', 'INR', 'CAD', 'AUD'];
 // Leads eligible to be claimed here — same set the original claim flow allows.
 const CLAIMABLE_STATUSES = ['paid', 'scheduled', 'completed', 'rescheduled'];
 
@@ -63,7 +66,7 @@ function parseAmount(raw) {
  *
  * Verified against live data (290 dashboardtrackings rows): the `currency`
  * field on dashboardtrackings is NEVER populated. The reliable source is the
- * matching `users` row (`currency` in {CAD,GBP,INR,USD}, set on 244/293 rows).
+ * matching `users` row (`currency` in {CAD,GBP,INR,USD,AUD}, set on 244/293 rows).
  * Failing that, the `amountPaid` string usually carries a symbol/code prefix
  * ("£79", "$99", "CAD749", "₹46629"). Bare values like "579" give nothing.
  *
@@ -78,6 +81,7 @@ function resolveRegisteredCurrency(record, userRow) {
 
   const amt = String(record?.amountPaid || '').trim().toUpperCase();
   if (amt.startsWith('CAD') || amt.startsWith('CA$')) return 'CAD';
+  if (amt.startsWith('AUD') || amt.startsWith('A$')) return 'AUD';
   if (amt.startsWith('₹') || amt.startsWith('INR')) return 'INR';
   if (amt.startsWith('£') || amt.startsWith('GBP')) return 'GBP';
   if (amt.startsWith('€') || amt.startsWith('EUR')) return 'EUR';
@@ -104,7 +108,7 @@ async function buildIncentiveConfig() {
       incentivePerLeadInr: r.incentivePerLeadInr ?? 0,
     });
   });
-  return configByKey;
+  return seedAudDefaults(configByKey);
 }
 
 /** Prorated incentive (INR) for one claim line — same formula as BdaLeadController.incentiveForLine. */
@@ -161,13 +165,33 @@ async function fetchStripePaymentByEmail(paymentEmail) {
   }
 }
 
+/**
+ * Most recent manual INR payment for an email → { amount, currency: 'INR' }.
+ * Used as a second fallback when Stripe has no charge (UPI/bank transfers).
+ */
+async function fetchManualPaymentByEmail(email) {
+  if (!email) return null;
+  try {
+    const record = await ManualPaymentModel.findOne({
+      customerEmail: { $regex: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
+    })
+      .sort({ date: -1 })
+      .lean();
+    if (!record || !record.amount) return null;
+    return { amount: record.amount, currency: (record.currency || 'INR').toUpperCase() };
+  } catch (e) {
+    console.warn('[claim02] manual payment lookup failed for', email, '-', e?.message);
+    return null;
+  }
+}
+
 /** Look up the clients-tracking registration snapshot for a CRM email. */
 async function fetchRegisteredSnapshot(crmEmail) {
   const empty = { registeredPlan: '', registeredCurrency: null, registeredAmountPaid: null };
   const email = String(crmEmail || '').toLowerCase().trim();
   if (!email) return empty;
 
-  const RecordModel = getClientTrackingRecordModel();
+  const RecordModel = await getClientTrackingRecordModel();
   if (!RecordModel) return empty;
 
   // Match ONLY on crmEmail — the CRM email captured at registration. We do not
@@ -178,27 +202,33 @@ async function fetchRegisteredSnapshot(crmEmail) {
   if (!record) return empty;
 
   let userRow = null;
-  const UserModel = getClientUserModel();
+  const UserModel = await getClientUserModel();
   if (UserModel && record.email) {
     userRow = await UserModel.findOne({ email: String(record.email).toLowerCase().trim() }).lean();
   }
 
-  // Registered Amount Paid: the actual Stripe charge for this client's
+  // Payment Received (Stripe): the actual Stripe charge for this client's
   // `paymentEmail` (the "Payment Email" on the registration form), taking the
-  // most recent succeeded charge. Falls back to the hand-typed
-  // dashboardtrackings.amountPaid, then planPrice, when there is no Stripe
-  // match (or Stripe is unconfigured).
-  const stripePayment = await fetchStripePaymentByEmail(record.paymentEmail);
+  // most recent succeeded charge.
+  // Fallback 1: manualpayments collection (INR/UPI payments added manually).
+  // Fallback 2: hand-typed dashboardtrackings.amountPaid, then planPrice.
+  const paymentEmail = record.paymentEmail || crmEmail;
+  const [stripePayment, manualPayment] = await Promise.all([
+    fetchStripePaymentByEmail(paymentEmail),
+    fetchManualPaymentByEmail(paymentEmail),
+  ]);
+
+  const payment = stripePayment ?? manualPayment;
   const fallbackAmount =
     parseAmount(record.amountPaid) ?? (record.planPrice > 0 ? record.planPrice : null);
 
   return {
     registeredPlan: toPlanKey(record.planType),
     registeredCurrency:
-      stripePayment?.currency
-        ? normalizeCurrency(stripePayment.currency)
+      payment?.currency
+        ? normalizeCurrency(payment.currency)
         : resolveRegisteredCurrency(record, userRow),
-    registeredAmountPaid: stripePayment?.amount ?? fallbackAmount,
+    registeredAmountPaid: payment?.amount ?? fallbackAmount,
   };
 }
 
@@ -457,6 +487,36 @@ export const adminListAll = async (req, res) => {
     if (status) filter.status = status;
 
     const rows = await BdaClaim02Model.find(filter).sort({ createdAt: -1 });
+
+    // For any row where the registered snapshot is missing (claim was made before
+    // the client had a dashboard record), re-fetch it now and persist it so the
+    // admin always sees up-to-date data on page load.
+    const needsRefresh = rows.filter((r) => !r.registeredPlan);
+    if (needsRefresh.length > 0) {
+      const configByKey = await buildIncentiveConfig();
+      await Promise.all(
+        needsRefresh.map(async (row) => {
+          try {
+            const snapshot = await fetchRegisteredSnapshot(row.crmEmail);
+            if (!snapshot.registeredPlan) return; // still nothing — skip
+            row.registeredPlan = snapshot.registeredPlan;
+            row.registeredCurrency = snapshot.registeredCurrency;
+            row.registeredAmountPaid = snapshot.registeredAmountPaid;
+            // Recompute incentive now that we have the registered plan
+            row.incentiveInr = incentiveForLine(
+              configByKey,
+              row.registeredPlan,
+              row.bdaAmountCollected,
+              row.bdaCurrency
+            );
+            await row.save();
+          } catch (e) {
+            console.warn('[claim02] snapshot refresh failed for', row.crmEmail, '-', e?.message);
+          }
+        })
+      );
+    }
+
     return res.status(200).json({
       success: true,
       data: rows.map((r) => serialize(r, { admin: true })),
