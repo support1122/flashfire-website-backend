@@ -260,8 +260,16 @@ const builders = {
     ];
   },
 
-  // plan_followup_123: single variable {{1}} = client name.
+  // plan_followup_123 and plan_follow_up_456: single variable {{1}} = client name.
+  // 456 previously had no handler and only worked because the generic fallback happens
+  // to emit exactly one parameter. Registered so it stops depending on that.
   plan_followup_123: ({ booking }) => {
+    return [
+      booking.clientName || 'Valued Client'
+    ];
+  },
+
+  plan_follow_up_456: ({ booking }) => {
     return [
       booking.clientName || 'Valued Client'
     ];
@@ -303,6 +311,10 @@ const builders = {
   // meta_2_demo_u is the reworded UTILITY replacement and is what the workflow uses.
   meta_2_demo_u: metaSchedulingParamsWithDemo,
   meta_41_demo: metaSchedulingParamsWithDemo,
+
+  // Same two parameters as the other meta templates ({{1}} name, {{2}} booking link),
+  // with a line about the markets Flashfire covers. No demo link.
+  meta__revised_134: metaSchedulingParams,
 
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
@@ -444,8 +456,24 @@ export async function buildTemplateParameters(templateName, { booking, step, exe
     return params;
   }
 
-  // Generic fallback: at minimum provide client name
-  console.warn(`[TemplateParameterBuilder] No specific handler for "${templateName}", using generic fallback`);
+  // The meta_* family is the not-scheduled workflow: "you have not booked yet, here is
+  // the link". They all take {{1}} = client name and {{2}} = booking link, and the
+  // *_demo variants add {{3}} = demo video. New ones get added in the CRM without
+  // anyone touching this file, so match by name rather than waiting for the generic
+  // fallback to send too few parameters and have WATI reject the whole send with
+  // "Check your template, it cannot have typos or blank text".
+  if (/^meta/i.test(templateName)) {
+    const wantsDemo = /_demo(_[a-z0-9]+)?$/i.test(templateName);
+    const chosen = wantsDemo ? metaSchedulingParamsWithDemo : metaSchedulingParams;
+    const params = await chosen({ booking, step, executedAt });
+    console.warn(`[TemplateParameterBuilder] "${templateName}" has no explicit handler; matched the meta_* family (${params.length} params). Register it to be certain.`);
+    return params;
+  }
+
+  // Generic fallback: at minimum provide client name. This sends ONE parameter, so any
+  // template needing more will be rejected by WATI. Add a builder above instead of
+  // relying on this.
+  console.warn(`[TemplateParameterBuilder] No handler for "${templateName}" — falling back to client name only. If this template takes more than one variable the send WILL fail.`);
   const params = [booking.clientName || 'Valued Client'];
 
   if (step?.templateConfig?.schedulingLink) {
