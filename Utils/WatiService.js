@@ -288,7 +288,34 @@ class WatiService {
    * @param {string} params.campaignId - Campaign ID for tracking
    * @returns {Promise<{success: boolean, data?: any, error?: string}>}
    */
-  async sendTemplateMessage({ mobileNumber, templateName, templateId, parameters = [], campaignId }) {
+  /**
+   * Every WATI template send in the app goes through here, so this is the one place
+   * that can see every failure. The real alerting lives in WhatsAppFailureAlert; this
+   * wrapper only forwards failures to it, then returns the result untouched.
+   *
+   * The import is dynamic to avoid an import cycle (WhatsAppFailureAlert imports this
+   * module) and sits on the error path only, so it costs nothing on a healthy send.
+   */
+  async sendTemplateMessage(params) {
+    const result = await this._sendTemplateMessage(params);
+    if (!result?.success) {
+      try {
+        const { reportWatiFailureRealtime } = await import('./WhatsAppFailureAlert.js');
+        reportWatiFailureRealtime({
+          phoneNumber: params?.mobileNumber,
+          templateName: params?.templateName,
+          error: result?.error,
+          source: params?.campaignId ? 'campaign/workflow' : 'reminder',
+        });
+      } catch (alertError) {
+        // Alerting must never break sending.
+        console.error('⚠️ [WatiService] could not raise realtime alert:', alertError?.message ?? alertError);
+      }
+    }
+    return result;
+  }
+
+  async _sendTemplateMessage({ mobileNumber, templateName, templateId, parameters = [], campaignId }) {
     try {
       // Normalize mobile number - remove + and any non-digits
       const mobile = mobileNumber.replace(/\D/g, '');
@@ -298,6 +325,12 @@ class WatiService {
         : `${this.apiBaseUrl}/api/v2/sendTemplateMessage`;
       const url = `${basePath}?whatsappNumber=${mobile}`;
 
+      // Channel number: digits only, exactly as configured.
+      // This used to force a '91' prefix onto anything that did not already start
+      // with it, which was fine while the channel was an India number. When the
+      // channel moved to +1 435 666 7674 that rule rewrote it to 9114356667674 and
+      // every send failed with "Channel with phone number ... not found". Never
+      // infer a country code — the configured value is the channel.
       // Normalize channel number: digits only (country code must already be included in WATI_CHANNEL_NUMBER)
       const digitsOnly = this.channelNumber ? this.channelNumber.replace(/\D/g, '') : '';
 
