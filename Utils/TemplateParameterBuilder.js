@@ -312,9 +312,11 @@ const builders = {
   meta_2_demo_u: metaSchedulingParamsWithDemo,
   meta_41_demo: metaSchedulingParamsWithDemo,
 
-  // Same two parameters as the other meta templates ({{1}} name, {{2}} booking link),
-  // with a line about the markets Flashfire covers. No demo link.
+  // The *_revised_* pair: same two parameters as the rest of the family
+  // ({{1}} name, {{2}} booking link), reworded copy, no demo link.
+  // 134 is the immediate step, 123 the 8-hour one.
   meta__revised_134: metaSchedulingParams,
+  meta_2_revised_123: metaSchedulingParams,
 
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
