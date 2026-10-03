@@ -288,7 +288,34 @@ class WatiService {
    * @param {string} params.campaignId - Campaign ID for tracking
    * @returns {Promise<{success: boolean, data?: any, error?: string}>}
    */
-  async sendTemplateMessage({ mobileNumber, templateName, templateId, parameters = [], campaignId }) {
+  /**
+   * Every WATI template send in the app goes through here, so this is the one place
+   * that can see every failure. The real alerting lives in WhatsAppFailureAlert; this
+   * wrapper only forwards failures to it, then returns the result untouched.
+   *
+   * The import is dynamic to avoid an import cycle (WhatsAppFailureAlert imports this
+   * module) and sits on the error path only, so it costs nothing on a healthy send.
+   */
+  async sendTemplateMessage(params) {
+    const result = await this._sendTemplateMessage(params);
+    if (!result?.success) {
+      try {
+        const { reportWatiFailureRealtime } = await import('./WhatsAppFailureAlert.js');
+        reportWatiFailureRealtime({
+          phoneNumber: params?.mobileNumber,
+          templateName: params?.templateName,
+          error: result?.error,
+          source: params?.campaignId ? 'campaign/workflow' : 'reminder',
+        });
+      } catch (alertError) {
+        // Alerting must never break sending.
+        console.error('⚠️ [WatiService] could not raise realtime alert:', alertError?.message ?? alertError);
+      }
+    }
+    return result;
+  }
+
+  async _sendTemplateMessage({ mobileNumber, templateName, templateId, parameters = [], campaignId }) {
     try {
       // Normalize mobile number - remove + and any non-digits
       const mobile = mobileNumber.replace(/\D/g, '');

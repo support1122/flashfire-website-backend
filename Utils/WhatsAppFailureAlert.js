@@ -348,6 +348,112 @@ export async function runWhatsAppFailureCheck({ now = new Date(), dryRun = false
   return { ...summary, posted: result.ok };
 }
 
+/* ─────────────────────── real-time failure alerts ───────────────────────── */
+
+/**
+ * Post a Discord alert the moment a WATI send fails, instead of waiting for the next
+ * 09:00 / 21:00 digest.
+ *
+ * The digest exists because it can verify against WATI whether a "failed" send
+ * actually went out after our client timed out, which is only knowable later. A
+ * real-time alert cannot do that, so it says what failed and leaves verification to
+ * the digest. Both run; this one is for noticing within seconds, not for accounting.
+ *
+ * Throttled per distinct error, because WATI failures arrive in bursts: one expired
+ * channel or an empty credit balance fails every queued message in a row. The first
+ * occurrence of an error posts immediately, further identical errors are counted, and
+ * a rollup with the total posts when the window closes.
+ *
+ * Env:
+ *   WATI_REALTIME_ALERTS=false        turn off, leaving only the digest
+ *   WATI_REALTIME_THROTTLE_MS=300000  window per distinct error (default 5 min)
+ */
+const REALTIME_ENABLED =
+  String(process.env.WATI_REALTIME_ALERTS ?? 'true').toLowerCase() !== 'false';
+const REALTIME_THROTTLE_MS = Math.max(
+  10_000,
+  Number(process.env.WATI_REALTIME_THROTTLE_MS) || 5 * 60 * 1000
+);
+
+/** errorHeadline -> { count, firstAt, lastAt, samples:Set<string>, timer } */
+const realtimeWindows = new Map();
+
+function maskPhone(phone) {
+  const d = String(phone ?? '').replace(/\D/g, '');
+  return d.length > 4 ? `…${d.slice(-4)}` : (d || 'unknown');
+}
+
+async function postRealtime(message) {
+  const webhookUrl = process.env.DISCORD_WHATSAPP_FAILURE_WEBHOOK_URL;
+  if (!webhookUrl) {
+    console.warn('⚠️ [WhatsAppFailureAlert] no DISCORD_WHATSAPP_FAILURE_WEBHOOK_URL; realtime alert not posted:', message.split('\n')[0]);
+    return;
+  }
+  await DiscordConnect(webhookUrl, message.slice(0, DISCORD_MAX_CHARS), false).catch((e) => {
+    console.error('❌ [WhatsAppFailureAlert] realtime post failed:', e?.message ?? e);
+  });
+}
+
+function flushRealtimeWindow(headline) {
+  const win = realtimeWindows.get(headline);
+  realtimeWindows.delete(headline);
+  if (!win || win.count <= 0) return;
+
+  const who = [...win.samples].slice(0, 6).join(', ');
+  postRealtime(
+    `🔴 **WATI failures continuing** (${win.count} more since ${formatIST(win.firstAt, true)} IST)\n` +
+    `\`${headline}\`\n` +
+    `📞 ${who}${win.samples.size > 6 ? ` +${win.samples.size - 6} more` : ''}\n` +
+    `🕒 last at ${formatIST(win.lastAt, true)} IST`
+  );
+}
+
+/**
+ * Called on every failed WATI send. Never throws and never blocks the caller: a
+ * broken alert path must not take the send path down with it.
+ */
+export function reportWatiFailureRealtime({ phoneNumber, templateName, error, source = 'wati' } = {}) {
+  if (!REALTIME_ENABLED) return;
+
+  try {
+    const headline = errorHeadline(error);
+    const now = new Date();
+    const label = `${maskPhone(phoneNumber)}${templateName ? ` (${templateName})` : ''}`;
+
+    const existing = realtimeWindows.get(headline);
+    if (existing) {
+      existing.count += 1;
+      existing.lastAt = now;
+      existing.samples.add(label);
+      return;
+    }
+
+    // First sighting of this error: alert now, then open a quiet window so a burst of
+    // the same failure does not become a wall of Discord messages.
+    const timer = setTimeout(() => flushRealtimeWindow(headline), REALTIME_THROTTLE_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    realtimeWindows.set(headline, { count: 0, firstAt: now, lastAt: now, samples: new Set(), timer });
+
+    postRealtime(
+      `🔴 **WATI send failed**\n` +
+      `\`${headline}\`\n` +
+      `📞 ${label}\n` +
+      `🕒 ${formatIST(now, true)} IST · source: ${source}\n` +
+      `🔁 identical errors in the next ${Math.round(REALTIME_THROTTLE_MS / 60000)}m are grouped into one follow-up.`
+    );
+  } catch (e) {
+    console.error('❌ [WhatsAppFailureAlert] realtime alert threw (ignored):', e?.message ?? e);
+  }
+}
+
+/** Flush any open windows, for a clean shutdown or a test. */
+export function flushRealtimeWatiAlerts() {
+  for (const [headline, win] of [...realtimeWindows]) {
+    clearTimeout(win.timer);
+    flushRealtimeWindow(headline);
+  }
+}
+
 export function startWhatsAppFailureAlertCron() {
   cron.schedule(CRON_EXPRESSION, async () => {
     try {
