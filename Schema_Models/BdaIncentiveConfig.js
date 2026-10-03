@@ -9,7 +9,7 @@ const BdaIncentiveConfigSchema = new mongoose.Schema(
     },
     currency: {
       type: String,
-      enum: ['USD', 'CAD', 'GBP', 'EUR', 'INR'],
+      enum: ['USD', 'CAD', 'GBP', 'EUR', 'INR', 'AUD'],
       required: true,
       default: 'USD'
     },

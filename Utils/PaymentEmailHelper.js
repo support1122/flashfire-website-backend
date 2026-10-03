@@ -23,6 +23,7 @@ export async function sendPaymentConfirmationEmail(paymentData) {
       paymentDate = new Date(),
       invoiceNumber,
       includePdfInvoice = false,
+      stripeReceiptPdfUrl,
     } = paymentData;
 
     if (!customerEmail || !customerFirstName || !amount || !planName) {
@@ -191,7 +192,26 @@ This is an automated confirmation email. Please do not reply to this message.
       `.trim()
     };
 
-    if (includePdfInvoice) {
+    if (stripeReceiptPdfUrl) {
+      try {
+        const response = await fetch(stripeReceiptPdfUrl);
+        if (!response.ok) {
+          throw new Error(`Failed to download Stripe receipt PDF: ${response.status}`);
+        }
+        const stripePdfBuffer = Buffer.from(await response.arrayBuffer());
+
+        msg.attachments = [
+          {
+            content: stripePdfBuffer.toString('base64'),
+            filename: `${finalInvoiceNumber}.pdf`,
+            type: 'application/pdf',
+            disposition: 'attachment',
+          },
+        ];
+      } catch (error) {
+        console.error('❌ Failed to attach Stripe receipt PDF:', error.message);
+      }
+    } else if (includePdfInvoice) {
       const invoicePdf = await generateInvoicePdfBuffer({
         invoiceNumber: finalInvoiceNumber,
         customerName,

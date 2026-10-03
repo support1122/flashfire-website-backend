@@ -19,6 +19,7 @@ const CRM_MODULE_KEYS = [
   'graphs03',
   'phone_calls',
   'payment_links',
+  'payroll',
 ];
 
 // View = `<module>` (legacy key, backwards-compatible). Edit = `<module>_edit`.

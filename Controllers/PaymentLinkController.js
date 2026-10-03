@@ -60,6 +60,13 @@ const REGIONS = {
       executive: { name: 'Executive Plan – 1200+ Applications', originalPrice: 799 },
     },
   },
+  au: {
+    currency: 'aud',
+    plans: {
+      professional: { name: 'Professional Plan – Mid-Level Professionals', originalPrice: 549 },
+      executive: { name: 'Executive Plan – 1200+ Applications', originalPrice: 899 },
+    },
+  },
 };
 
 const MAX_DISCOUNT = 100;
