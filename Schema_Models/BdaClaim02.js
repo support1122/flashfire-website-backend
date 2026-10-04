@@ -41,7 +41,7 @@ const BdaClaim02Schema = new mongoose.Schema(
     // --- BDA-entered (BDA sees + edits; admin may also edit) ---
     bdaCurrency: {
       type: String,
-      enum: ['USD', 'GBP', 'INR', 'CAD', 'AUD'],
+      enum: ['USD', 'GBP', 'INR', 'CAD', 'AUD', 'EUR'],
       default: null,
     },
     bdaAmountCollected: { type: Number, default: null, min: 0 },

@@ -48,7 +48,7 @@ async function getPlanNameForCharge(charge) {
 /**
  * All-months summary for the Stripe Revenue chart in Graph 02.
  * Returns one entry per month that has at least one succeeded charge,
- * with USD and CAD totals.
+ * with USD, CAD and EUR totals.
  */
 export const getStripeAllMonthsSummary = async (req, res) => {
   try {
@@ -72,11 +72,12 @@ export const getStripeAllMonthsSummary = async (req, res) => {
     for (const c of charges) {
       const d = new Date(c.created * 1000);
       const ym = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
-      if (!byMonth[ym]) byMonth[ym] = { usd: 0, cad: 0, count: 0 };
+      if (!byMonth[ym]) byMonth[ym] = { usd: 0, cad: 0, eur: 0, count: 0 };
       const currency = c.currency.toUpperCase();
       const amount = c.amount / 100;
       if (currency === "USD") byMonth[ym].usd += amount;
       else if (currency === "CAD") byMonth[ym].cad += amount;
+      else if (currency === "EUR") byMonth[ym].eur += amount;
       byMonth[ym].count += 1;
     }
 
