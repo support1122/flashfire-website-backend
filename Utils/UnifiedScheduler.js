@@ -35,6 +35,10 @@ export function getScheduler() { return instance; }
 const SAFETY_POLL_MS = Number(process.env.UNIFIED_SCHEDULER_POLL_MS) || 30000;
 const STUCK_MS = Math.max(60000, Number(process.env.SCHEDULER_STUCK_PROCESSING_MS) || 2 * 60 * 1000);
 const BATCH_LIMIT = 20;
+// A run longer than this is considered hung: the watchdog releases the lock so timers/polls resume.
+const MAX_RUN_MS = Number(process.env.SCHEDULER_MAX_RUN_MS) || 90 * 1000;
+// Per-item cap so one hung WATI/Twilio/Discord call can't hold up the whole batch.
+const ITEM_TIMEOUT_MS = Number(process.env.SCHEDULER_ITEM_TIMEOUT_MS) || 45 * 1000;
 
 const DISCORD_CALL_WEBHOOK = process.env.DISCORD_REMINDER_CALL_WEBHOOK_URL;
 const DISCORD_MEET_WEBHOOK =
@@ -52,6 +56,8 @@ export class UnifiedScheduler {
     this.healHandle = null;
     this.running = false;
     this.processing = false;
+    this.processingSince = 0;
+    this.runId = 0;
     this.inFlight = 0;
     this.lastPollAt = null;
     this.lastPollMs = 0;
@@ -195,7 +201,14 @@ export class UnifiedScheduler {
   // ────────────────────────── Trigger (debounced) ──────────────────────────
 
   async _trigger() {
-    if (this.processing || !this.running) return;
+    if (!this.running) return;
+    // Watchdog: a hung run used to keep `processing` true for ~30 min, silently
+    // dropping every timer and poll (missed BDA reminders). Force-release it.
+    if (this.processing && Date.now() - this.processingSince > MAX_RUN_MS) {
+      console.error(`[UnifiedScheduler] WATCHDOG: run hung for ${Math.round((Date.now() - this.processingSince) / 1000)}s — releasing lock`);
+      this.processing = false;
+    }
+    if (this.processing) return;
     try {
       await this.processAllDue();
     } catch (err) {
@@ -208,6 +221,8 @@ export class UnifiedScheduler {
   async processAllDue() {
     if (this.processing) return;
     this.processing = true;
+    this.processingSince = Date.now();
+    const myRun = ++this.runId;
     const start = Date.now();
 
     try {
@@ -247,7 +262,8 @@ export class UnifiedScheduler {
     } finally {
       this.lastPollAt = new Date();
       this.lastPollMs = Date.now() - start;
-      this.processing = false;
+      // Only release if the watchdog hasn't already handed the lock to a newer run.
+      if (this.runId === myRun) this.processing = false;
     }
   }
 
@@ -261,7 +277,11 @@ export class UnifiedScheduler {
       await Promise.allSettled(
         batch.map(item => {
           this.inFlight++;
-          return processFn(item).catch(err => {
+          let timer;
+          const timeout = new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`item timed out after ${ITEM_TIMEOUT_MS}ms`)), ITEM_TIMEOUT_MS);
+          });
+          return Promise.race([processFn(item), timeout]).finally(() => clearTimeout(timer)).catch(err => {
             console.error('[UnifiedScheduler] Item error:', err.message);
           }).finally(() => { this.inFlight--; });
         })
@@ -294,7 +314,7 @@ export class UnifiedScheduler {
       .sort({ bookingCreatedAt: -1 })
       // calendlyHost + claimedBy are needed to route Kalpataru-assigned meetings
       // to their dedicated Discord channel in _processOneDiscord.
-      .select('bookingId clientEmail bookingStatus scheduledEventStartTime calendlyHost claimedBy')
+      .select('bookingId clientEmail bookingStatus statusChangeSource statusChangedAt scheduledEventStartTime calendlyHost claimedBy')
       .lean();
 
     const byId = new Map();
@@ -310,7 +330,7 @@ export class UnifiedScheduler {
 
   // ────────────────────────── Booking guard (in-memory, zero DB calls) ──────────────────────────
 
-  _checkGuard(item, bookingMap) {
+  _checkGuard(item, bookingMap, { clientInitiatedOnly = false } = {}) {
     const bId = item.metadata?.bookingId || item.bookingId;
     const email = (item.inviteeEmail || item.clientEmail || '').toLowerCase().trim();
 
@@ -318,7 +338,12 @@ export class UnifiedScheduler {
     if (!booking) return { ok: true };
 
     if (booking.bookingStatus === 'canceled' || booking.bookingStatus === 'no-show') {
-      return { ok: false, reason: `booking ${booking.bookingStatus}` };
+      // BDA-facing reminders: only the client (via Calendly) cancelling should suppress them.
+      // A BDA/admin marking no-show must never swallow the reminder for that meeting.
+      const clientInitiated = booking.statusChangeSource === 'calendly';
+      if (!clientInitiatedOnly || clientInitiated) {
+        return { ok: false, reason: `booking ${booking.bookingStatus}` };
+      }
     }
 
     const bookingTime = booking.scheduledEventStartTime
@@ -540,7 +565,7 @@ export class UnifiedScheduler {
     if (!reminder) return;
 
     try {
-      const guard = this._checkGuard(reminder, bookingMap);
+      const guard = this._checkGuard(reminder, bookingMap, { clientInitiatedOnly: true });
       if (!guard.ok) {
         await ScheduledDiscordMeetReminderModel.updateOne(
           { _id: reminder._id },
