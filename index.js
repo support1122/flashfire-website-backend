@@ -1062,6 +1062,12 @@ app.listen(PORT || 4001, async () => {
   const scheduler = new UnifiedScheduler();
   await scheduler.start();
   console.log('✅ [Server] Unified Precision Scheduler started — precision timers active');
+
+  // Independent BDA Discord reminder loop (own interval, own lock). If the unified
+  // scheduler ever stalls, BDA reminders still go out. Safe to run alongside it:
+  // rows and bookings are claimed atomically, so each reminder is sent only once.
+  const { startDiscordMeetReminderScheduler } = await import('./Utils/DiscordMeetReminderScheduler.js');
+  startDiscordMeetReminderScheduler();
   
   try {
     await watiService.refreshTemplatesCache();

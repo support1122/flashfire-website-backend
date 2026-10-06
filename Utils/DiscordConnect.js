@@ -5,6 +5,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Optional spacing before POST; default 0 (no self-throttling). Set DISCORD_WEBHOOK_DELAY_MS if needed. */
 const DEFAULT_DELAY_MS = Number(process.env.DISCORD_WEBHOOK_DELAY_MS) || 0;
+/** Hard cap per request so a hung connection can never stall the reminder scheduler. */
+const REQUEST_TIMEOUT_MS = Number(process.env.DISCORD_WEBHOOK_TIMEOUT_MS) || 10000;
+/** Never sleep longer than this between retries, even if Discord's Retry-After is larger. */
+const MAX_RETRY_WAIT_MS = 5000;
 const MAX_ATTEMPTS = Math.min(8, Math.max(1, Number(process.env.DISCORD_WEBHOOK_MAX_RETRIES) || 3));
 
 function parseRetryAfterMs(response) {
@@ -52,11 +56,14 @@ export const DiscordConnect = async (url, message, usePrefix = true) => {
         body: JSON.stringify({
           content: content,
         }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       if (response.status === 429 || response.status >= 500) {
-        const retryMs =
-          parseRetryAfterMs(response) ?? 2000 * (attempt + 1);
+        const retryMs = Math.min(
+          parseRetryAfterMs(response) ?? 2000 * (attempt + 1),
+          MAX_RETRY_WAIT_MS
+        );
         lastError = new Error(`Discord webhook ${response.status}, will retry`);
         if (attempt < MAX_ATTEMPTS - 1) {
           await sleep(retryMs);
