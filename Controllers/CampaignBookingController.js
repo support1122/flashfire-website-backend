@@ -3237,6 +3237,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
         { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         { $group: { _id: '$groupKey', bookingStatus: { $first: '$bookingStatus' } } },
@@ -3257,6 +3261,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 2. LEAD VOLUME TREND: Daily leads with qualification breakdown
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { qualification: qualExpr } },
         {
           $group: {
@@ -3281,6 +3289,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 3. CONVERSION RATE TREND: Weekly conversion rates
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { qualification: qualExpr } },
         {
           $group: {
@@ -3308,6 +3320,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 4. REVENUE BY PLAN
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, bookingStatus: 'paid', 'paymentPlan.name': { $ne: null } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $group: {
             _id: '$paymentPlan.name',
@@ -3322,6 +3338,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 5. REVENUE TREND: Monthly revenue
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, bookingStatus: 'paid' } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $group: {
             _id: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } },
@@ -3335,6 +3355,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 6. LEADS BY SOURCE (utmSource)
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { qualification: qualExpr } },
         {
           $group: {
@@ -3352,6 +3376,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 7. CONVERSION RATE BY SOURCE
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { qualification: qualExpr } },
         {
           $group: {
@@ -3377,6 +3405,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 8. LEADS BY DAY OF WEEK
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { qualification: qualExpr } },
         {
           $group: {
@@ -3391,6 +3423,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 9. LEADS BY HOUR OF DAY
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $group: {
             _id: { $hour: '$bookingCreatedAt' },
@@ -3405,6 +3441,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // same rule as statusBreakdown in getLeadsPaginated.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
         { $group: { _id: { groupKey: '$groupKey', bookingStatus: '$bookingStatus' } } },
         { $group: { _id: '$_id.bookingStatus', count: { $sum: 1 } } },
@@ -3414,6 +3454,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 11. AVERAGE DEAL SIZE BY PLAN
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, bookingStatus: 'paid', 'paymentPlan.price': { $gt: 0 } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $group: {
             _id: '$paymentPlan.name',
@@ -3429,6 +3473,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 12. LEAD AGING: How long leads sit in current status
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, bookingStatus: { $in: MQL_STATUSES } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $addFields: {
             ageDays: {
@@ -3449,6 +3497,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 13. PLAN DISTRIBUTION
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, 'paymentPlan.name': { $ne: null } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $group: {
             _id: '$paymentPlan.name',
@@ -3461,6 +3513,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 14. PLAN CONVERSION RATES
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, 'paymentPlan.name': { $ne: null } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $group: {
             _id: '$paymentPlan.name',
@@ -3483,6 +3539,11 @@ export const getLeadsAnalytics = async (req, res) => {
       // 15. VELOCITY: Avg days from creation to paid
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, bookingStatus: 'paid', 'paymentPlan.selectedAt': { $ne: null } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] },
+            'paymentPlan.selectedAt': { $cond: [{ $ne: ['$paymentPlan.selectedAt', null] }, { $toDate: '$paymentPlan.selectedAt' }, null] }
+        } },
         {
           $addFields: {
             daysToConvert: {
@@ -3505,6 +3566,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 16. BDA PERFORMANCE
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, 'claimedBy.email': { $ne: null } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $group: {
             _id: { email: '$claimedBy.email', name: '$claimedBy.name' },
@@ -3521,6 +3586,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 17. LEAD SOURCE TYPE: calendly vs meta vs manual etc.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { qualification: qualExpr } },
         {
           $group: {
@@ -3537,6 +3606,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 18. MONTH-OVER-MONTH COMPARISON
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { qualification: qualExpr } },
         {
           $group: {
@@ -3557,6 +3630,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // was in May, with their current status in May".
       CampaignBookingModel.aggregate([
         { $match: { ...matchQuery, scheduledEventStartTime: { $ne: null, $exists: true } } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: {
           groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] },
           month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } }
@@ -3590,6 +3667,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // bucketed by meeting date (same as #19).
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] }, sourceType: sourceTypeExpr } },
         { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         {
@@ -3613,6 +3694,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 21. MONTHLY BY UTM SOURCE — deduped by client, bucketed by meeting month.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
         { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         {
@@ -3637,6 +3722,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 22. MONTHLY BY UTM MEDIUM — deduped by client, bucketed by meeting month.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
         { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         {
@@ -3662,6 +3751,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // Month bucket = meeting month, so the Graphs UTM table can be filtered by month.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
         { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         {
@@ -3694,6 +3787,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // 24. UTM MEDIUM — leads + current status, per month (deduped by client).
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] } } },
         { $sort: { scheduledEventStartTime: -1, bookingCreatedAt: -1 } },
         {
@@ -3729,6 +3826,10 @@ export const getLeadsAnalytics = async (req, res) => {
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
         { $match: { leadSource: 'meta_lead_ad' } },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $addFields: {
             month: { $dateToString: { format: '%Y-%m', date: '$bookingCreatedAt' } }
@@ -3753,6 +3854,10 @@ export const getLeadsAnalytics = async (req, res) => {
       // Also splits out the Meta subset and carries completed/paid for the funnel.
       CampaignBookingModel.aggregate([
         { $match: matchQuery },
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         {
           $addFields: {
             groupKey: { $ifNull: ['$clientPhone', '$clientEmail'] },
@@ -3792,6 +3897,10 @@ export const getLeadsAnalytics = async (req, res) => {
           scheduledEventStartTime: { $ne: null }
         }},
         { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
+        { $addFields: {
           week: { $dateToString: { format: '%Y-W%V', date: '$scheduledEventStartTime' } },
           isMeta: { $cond: [{ $eq: ['$leadSource', 'meta_lead_ad'] }, 1, 0] }
         }},
@@ -3818,6 +3927,10 @@ export const getLeadsAnalytics = async (req, res) => {
           bookingStatus: { $in: ['completed', 'paid', 'no-show', 'canceled', 'rescheduled', 'scheduled'] },
           scheduledEventStartTime: { $ne: null }
         }},
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: {
           day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } },
           isMeta: { $cond: [{ $eq: ['$leadSource', 'meta_lead_ad'] }, 1, 0] }
@@ -3846,6 +3959,10 @@ export const getLeadsAnalytics = async (req, res) => {
           scheduledEventStartTime: { $ne: null }
         }},
         { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
+        { $addFields: {
           month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } },
           isMeta: { $cond: [{ $eq: ['$leadSource', 'meta_lead_ad'] }, 1, 0] }
         }},
@@ -3872,6 +3989,10 @@ export const getLeadsAnalytics = async (req, res) => {
           bookingStatus: { $in: ['completed','paid','no-show','canceled'] },
           scheduledEventStartTime: { $ne: null }
         }},
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime' } } } },
         { $group: {
           _id: '$month',
@@ -3888,6 +4009,10 @@ export const getLeadsAnalytics = async (req, res) => {
           bookingStatus: { $in: ['completed','paid','no-show','canceled'] },
           scheduledEventStartTime: { $ne: null }
         }},
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: { day: { $dateToString: { format: '%Y-%m-%d', date: '$scheduledEventStartTime' } } } },
         { $group: {
           _id: '$day',
@@ -3905,6 +4030,10 @@ export const getLeadsAnalytics = async (req, res) => {
           scheduledEventStartTime: { $gte: new Date('2026-05-22') },
           clientPhone: { $ne: null }
         }},
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: {
           phoneStripped: { $replaceAll: { input: '$clientPhone', find: '+', replacement: '' } }
         }},
@@ -3937,6 +4066,10 @@ export const getLeadsAnalytics = async (req, res) => {
           scheduledEventStartTime: { $gte: new Date('2026-05-22') },
           clientPhone: { $ne: null }
         }},
+        { $addFields: {
+            bookingCreatedAt: { $toDate: { $ifNull: ['$bookingCreatedAt', new Date(0)] } },
+            scheduledEventStartTime: { $cond: [{ $ne: ['$scheduledEventStartTime', null] }, { $toDate: '$scheduledEventStartTime' }, null] }
+        } },
         { $addFields: {
           phoneStripped: { $replaceAll: { input: '$clientPhone', find: '+', replacement: '' } }
         }},
