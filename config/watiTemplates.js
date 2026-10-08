@@ -70,10 +70,10 @@ export const WatiTemplates = {
  * meta_2_revised_123.
  */
 export const WatiWorkflowTemplates = {
-  notScheduledImmediate: process.env.WATI_TPL_META_1 || 'meta__revised_134',
+  notScheduledImmediate: process.env.WATI_TPL_META_1 || 'meta__revised_134_eu',
   notScheduled8h: process.env.WATI_TPL_META_2 || 'meta_2_revised_123',
-  notScheduled2d: process.env.WATI_TPL_META_31 || 'meta_31',
-  notScheduled7d: process.env.WATI_TPL_META_41 || 'meta_41',
+  notScheduled2d: process.env.WATI_TPL_META_31 || 'meta_31_revised_eu_v2',
+  notScheduled7d: process.env.WATI_TPL_META_41 || 'meta_41_revised_123',
 };
 
 /** Product demo video, sent as a body variable so the URL can change without a new template. */

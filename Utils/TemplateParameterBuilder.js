@@ -320,6 +320,13 @@ const builders = {
   // The 2-day follow-up, with Europe in the markets line. Same two variables.
   meta_31_revised_eu_v2: metaSchedulingParams,
 
+  // Variants the CRM workflow currently points at. All take {{1}} name, {{2}} booking
+  // link. Registered so they do not rely on the meta_* family fallback and its warning.
+  meta__revised_134_eu: metaSchedulingParams,
+  meta_31_revised_new123: metaSchedulingParams,
+  meta_31_revised_new123_eu: metaSchedulingParams,
+  meta_41_revised_123: metaSchedulingParams,
+
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
       throw new Error('Meeting date/time not available for cancelled1 template');
