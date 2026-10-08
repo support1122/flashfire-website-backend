@@ -8,7 +8,7 @@ import {
   getClientUserModel,
 } from '../Utils/ClientsTrackingDB.js';
 import { normalizeCurrency } from '../Utils/currency.js';
-import { seedAudDefaults } from '../Utils/bdaIncentiveDefaults.js';
+import { seedRegionalDefaults } from '../Utils/bdaIncentiveDefaults.js';
 
 const stripe = process.env.STRIPE_SECRET_KEY ? new Stripe(process.env.STRIPE_SECRET_KEY) : null;
 
@@ -33,10 +33,11 @@ const CURRENCY_BASE_PRICES = {
   CAD: { PRIME: 139, IGNITE: 239, PROFESSIONAL: 409, EXECUTIVE: 799 },
   GBP: { PRIME: 79, IGNITE: 149, PROFESSIONAL: 299, EXECUTIVE: 499 },
   AUD: { IGNITE: 299, PROFESSIONAL: 549, EXECUTIVE: 899 },
+  EUR: { IGNITE: 169, PROFESSIONAL: 299, EXECUTIVE: 499 },
 };
 
 const PLAN_KEYS = ['PRIME', 'IGNITE', 'PROFESSIONAL', 'EXECUTIVE'];
-const BDA_CURRENCIES = ['USD', 'GBP', 'INR', 'CAD', 'AUD'];
+const BDA_CURRENCIES = ['USD', 'GBP', 'INR', 'CAD', 'AUD', 'EUR'];
 // Leads eligible to be claimed here — same set the original claim flow allows.
 const CLAIMABLE_STATUSES = ['paid', 'scheduled', 'completed', 'rescheduled'];
 
@@ -66,7 +67,7 @@ function parseAmount(raw) {
  *
  * Verified against live data (290 dashboardtrackings rows): the `currency`
  * field on dashboardtrackings is NEVER populated. The reliable source is the
- * matching `users` row (`currency` in {CAD,GBP,INR,USD,AUD}, set on 244/293 rows).
+ * matching `users` row (`currency` in {CAD,GBP,INR,USD,AUD,EUR}, set on 244/293 rows).
  * Failing that, the `amountPaid` string usually carries a symbol/code prefix
  * ("£79", "$99", "CAD749", "₹46629"). Bare values like "579" give nothing.
  *
@@ -108,7 +109,7 @@ async function buildIncentiveConfig() {
       incentivePerLeadInr: r.incentivePerLeadInr ?? 0,
     });
   });
-  return seedAudDefaults(configByKey);
+  return seedRegionalDefaults(configByKey);
 }
 
 /** Prorated incentive (INR) for one claim line — same formula as BdaLeadController.incentiveForLine. */

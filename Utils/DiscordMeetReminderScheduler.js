@@ -275,7 +275,15 @@ async function resetStuckProcessingReminders() {
   }
 }
 
+let pollRunning = false;
+let pollStartedAt = 0;
+const POLL_MAX_RUN_MS = 60 * 1000;
+
 export async function processDueDiscordMeetReminders() {
+  // Overlap guard with a staleness release so one hung run can't block future ticks.
+  if (pollRunning && Date.now() - pollStartedAt < POLL_MAX_RUN_MS) return;
+  pollRunning = true;
+  pollStartedAt = Date.now();
   try {
     if (!DISCORD_MEET_2MIN_WEBHOOK_URL) {
       return;
@@ -480,6 +488,8 @@ export async function processDueDiscordMeetReminders() {
       '❌ [DiscordMeetReminder] Error in processDueDiscordMeetReminders',
       error.message
     );
+  } finally {
+    pollRunning = false;
   }
 }
 
