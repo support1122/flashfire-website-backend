@@ -15,12 +15,15 @@ export const WatiTemplates = {
    * Booking confirmation, sent ~1 minute after the booking.
    * 8 params: {{6}} = product demo link, {{7}} = Reschedule tail, {{8}} = Cancel tail.
    * Buttons: Reschedule, Cancel, and an "I'll Join" quick reply.
+   * The _eu version adds Europe to the markets line. It must be APPROVED in WATI before
+   * this ships; the previous template, new_meeting_booked_reminder, is still approved and
+   * is the fallback via WATI_TPL_BOOKED.
    *
    * Same parameter layout as the reminder templates, so they share one builder.
    * Override with WATI_TPL_BOOKED to swap it without a deploy.
    */
   bookingConfirmation:
-    process.env.WATI_TPL_BOOKED || 'new_meeting_booked_reminder',
+    process.env.WATI_TPL_BOOKED || 'new_meeting_booked_reminder_eu',
 
   /**
    * Original buttonless confirmation, 5 params. Used when no genuine cancel target
@@ -57,15 +60,20 @@ export const WatiTemplates = {
  * scripts/switch-workflow-templates.mjs repoints steps to — they are not read by the
  * send path.
  *
- * meta_2_demo is intentionally absent: Meta classified it MARKETING (the original
- * meta_2 is UTILITY), and marketing templates are dropped for anyone opted out of
- * marketing. meta_2_demo_u is the reworded UTILITY replacement.
+ * These mirror what the active workflow currently has configured, so running
+ * scripts/switch-workflow-templates.mjs is a no-op rather than silently reverting a
+ * choice made in the CRM. Update them whenever the workflow's templates change.
+ *
+ * Historical note: meta_2_demo was classified MARKETING by Meta (the original meta_2
+ * is UTILITY) and marketing templates are dropped for anyone opted out of marketing,
+ * so it was never used. meta_2_demo_u was the UTILITY replacement, now superseded by
+ * meta_2_revised_123.
  */
 export const WatiWorkflowTemplates = {
-  notScheduledImmediate: process.env.WATI_TPL_META_1 || 'meta_1_demo',
-  notScheduled8h: process.env.WATI_TPL_META_2 || 'meta_2_demo_u',
-  notScheduled2d: process.env.WATI_TPL_META_31 || 'meta_31_demo',
-  notScheduled7d: process.env.WATI_TPL_META_41 || 'meta_41_demo',
+  notScheduledImmediate: process.env.WATI_TPL_META_1 || 'meta__revised_134_eu',
+  notScheduled8h: process.env.WATI_TPL_META_2 || 'meta_2_revised_123',
+  notScheduled2d: process.env.WATI_TPL_META_31 || 'meta_31_revised_eu_v2',
+  notScheduled7d: process.env.WATI_TPL_META_41 || 'meta_41_revised_123',
 };
 
 /** Product demo video, sent as a body variable so the URL can change without a new template. */

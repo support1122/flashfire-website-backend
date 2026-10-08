@@ -312,9 +312,20 @@ const builders = {
   meta_2_demo_u: metaSchedulingParamsWithDemo,
   meta_41_demo: metaSchedulingParamsWithDemo,
 
-  // Same two parameters as the other meta templates ({{1}} name, {{2}} booking link),
-  // with a line about the markets Flashfire covers. No demo link.
+  // The *_revised_* pair: same two parameters as the rest of the family
+  // ({{1}} name, {{2}} booking link), reworded copy, no demo link.
+  // 134 is the immediate step, 123 the 8-hour one.
   meta__revised_134: metaSchedulingParams,
+  meta_2_revised_123: metaSchedulingParams,
+  // The 2-day follow-up, with Europe in the markets line. Same two variables.
+  meta_31_revised_eu_v2: metaSchedulingParams,
+
+  // Variants the CRM workflow currently points at. All take {{1}} name, {{2}} booking
+  // link. Registered so they do not rely on the meta_* family fallback and its warning.
+  meta__revised_134_eu: metaSchedulingParams,
+  meta_31_revised_new123: metaSchedulingParams,
+  meta_31_revised_new123_eu: metaSchedulingParams,
+  meta_41_revised_123: metaSchedulingParams,
 
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
@@ -437,6 +448,7 @@ const builders = {
 // template differs, so they all share one builder.
 builders.flashfire_appointment_booked_demo = builders.flashfire_appointment_reminder_demo;
 builders.new_meeting_booked_reminder = builders.flashfire_appointment_reminder_demo;
+builders.new_meeting_booked_reminder_eu = builders.flashfire_appointment_reminder_demo;
 
 /**
  * Build template parameters for a given template name and booking context.

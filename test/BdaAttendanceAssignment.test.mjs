@@ -107,36 +107,19 @@ function findMeeting(body, bookingId) {
 }
 
 describe('mark-absent', () => {
-  it('skips a BDA the meeting is not assigned to and writes no row', async () => {
+  // Absence is decided by the server's verdict job now (plan 4.4.5 and 5.4). Old extensions still call these
+  // endpoints, so they answer with a clean skip and write nothing, whoever calls.
+  it('is a no-op for the assigned host and for anyone else', async () => {
     const bookingId = await seedBooking();
-    const r = await call('POST', '/mark-absent', OTHER, { bookingId, reason: 'x' });
-    assert.equal(r.status, 200);
-    assert.equal(r.body.skipped, true);
-    assert.equal(r.body.reason, 'not_assigned');
+    for (const email of [HOST, OTHER]) {
+      const r = await call('POST', '/mark-absent', email, { bookingId, reason: 'x' });
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.body, { success: true, skipped: true, reason: 'server_decides' });
+    }
     assert.equal(await BdaAttendanceModel.countDocuments({ bookingId }), 0);
   });
 
-  it('marks the assigned Calendly host absent', async () => {
-    const bookingId = await seedBooking();
-    const r = await call('POST', '/mark-absent', HOST, { bookingId, reason: 'x' });
-    assert.equal(r.body.success, true);
-    const row = await BdaAttendanceModel.findOne({ bookingId, bdaEmail: HOST }).lean();
-    assert.equal(row.status, 'absent');
-  });
-
-  it('accepts a CRM claim as assignment', async () => {
-    const bookingId = await seedBooking({ calendlyHost: null, claimedBy: { email: OTHER, name: 'Other' } });
-    await call('POST', '/mark-absent', OTHER, { bookingId });
-    assert.equal((await BdaAttendanceModel.findOne({ bookingId, bdaEmail: OTHER }).lean()).status, 'absent');
-  });
-
-  it("upgrades the poller's unmarked row but never overwrites present", async () => {
-    const bookingId = await seedBooking();
-    await pollForAbsentBDAs();
-    assert.equal((await BdaAttendanceModel.findOne({ bookingId, bdaEmail: HOST }).lean()).status, 'unmarked');
-    await call('POST', '/mark-absent', HOST, { bookingId });
-    assert.equal((await BdaAttendanceModel.findOne({ bookingId, bdaEmail: HOST }).lean()).status, 'absent');
-
+  it('never touches an existing present row', async () => {
     const joined = await seedBooking();
     await call('POST', '/report-join', HOST, { bookingId: joined, meetLink: 'https://meet.google.com/abc-defg-hij' });
     await call('POST', '/mark-absent', HOST, { bookingId: joined });
@@ -145,14 +128,13 @@ describe('mark-absent', () => {
 });
 
 describe('warn-absent', () => {
-  it('skips cleanly instead of failing with 502', async () => {
+  it('is a no-op for everyone', async () => {
     const bookingId = await seedBooking();
-    const mine = await call('POST', '/warn-absent', HOST, { bookingId });
-    assert.equal(mine.status, 200);
-    assert.equal(mine.body.skipped, true);
-    const notMine = await call('POST', '/warn-absent', OTHER, { bookingId });
-    assert.equal(notMine.status, 200);
-    assert.equal(notMine.body.reason, 'not_assigned');
+    for (const email of [HOST, OTHER]) {
+      const r = await call('POST', '/warn-absent', email, { bookingId });
+      assert.equal(r.status, 200);
+      assert.deepEqual(r.body, { success: true, skipped: true, reason: 'server_decides' });
+    }
   });
 });
 
@@ -181,20 +163,25 @@ describe('my-meetings', () => {
 
   it('hides an unmarked row so Mark Present and auto-join stay available', async () => {
     const bookingId = await seedBooking();
-    await pollForAbsentBDAs();
+    await BdaAttendanceModel.create({
+      bookingId, bdaEmail: HOST, bdaName: 'Host BDA', status: 'unmarked', source: 'scheduler', meetingScheduledStart: new Date(),
+    });
     const host = findMeeting((await call('GET', '/my-meetings', HOST)).body, bookingId);
     assert.equal(host.attendance, null);
   });
 });
 
-describe('absent poller', () => {
-  it('treats the Calendly host as assigned (no false "NO BDA ASSIGNED")', async () => {
+describe('absent poller (stale sessions and unassigned meetings only)', () => {
+  it('no longer pings or writes a "No Response" row for an assigned BDA', async () => {
     const bookingId = await seedBooking();
     await pollForAbsentBDAs();
-    const rows = await BdaAttendanceModel.find({ bookingId }).lean();
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0].bdaEmail, HOST);
-    assert.match(rows[0].notes, /No response/);
+    assert.equal(await BdaAttendanceModel.countDocuments({ bookingId }), 0);
+  });
+
+  it('treats an admin reassignment as assigned too', async () => {
+    const bookingId = await seedBooking({ calendlyHost: null, attendanceAssignee: { email: OTHER, name: 'Other' } });
+    await pollForAbsentBDAs();
+    assert.equal(await BdaAttendanceModel.countDocuments({ bookingId }), 0);
   });
 
   it('still flags a truly unassigned meeting', async () => {
@@ -202,14 +189,16 @@ describe('absent poller', () => {
     await pollForAbsentBDAs();
     const row = await BdaAttendanceModel.findOne({ bookingId }).lean();
     assert.equal(row.bdaEmail, 'unassigned');
+    assert.match(row.notes, /not claimed/);
   });
 
-  it('a later real join flips the host row to present', async () => {
-    const bookingId = await seedBooking();
+  it('a real join by a covering BDA clears the unassigned placeholder', async () => {
+    const bookingId = await seedBooking({ calendlyHost: null });
     await pollForAbsentBDAs();
     await call('POST', '/report-join', HOST, { bookingId, meetLink: 'https://meet.google.com/abc-defg-hij' });
     const rows = await BdaAttendanceModel.find({ bookingId }).lean();
     assert.equal(rows.length, 1);
+    assert.equal(rows[0].bdaEmail, HOST);
     assert.equal(rows[0].status, 'present');
   });
 });

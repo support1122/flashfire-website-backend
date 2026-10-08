@@ -1,8 +1,10 @@
 import dotenv from 'dotenv';
+import fs from 'node:fs';
 import { DateTime } from 'luxon';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
+import { getAssignedBdaEmail } from './BdaAssignment.js';
 import {
   extractMeetCode,
   findConferenceRecords,
@@ -12,6 +14,10 @@ import {
   resolveCalendlyMeetUrl,
   resolveUserEmail,
 } from './MeetApiHelper.js';
+import { foldName, isNonHuman, isShared, resolveBda } from './BdaIdentity.js';
+import { getAllBdaProfiles, learnGoogleUserId, logUnknownName } from './BdaRegistry.js';
+import { recordPresentSignal } from './recordPresentSignal.js';
+import { recordSyncError, recordSyncOk } from './SyncHealth.js';
 
 dotenv.config();
 
@@ -29,18 +35,17 @@ dotenv.config();
 //   3. identify the assigned BDA (resolved email first, display name second),
 //   4. upsert timing onto BdaAttendance: firstJoinedAt, lateByMs, sessions,
 //      who was already in the call at the BDA's join,
-//   5. once the conference has ended: authoritative durationMs, leftAt, and
-//      final present/absent status.
+//   5. once the conference has ended: authoritative durationMs and leftAt.
 //
-// Present rule: any BDA session overlaps
-//   [scheduledStart - PRESENCE_BUFFER, scheduledEnd + PRESENCE_BUFFER].
-// Auto-absent ONLY when a conference actually happened (record exists),
-// ended, no participant matched the BDA, and the extension fallback did not
-// already prove presence. If the extension marked present but the API cannot
-// identify the BDA (e.g. they joined signed-out), presence is kept.
+// This worker no longer decides absence (plan 5.4). It keeps the exact in,
+// out, sessions and duration, and reports the BDA's first join as a
+// `google_meet` present signal (only when the match came from a stable ID).
+// The verdict job reads signals and writes present or absent. Rows are keyed
+// on the ASSIGNED BDA (getAssignedBdaEmail), not on the Calendly host, so a
+// reassigned meeting lands on the right person.
 //
-// Discord notifications are intentionally NOT sent from here — the existing
-// extension/scheduler flows own those and stay unchanged.
+// Discord: only the "Attendance Verified" recap is sent from here. Absent
+// messages belong to the verdict job.
 // ---------------------------------------------------------------------------
 
 const PRESENCE_BUFFER_MS = 60 * 1000;           // ±1 min around the scheduled window
@@ -52,6 +57,7 @@ const MAX_SESSION_MS = 6 * 60 * 60 * 1000;      // sanity clamp per session
 let isRunning = false;
 let disabledLogged = false;
 let credsWarned = false;
+let startupLogged = false;
 
 function formatIST(date) {
   if (!date) return 'N/A';
@@ -72,16 +78,6 @@ async function sendVerifiedDiscord(message) {
   }
 }
 
-async function sendAbsentDiscord(message) {
-  const url = process.env.DISCORD_BDA_ABSENT_WEBHOOK_URL || null;
-  if (!url) return;
-  try {
-    await DiscordConnect(url, message, false);
-  } catch (e) {
-    console.error('[MeetAttendance] Discord send failed:', e?.message);
-  }
-}
-
 function punctualityLabel(lateByMs) {
   if (lateByMs == null) return null;
   if (lateByMs > 60 * 1000) return `${Math.round(lateByMs / 60000)} min late`;
@@ -93,25 +89,82 @@ function normEmail(e) {
   return String(e || '').trim().toLowerCase();
 }
 
-function normName(n) {
-  return String(n || '').trim().toLowerCase().replace(/\s+/g, ' ');
+/**
+ * Which credential source MeetApiHelper will use: json | file | split | MISSING. Mirrors its lookup order and
+ * never prints a value. Shown once at startup so a missing production key (P3) is visible in the first log lines.
+ */
+export function describeMeetCredentials() {
+  if (!hasMeetApiCredentials()) return 'MISSING';
+  try {
+    const parsed = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_JSON ? JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY_JSON) : null;
+    if (parsed?.client_email && parsed?.private_key) return 'json';
+  } catch {
+    // Invalid JSON is not usable; the helper already logged it and fell through to the next source.
+  }
+  const keyFile = process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE;
+  if (keyFile && fs.existsSync(keyFile)) return 'file';
+  return 'split';
 }
 
-/** Match the assigned BDA among conference participants. */
-async function findBdaParticipant({ participants, hostEmail, expectedNames }) {
-  // 1. Email match via Directory resolution of signed-in users.
+/**
+ * Match the assigned BDA among conference participants (plan 2.8).
+ *   1. Directory email, then the stored googleUserId: stable IDs, allowed to decide a verdict.
+ *   2. Name or alias that resolves to exactly the assigned BDA: fills in, out and time spent only.
+ * A name that fits two participants (a client sharing the BDA's first name) is ambiguous, so nobody is picked.
+ * Returns { participant, via, matchedBy: 'stable_id' | 'name' } or null.
+ * `registry` and `resolveEmail` are injectable so tests never touch the network or the database.
+ */
+export async function findBdaParticipant({
+  participants,
+  hostEmail,
+  assignedEmail = hostEmail,
+  expectedNames = [],
+  registry,
+  resolveEmail = resolveUserEmail,
+}) {
+  const assigned = normEmail(assignedEmail);
+  const profiles = registry || (await getAllBdaProfiles());
+  const profile = profiles.find((p) => p.email === assigned) || null;
+
+  // 1a. Directory email (works for signed-in Workspace users).
   for (const p of participants) {
     if (!p.userId) continue;
-    const email = await resolveUserEmail({ hostEmail, userId: p.userId });
+    const email = await resolveEmail({ hostEmail, userId: p.userId });
     p.resolvedEmail = email;
-    if (email && email === hostEmail) return p;
+    if (email && email === assigned) {
+      // First Directory hit teaches us the Google user ID, so later meetings match without Directory.
+      if (profile && !profile.googleUserId) {
+        try {
+          await learnGoogleUserId(assigned, p.userId);
+        } catch (err) {
+          console.error('[MeetAttendance] could not learn googleUserId:', err?.message);
+        }
+      }
+      return { participant: p, via: 'email', matchedBy: 'stable_id' };
+    }
   }
-  // 2. Display-name match (covers Directory lookup failures).
-  const wanted = expectedNames.map(normName).filter(Boolean);
-  if (wanted.length > 0) {
-    const byName = participants.find((p) => wanted.includes(normName(p.displayName)));
-    if (byName) return byName;
+
+  // 1b. Stored Google user ID.
+  if (profile?.googleUserId) {
+    const byId = participants.find((p) => p.userId && p.userId === profile.googleUserId);
+    if (byId) return { participant: byId, via: 'google', matchedBy: 'stable_id' };
   }
+
+  // 2. Name or alias. A participant Directory already tied to a different registry BDA is someone else.
+  const candidates = [];
+  for (const p of participants) {
+    if (!p.displayName || isNonHuman(p.displayName) || isShared(p.displayName)) continue;
+    // A stable ID already ties this person to a registry BDA; had it been the assigned one, step 1 returned.
+    if (resolveBda({ email: p.resolvedEmail, googleUserId: p.userId }, profiles)) continue;
+    if (profile) {
+      const hit = resolveBda({ name: p.displayName }, profiles);
+      if (hit && hit.bda.email === assigned) candidates.push({ participant: p, via: hit.via });
+    } else if (expectedNames.map(foldName).includes(foldName(p.displayName))) {
+      // Assigned person is not in the registry (so nothing about them is fined): keep the old exact-name rule.
+      candidates.push({ participant: p, via: 'name' });
+    }
+  }
+  if (candidates.length === 1) return { ...candidates[0], matchedBy: 'name' };
   return null;
 }
 
@@ -175,30 +228,43 @@ function rosterAtJoin(participants, bdaParticipant, bdaJoin) {
     .map((p) => ({ displayName: p.displayName || 'Unknown', kind: p.kind }));
 }
 
-export async function processBooking(booking, now) {
+/**
+ * `deps` is for tests only: { resolveMeetCode, findConferenceRecords, listParticipants, registry, resolveEmail,
+ * recordSignal }. Every default is the real Google-backed function.
+ */
+export async function processBooking(booking, now, deps = {}) {
+  const getMeetCode = deps.resolveMeetCode || resolveBookingMeetCode;
+  const findRecords = deps.findConferenceRecords || findConferenceRecords;
+  const listParticipants = deps.listParticipants || listParticipantsWithSessions;
+  const signal = deps.recordSignal || recordPresentSignal;
+
   const scheduledStart = new Date(booking.scheduledEventStartTime);
   const scheduledEnd = booking.scheduledEventEndTime
     ? new Date(booking.scheduledEventEndTime)
     : new Date(scheduledStart.getTime() + DEFAULT_MEETING_MS);
 
-  const hostEmail = normEmail(booking.calendlyHost?.email || booking.claimedBy?.email);
-  if (!hostEmail) return; // absent scheduler already alerts unassigned meetings
+  // The BDA this meeting belongs to (admin reassignment, then Calendly host, then CRM claim). The attendance row
+  // is keyed on it. Google is still asked as the original organizer, because reassigning a meeting for leave cover
+  // does not move the Meet space to the covering BDA.
+  const assignedEmail = getAssignedBdaEmail(booking);
+  if (!assignedEmail) return; // absent scheduler already alerts unassigned meetings
+  const hostEmail = normEmail(booking.calendlyHost?.email || booking.claimedBy?.email) || assignedEmail;
 
   // Skip if already finalized from the API (check before the Calendly
   // redirect so finalized bookings cost nothing).
   const existing = await BdaAttendanceModel.findOne({
     bookingId: booking.bookingId,
-    bdaEmail: hostEmail,
+    bdaEmail: assignedEmail,
   });
   if (existing?.meetApiFinalizedAt) return;
 
-  const meetCode = await resolveBookingMeetCode(booking);
+  const meetCode = await getMeetCode(booking);
   if (!meetCode) return;
 
   // One booking can span SEVERAL conference records on the same code
   // ("end call for everyone" + rejoin starts a new record) — take them all
   // and merge each person's sessions across records.
-  const records = await findConferenceRecords({
+  const records = await findRecords({
     hostEmail,
     meetCode,
     scheduledStart,
@@ -209,7 +275,7 @@ export async function processBooking(booking, now) {
   const perRecord = [];
   for (const r of records) {
     perRecord.push(
-      ...(await listParticipantsWithSessions({
+      ...(await listParticipants({
         hostEmail,
         conferenceRecordName: r.name,
       }))
@@ -221,11 +287,20 @@ export async function processBooking(booking, now) {
   const record = records[records.length - 1]; // latest — drives ended/reference
 
   const expectedNames = [
+    booking.attendanceAssignee?.name,
     booking.calendlyHost?.name,
     booking.claimedBy?.name,
   ].filter(Boolean);
 
-  const bda = await findBdaParticipant({ participants, hostEmail, expectedNames });
+  const match = await findBdaParticipant({
+    participants,
+    hostEmail,
+    assignedEmail,
+    expectedNames,
+    registry: deps.registry,
+    resolveEmail: deps.resolveEmail,
+  });
+  const bda = match?.participant || null;
 
   // Finalize only when every record has ended AND the scheduled slot is over
   // (an early "ended" mid-slot could miss a rejoin that starts a new record),
@@ -238,8 +313,12 @@ export async function processBooking(booking, now) {
   const windowEnd = new Date(scheduledEnd.getTime() + PRESENCE_BUFFER_MS);
 
   const base = {
-    bdaName: booking.calendlyHost?.name || booking.claimedBy?.name || hostEmail,
-    bdaEmail: hostEmail,
+    bdaName:
+      (booking.attendanceAssignee?.email ? booking.attendanceAssignee?.name : null) ||
+      booking.calendlyHost?.name ||
+      booking.claimedBy?.name ||
+      assignedEmail,
+    bdaEmail: assignedEmail,
     bookingId: booking.bookingId,
     meetLink: booking.googleMeetUrl || booking.calendlyMeetLink || null,
     meetingScheduledStart: scheduledStart,
@@ -266,6 +345,9 @@ export async function processBooking(booking, now) {
       })),
       participantsAtJoin: rosterAtJoin(participants, bda, firstJoin),
       source: 'meet_api',
+      // 'stable_id' (Directory email or Google user ID) or 'name'. Only a stable match may decide a verdict;
+      // a name match still fills in, out and time spent, and the CRM shows it as "matched by name".
+      matchedBy: match.matchedBy,
     };
 
     if (present && (!existing || !['manual', 'absent'].includes(existing.status))) {
@@ -276,26 +358,13 @@ export async function processBooking(booking, now) {
       set.durationMs = durationMs;
       set.leftAt = bda.latestEndTime || null;
       set.meetApiFinalizedAt = now;
-      // Never auto-absent a canceled booking — skipping a canceled meeting
-      // is correct behavior, not an absence.
-      if (
-        !present &&
-        booking.bookingStatus !== 'canceled' &&
-        (!existing || !['present', 'manual'].includes(existing.status))
-      ) {
-        set.status = 'absent';
-        set.notes = `${existing?.notes || ''} [meet_api: joined outside the ±1 min window]`.trim();
-        // We post the verified-absent message below; flag the row so the
-        // absent-poller treats it as already announced and never double-alerts.
-        set.discordNotified = true;
-      }
     }
 
     // status is required on insert — default to present-window verdict.
     if (!set.status && !existing) set.status = present ? 'present' : 'unmarked';
 
     await BdaAttendanceModel.findOneAndUpdate(
-      { bookingId: booking.bookingId, bdaEmail: hostEmail },
+      { bookingId: booking.bookingId, bdaEmail: assignedEmail },
       {
         $set: set,
         $setOnInsert: {
@@ -306,40 +375,55 @@ export async function processBooking(booking, now) {
       { upsert: true, new: true }
     );
 
+    // The BDA's first join, as a present signal with Google's exact time. A name match is display only, so only a
+    // stable-ID match is reported. A late first join is stored too but does not count toward the window, and a join
+    // that was in time but arrives after an absent verdict triggers the late-evidence correction.
+    if (match.matchedBy === 'stable_id' && firstJoin) {
+      try {
+        await signal({
+          bookingId: booking.bookingId,
+          bdaEmail: assignedEmail,
+          bdaName: set.bdaName,
+          kind: 'google_meet',
+          eventAt: firstJoin,
+          matchedBy: 'stable_id',
+        });
+      } catch (err) {
+        console.error(`[MeetAttendance] could not record google_meet signal for ${booking.bookingId}:`, err?.message);
+      }
+    }
+
     // Authoritative recap once per booking, after the final numbers are stored.
     if (finalize) {
       const late = punctualityLabel(set.lateByMs);
       const roster = (set.participantsAtJoin || []).map((p) => p.displayName).join(', ');
-      if (set.status === 'absent') {
-        await sendAbsentDiscord(
-          `🚫 **BDA Absent — verified from Google Meet records**\n` +
-          `**BDA:** ${set.bdaName} (${hostEmail})\n` +
-          `**Client:** ${booking.clientName || 'Unknown'}\n` +
-          `**Meeting:** ${formatIST(scheduledStart)}\n` +
-          `_BDA joined the call, but outside the allowed window (scheduled time ±1 min)._`
-        );
-      } else {
-        await sendVerifiedDiscord(
-          `📋 **Attendance Verified — Google Meet records**\n` +
-          `**BDA:** ${set.bdaName} (${hostEmail})\n` +
-          `**Client:** ${booking.clientName || 'Unknown'}\n` +
-          `**In:** ${formatIST(firstJoin)}${late ? ` (${late})` : ''}\n` +
-          `**Out:** ${formatIST(set.leftAt)}\n` +
-          `**Duration (total):** ${Math.round((set.durationMs || 0) / 60000)} min\n` +
-          `**In call when BDA joined:** ${roster || 'nobody (BDA was first)'}`
-        );
-      }
+      await sendVerifiedDiscord(
+        `📋 **Attendance Verified: Google Meet records**\n` +
+        `**BDA:** ${set.bdaName} (${assignedEmail})\n` +
+        `**Client:** ${booking.clientName || 'Unknown'}\n` +
+        `**In:** ${formatIST(firstJoin)}${late ? ` (${late})` : ''}\n` +
+        `**Out:** ${formatIST(set.leftAt)}\n` +
+        `**Duration (total):** ${Math.round((set.durationMs || 0) / 60000)} min\n` +
+        `**In call when BDA joined:** ${roster || 'nobody (BDA was first)'}`
+      );
     }
     return;
   }
 
   // BDA not identified among participants.
   if (finalize) {
-    // Canceled booking + BDA not in the call = correct behavior, not absence.
+    // Show an admin which names failed to resolve, so a missing alias is one click away (plan 2.8).
+    const profiles = await getAllBdaProfiles();
+    for (const p of participants.slice(0, 20)) {
+      if (p.kind === 'phone' || !p.displayName) continue;
+      if (resolveBda({ email: p.resolvedEmail, googleUserId: p.userId, name: p.displayName }, profiles)) continue;
+      await logUnknownName({ name: p.displayName, source: 'google_meet', ref: booking.bookingId });
+    }
+
+    // Canceled booking + BDA not in the call = nothing to record.
     if (booking.bookingStatus === 'canceled') return;
-    // Conference happened and ended without the BDA — real absence, unless the
-    // extension fallback proved presence (identity match can fail if the BDA
-    // joined signed-out; the DOM detection is authoritative for "was there").
+    // The extension fallback may already prove presence (identity match can fail if the BDA joined signed-out;
+    // the DOM detection is authoritative for "was there"). Keep it and just mark the Google data final.
     if (existing && ['present', 'manual'].includes(existing.status)) {
       await BdaAttendanceModel.updateOne(
         { _id: existing._id },
@@ -355,36 +439,28 @@ export async function processBooking(booking, now) {
       return;
     }
 
+    // The meeting ran and nobody matched the assigned BDA. Keep who WAS in the call for the CRM, but do not decide
+    // anything: the verdict job turns "no signal in time" into absent, and the row stays 'unmarked' until then.
     await BdaAttendanceModel.findOneAndUpdate(
-      { bookingId: booking.bookingId, bdaEmail: hostEmail },
+      { bookingId: booking.bookingId, bdaEmail: assignedEmail },
       {
         $set: {
           ...base,
-          status: 'absent',
           source: 'meet_api',
           participantsAtJoin: participants.map((p) => ({
             displayName: p.displayName || 'Unknown',
             kind: p.kind,
           })),
           meetApiFinalizedAt: now,
-          notes: `Conference happened (${participants.length} participant(s)) but the assigned BDA never joined — marked absent from Google Meet records`,
+          notes: `Conference happened (${participants.length} participant(s)) but the assigned BDA was not identified among them`,
         },
         $setOnInsert: {
           attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+          status: 'unmarked',
           markedAt: now,
         },
       },
       { upsert: true, new: true }
-    );
-
-    const whoWasThere = participants.map((p) => p.displayName || 'Unknown').join(', ');
-    await sendAbsentDiscord(
-      `🚫 **BDA Absent — verified from Google Meet records**\n` +
-      `**BDA:** ${base.bdaName} (${hostEmail})\n` +
-      `**Client:** ${booking.clientName || 'Unknown'}\n` +
-      `**Meeting:** ${formatIST(scheduledStart)}\n` +
-      `**Who was in the call:** ${whoWasThere}\n` +
-      `_The meeting ran, but the assigned BDA never joined._`
     );
   }
 }
@@ -404,8 +480,10 @@ export async function syncBookingFromMeetNow(booking) {
   if (!meetApiEnabled() || !hasMeetApiCredentials()) return;
   try {
     await processBooking(booking, new Date());
+    await recordSyncOk('google_meet');
   } catch (err) {
     console.warn(`[MeetAttendance] live check failed for ${booking?.bookingId}: ${err?.message}`);
+    await recordSyncError('google_meet', err);
   }
 }
 
@@ -419,7 +497,13 @@ export async function pollMeetApiAttendance() {
     }
     return;
   }
+  if (!startupLogged) {
+    startupLogged = true;
+    console.log(`[MeetAttendance] enabled, credentials: ${describeMeetCredentials()}`);
+  }
   if (!hasMeetApiCredentials()) {
+    // Visible on the health screen as an error with a stale lastOkAt, which is the P3 symptom (plan 1.2).
+    await recordSyncError('google_meet', 'No Google credentials configured');
     if (!credsWarned) {
       console.warn('[MeetAttendance] No Google credentials (GOOGLE_SERVICE_ACCOUNT_KEY_JSON, GOOGLE_SERVICE_ACCOUNT_KEY_FILE, or GOOGLE_CLIENT_EMAIL/GOOGLE_PRIVATE_KEY) — attendance is NOT being verified against Google Meet');
       credsWarned = true;
@@ -445,14 +529,16 @@ export async function pollMeetApiAttendance() {
       scheduledEventStartTime: { $gte: lookback, $lte: lead },
     })
       .select(
-        'bookingId clientName bookingStatus scheduledEventStartTime scheduledEventEndTime googleMeetCode googleMeetUrl calendlyMeetLink calendlyHost claimedBy'
+        'bookingId clientName bookingStatus scheduledEventStartTime scheduledEventEndTime googleMeetCode googleMeetUrl calendlyMeetLink calendlyHost claimedBy attendanceAssignee'
       )
       .lean();
 
+    let lastBookingError = null;
     for (const booking of bookings) {
       try {
         await processBooking(booking, now);
       } catch (err) {
+        lastBookingError = err;
         // 403 here means DWD scopes not authorized yet — actionable, so say so.
         const status = err?.response?.status || err?.code;
         const hint = status === 403 ? ' (DWD scopes not authorized in Admin console?)' : '';
@@ -461,8 +547,12 @@ export async function pollMeetApiAttendance() {
         );
       }
     }
+    // A cycle counts as healthy only when no booking failed in it.
+    if (lastBookingError) await recordSyncError('google_meet', lastBookingError);
+    else await recordSyncOk('google_meet');
   } catch (error) {
     console.error('[MeetAttendance] Poll error:', error.message);
+    await recordSyncError('google_meet', error);
   } finally {
     isRunning = false;
   }

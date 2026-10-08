@@ -47,6 +47,23 @@ async function fetchTemplates() {
 
 const findTemplate = (list, name) => list.find(t => t.elementName === name);
 
+/**
+ * WATI returns headers in a read format ({ type: 0, headerTypeString: 'none', text: null,
+ * link: null, ... }) but the create endpoint documents string types
+ * ('none' | 'text' | 'image'). Newer templates come back in the read format, so passing
+ * it through would submit a numeric type the create API does not document.
+ */
+function toCreateHeader(h) {
+  if (!h) return { type: 'none' };
+  const kind = String(h.typeString ?? h.headerTypeString ?? (typeof h.type === 'string' ? h.type : 'none')).toLowerCase();
+  if (kind === 'none' || kind === '0') return { type: 'none' };
+  const out = { type: kind };
+  if (h.text) out.text = h.text;
+  if (h.link) out.link = h.link;
+  if (h.mediaHeaderId) out.mediaHeaderId = h.mediaHeaderId;
+  return out;
+}
+
 /** Reshape an existing template record into a create-endpoint payload. */
 function toCreatePayload(t) {
   const buttons = (t.buttons || []).map(b => {
@@ -85,7 +102,7 @@ function toCreatePayload(t) {
     language: t.language?.value || 'en_US',
     body: t.bodyOriginal || t.body,
     footer: t.footer || '',
-    header: t.header || { type: 'none' },
+    header: toCreateHeader(t.header),
     customParams: t.customParams || [],
     buttonsType,
     buttons,

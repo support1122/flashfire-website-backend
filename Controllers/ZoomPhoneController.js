@@ -3,13 +3,23 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { ZoomWebhookEventModel } from '../Schema_Models/ZoomWebhookEvent.js';
 import { ZoomUserPresenceModel } from '../Schema_Models/ZoomUserPresence.js';
 import {
-  normalizePhone,
   verifyZoomSignature,
   buildUrlValidationResponse,
   getZoomAccessToken,
   getAllowedCallerNumbersForAgent,
 } from '../Utils/ZoomPhone.js';
 import { syncZoomCallHistory } from '../Utils/ZoomPhoneSync.js';
+import {
+  attributeCaller,
+  findBookingsByPhoneKeys,
+  getIdentityDeps,
+  normalizeLeadPhone,
+  pickBookingForCall,
+  reportSync,
+} from '../Utils/CallLinking.js';
+
+// One phone key everywhere (last 10 digits), the same one CampaignBooking.normalizedClientPhone uses.
+const normalizePhone = normalizeLeadPhone;
 
 /**
  * Zoom Phone webhook receiver.
@@ -141,22 +151,14 @@ export const zoomPhoneWebhook = async (req, res) => {
     const transcriptUrl = obj.transcript_download_url || null;
     const aiSummary = obj.ai_summary || obj.summary || null;
 
-    // Try to attach the call to an existing lead by phone.
+    // Try to attach the call to an existing lead by phone: one indexed lookup on the shared phone key.
+    // A client with two bookings gets the booking whose meeting is closest to the call.
     let bookingId = null;
     let leadEmail = null;
     let leadName = null;
     if (leadNumberNormalized) {
-      const booking = await CampaignBookingModel
-        .findOne({
-          $expr: {
-            $regexMatch: {
-              input: { $ifNull: ['$clientPhone', ''] },
-              regex: new RegExp(`${leadNumberNormalized}$`),
-            },
-          },
-        })
-        .select('bookingId clientEmail clientName')
-        .lean();
+      const byKey = await findBookingsByPhoneKeys([leadNumberNormalized]);
+      const booking = pickBookingForCall(byKey.get(leadNumberNormalized), startedAt);
       if (booking) {
         bookingId = booking.bookingId;
         leadEmail = booking.clientEmail || null;
@@ -164,6 +166,20 @@ export const zoomPhoneWebhook = async (req, res) => {
       }
     }
 
+    // Who made the call (plan 2.8): by email / Zoom user id only. Unknown callers are stored, never counted.
+    // This also learns the BDA's Zoom user id the first time their email matches a profile.
+    if (isOutbound) {
+      try {
+        const callerId = sales?.user_id || sales?.id || obj.caller_user_id || null;
+        const attributed = await attributeCaller({ email: salesEmail, zoomUserId: callerId }, await getIdentityDeps());
+        if (!attributed) console.warn(`[ZoomPhone] outbound call ${callId} from a caller outside the BDA registry (stored, not counted)`);
+      } catch (e) {
+        console.error('[ZoomPhone] caller attribution failed:', e.message);
+      }
+    }
+
+    // Later events for the same call (ended, completed) often omit fields the first event had. Only write a
+    // field when this event carries a value, so a ringing event's start time or a synced link is never erased.
     const update = {
       direction: direction === 'unknown' ? (isOutbound ? 'outbound' : 'inbound') : direction,
       status,
@@ -172,12 +188,10 @@ export const zoomPhoneWebhook = async (req, res) => {
       salesNumber,
       leadNumber,
       leadNumberNormalized,
-      bookingId,
-      leadEmail,
-      leadName,
-      startedAt,
-      answeredAt,
-      endedAt,
+      ...(bookingId ? { bookingId, leadEmail, leadName } : {}),
+      ...(startedAt ? { startedAt } : {}),
+      ...(answeredAt ? { answeredAt } : {}),
+      ...(endedAt ? { endedAt } : {}),
       // Only overwrite durationSec when the new value is larger than what we
       // already stored (the ringing event has 0, the completed event has the real one).
       ...(durationSec > 0 ? { durationSec } : {}),
@@ -192,6 +206,7 @@ export const zoomPhoneWebhook = async (req, res) => {
       { $set: update, $setOnInsert: { callId } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+    await reportSync(true); // webhook handled: Zoom call data is fresh (SyncHealth 'zoom_phone')
 
     // Keep the agent's on-call state in sync from the connected/ended events.
     // "connected" (or ringing) => on a call; ended/completed/missed => free.
@@ -221,6 +236,7 @@ export const zoomPhoneWebhook = async (req, res) => {
   } catch (error) {
     console.error('[ZoomPhone] Webhook error:', error);
     debug.handlerNote = `error: ${error.message}`;
+    await reportSync(false, error);
     await persistDebug();
     // Always 200 so Zoom doesn't retry forever; we log the error.
     return res.status(200).json({ ok: false, error: error.message });

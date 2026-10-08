@@ -10,6 +10,33 @@ const PayrollSchema = new mongoose.Schema(
     monthlySalary: { type: Number, default: 0 },
     incentive: { type: Number, default: null },
     deduction: { type: Number, default: null },
+    // What "Pull deductions" put into `deduction` (plan 8.4). `deduction` stays freely editable after a pull.
+    deductionBreakdown: {
+      type: new mongoose.Schema(
+        {
+          bdaEmail: String,
+          month: String,
+          totalInr: Number,
+          pulledAt: Date,
+          pulledBy: String,
+          byRule: mongoose.Schema.Types.Mixed, // { rule: { count, amountInr } }
+          items: [
+            {
+              _id: false,
+              deductionId: String,
+              rule: String,
+              bookingId: String,
+              clientName: String,
+              scheduledStart: Date,
+              tierIndex: Number,
+              amountInr: Number,
+            },
+          ],
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
     isPaid: { type: Boolean, default: false },
     leaves: { type: Number, default: 0 },
   },

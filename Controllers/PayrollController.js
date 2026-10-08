@@ -1,4 +1,9 @@
+import mongoose from 'mongoose';
 import { PayrollModel } from '../Schema_Models/Payroll.js';
+import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
+import { resolveBda } from '../Utils/BdaIdentity.js';
+import { getAllBdaProfiles } from '../Utils/BdaRegistry.js';
+import { buildTotals, getDeductionsMode } from '../Utils/deductionPolicy.js';
 
 export const getPayroll = async (req, res) => {
   try {
@@ -86,5 +91,80 @@ export const deletePayroll = async (req, res) => {
   } catch (error) {
     console.error('Error deleting payroll record:', error);
     return res.status(500).json({ success: false, error: error.message || 'Failed to delete payroll record' });
+  }
+};
+
+/**
+ * "Pull deductions" (plan 8.4): pre-fill Payroll.deduction with the BDA's ACTIVE deductions for the record's month and
+ * keep the breakdown. Dry run by default: nothing is written unless the body says `apply: true`.
+ * Body: { payrollId, bdaEmail?, apply? }. bdaEmail is only needed when the payroll employeeName does not resolve to
+ * exactly one registry BDA. The admin can still edit the number afterwards through updatePayroll.
+ */
+export const pullDeductions = async (req, res) => {
+  const fail = (status, code, message) => res.status(status).json({ success: false, error: { code, message } });
+  try {
+    const { payrollId, apply } = req.body || {};
+    if (!payrollId || !mongoose.isValidObjectId(payrollId)) {
+      return fail(400, 'invalid_payroll_id', 'payrollId must be a payroll record id');
+    }
+    const record = await PayrollModel.findById(payrollId);
+    if (!record) return fail(404, 'payroll_not_found', 'Payroll record not found');
+
+    let bdaEmail = String(req.body?.bdaEmail ?? '').trim().toLowerCase();
+    if (!bdaEmail) {
+      // Names are only a fallback: resolveBda refuses an ambiguous or unknown name, so it can never pick the wrong BDA.
+      const hit = resolveBda({ name: record.employeeName }, await getAllBdaProfiles());
+      bdaEmail = hit?.bda?.email || '';
+    }
+    if (!bdaEmail) {
+      return fail(422, 'bda_not_resolved', `Could not match "${record.employeeName}" to one BDA, send bdaEmail`);
+    }
+
+    const rows = await BdaDeductionModel.find({ bdaEmail, month: record.month, status: { $in: ['active', 'needs_review'] } })
+      .sort({ 'evidence.scheduledStart': 1 })
+      .lean();
+    const active = rows.filter((r) => r.status === 'active');
+    const totals = buildTotals(active);
+    const breakdown = {
+      bdaEmail,
+      month: record.month,
+      totalInr: totals.activeAmountInr,
+      pulledAt: new Date(),
+      pulledBy: req.crmAdmin ? req.crmAdmin.email || 'admin' : req.crmUser?.email || null,
+      byRule: totals.byRule,
+      items: active.map((r) => ({
+        deductionId: r.deductionId,
+        rule: r.rule,
+        bookingId: r.bookingId,
+        clientName: r.evidence?.clientName ?? null,
+        scheduledStart: r.evidence?.scheduledStart ?? null,
+        tierIndex: r.tierIndex ?? null,
+        amountInr: r.amountInr,
+      })),
+    };
+
+    const previousDeduction = record.deduction;
+    const applied = apply === true;
+    if (applied) {
+      record.deduction = breakdown.totalInr;
+      record.deductionBreakdown = breakdown;
+      await record.save();
+    }
+    return res.status(200).json({
+      success: true,
+      dryRun: !applied,
+      applied,
+      mode: getDeductionsMode(),
+      payrollId: String(record._id),
+      month: record.month,
+      bdaEmail,
+      previousDeduction,
+      deduction: breakdown.totalInr,
+      breakdown,
+      underReview: rows.length - active.length, // needs_review rows are left out until an admin decides
+    });
+  } catch (error) {
+    console.error('Error pulling deductions:', error);
+    return fail(500, 'internal_error', 'Failed to pull deductions');
   }
 };
