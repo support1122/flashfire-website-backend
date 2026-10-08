@@ -154,6 +154,24 @@ export class UnifiedScheduler {
       console.warn('[UnifiedScheduler] Meet attendance scheduler not available:', e.message);
     }
 
+    // 5c. Attendance verdicts (15 s): the server, not the extension, decides present or absent, plus the
+    // heartbeat alert, integrity check, leave-day reassignment post and sync-health alert. Plan 5.4.
+    try {
+      const { startAttendanceVerdictJob } = await import('./AttendanceVerdictJob.js');
+      startAttendanceVerdictJob();
+    } catch (e) {
+      console.warn('[UnifiedScheduler] Attendance verdict job not available:', e.message);
+    }
+
+    // 5d. Deductions (5 min evaluators + event listeners). Writes nothing unless DEDUCTIONS_MODE is
+    // shadow or live, so starting it is safe on its own. Plan 8.2.
+    try {
+      const { startDeductionEngine } = await import('./DeductionEngine.js');
+      startDeductionEngine();
+    } catch (e) {
+      console.warn('[UnifiedScheduler] Deduction engine not available:', e.message);
+    }
+
     // 6. Campaign job processing (30s) — lower priority than reminders
     try {
       const { processDueJobs } = await import('./JobScheduler.js');
@@ -180,6 +198,16 @@ export class UnifiedScheduler {
     if (this.meetApiPollHandle) { clearInterval(this.meetApiPollHandle); this.meetApiPollHandle = null; }
     if (this.jobPollHandle) { clearInterval(this.jobPollHandle); this.jobPollHandle = null; }
     if (this.healHandle) { clearInterval(this.healHandle); this.healHandle = null; }
+
+    // Both stop functions are idempotent and clear their own timers and event listeners.
+    try {
+      const { stopAttendanceVerdictJob } = await import('./AttendanceVerdictJob.js');
+      stopAttendanceVerdictJob();
+      const { stopDeductionEngine } = await import('./DeductionEngine.js');
+      stopDeductionEngine();
+    } catch (e) {
+      console.warn('[UnifiedScheduler] Could not stop attendance jobs cleanly:', e.message);
+    }
 
     for (const [, timer] of this.timers) clearTimeout(timer);
     this.timers.clear();

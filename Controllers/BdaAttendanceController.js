@@ -756,17 +756,34 @@ export async function getMyMeetings(req, res) {
     const horizonPast = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const horizonFuture = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
 
-    // Show ALL scheduled meetings to ALL BDAs (not filtered by claimedBy)
-    const bookings = await CampaignBookingModel.find({
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] },
-      scheduledEventStartTime: { $gte: horizonPast, $lte: horizonFuture },
-    })
-      .sort({ scheduledEventStartTime: 1 })
-      .select(
-        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy calendlyHost attendanceAssignee'
-      )
-      .limit(100)
-      .lean();
+    // Show ALL scheduled meetings to ALL BDAs (not filtered by claimedBy).
+    //
+    // Two queries on purpose. This used to be ONE query over [now - 7 d, now + 14 d] sorted oldest first with
+    // .limit(100). Once the past week alone held 100 bookings, the limit was spent on past meetings and every
+    // upcoming meeting was cut off, so BDAs saw an empty "Upcoming Meetings" list even though they were logged in.
+    // Each side now has its own limit: soonest 100 upcoming, newest 100 past.
+    const selectFields =
+      'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy calendlyHost attendanceAssignee';
+    const statusFilter = { $in: ['paid', 'scheduled', 'completed'] };
+    const [upcomingBookings, pastBookings] = await Promise.all([
+      CampaignBookingModel.find({
+        bookingStatus: statusFilter,
+        scheduledEventStartTime: { $gte: now, $lte: horizonFuture },
+      })
+        .sort({ scheduledEventStartTime: 1 })
+        .select(selectFields)
+        .limit(100)
+        .lean(),
+      CampaignBookingModel.find({
+        bookingStatus: statusFilter,
+        scheduledEventStartTime: { $gte: horizonPast, $lt: now },
+      })
+        .sort({ scheduledEventStartTime: -1 })
+        .select(selectFields)
+        .limit(100)
+        .lean(),
+    ]);
+    const bookings = [...upcomingBookings, ...pastBookings];
 
     // Backfill missing meet codes (Calendly bookings only carry a redirect
     // URL). Fire-and-forget, capped — the extension polls this endpoint, so
