@@ -72,5 +72,7 @@ const CallLogSchema = new mongoose.Schema(
 
 CallLogSchema.index({ leadNumberNormalized: 1, startedAt: -1 });
 CallLogSchema.index({ salesEmail: 1, startedAt: -1 });
+// Per-meeting call summaries query by bookingId and read the calls in time order (plan 6.3).
+CallLogSchema.index({ bookingId: 1, startedAt: 1 });
 
 export const CallLogModel = mongoose.models.CallLog || mongoose.model('CallLog', CallLogSchema);

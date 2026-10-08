@@ -3,21 +3,18 @@ import { DateTime } from 'luxon';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
-import { syncBookingFromMeetNow } from './MeetAttendanceScheduler.js';
 
 dotenv.config();
 
 const POLL_INTERVAL_MS = 60000; // 1 minute
 
 /**
- * How long after the scheduled start we wait before flagging "no response".
+ * How long after the scheduled start we wait before raising "NO BDA ASSIGNED".
  *
- * Fixed at 1 minute, deliberately not env-tunable: a stray env value silently
- * delayed these alerts in production. This is a nudge, not an absence verdict.
- * At +1 minute nobody has joined yet, so the ping is accurate and still useful
- * while the meeting is young (they run ~15 min). The row it writes is "unmarked",
- * never "absent" - a later join supersedes it, and the send is skipped outright
- * if the BDA is already marked present.
+ * Fixed at 1 minute, deliberately not env-tunable: a stray env value silently delayed these alerts in production.
+ * This job no longer judges BDAs. Absence is decided by the verdict job (AttendanceVerdictJob.js) from signals,
+ * so the old "No Response" ping and its 'unmarked' row for assigned BDAs are gone. What stays here is the safety
+ * net for stale open sessions and the alert for a meeting that nobody owns.
  */
 const ABSENT_GRACE_MINUTES = 1;
 const ABSENT_GRACE_MS = ABSENT_GRACE_MINUTES * 60 * 1000;
@@ -101,8 +98,9 @@ export async function pollForAbsentBDAs() {
     const graceCutoff = new Date(now.getTime() - ABSENT_GRACE_MS);
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
 
-    // Find scheduled meetings that started more than the grace period ago, within
-    // the last 2 hours, and not canceled/rescheduled.
+    // Meetings that started more than the grace period ago, in the last 2 hours, that NO ONE owns: no admin
+    // reassignment, no Calendly host and no CRM claim (the same order getAssignedBdaEmail uses).
+    const noOne = { $in: [null, ''] };
     const meetings = await CampaignBookingModel.find({
       bookingStatus: { $in: ['scheduled'] },
       scheduledEventStartTime: {
@@ -111,23 +109,20 @@ export async function pollForAbsentBDAs() {
         $lte: graceCutoff,
         $gte: twoHoursAgo,
       },
+      'attendanceAssignee.email': noOne,
+      'calendlyHost.email': noOne,
+      'claimedBy.email': noOne,
     })
       .select(
-        'bookingId clientName clientEmail clientPhone bookingStatus scheduledEventStartTime scheduledEventEndTime claimedBy calendlyHost googleMeetCode googleMeetUrl calendlyMeetLink'
+        'bookingId clientName clientEmail clientPhone bookingStatus scheduledEventStartTime scheduledEventEndTime claimedBy calendlyHost attendanceAssignee googleMeetCode googleMeetUrl calendlyMeetLink'
       )
       .lean();
 
-    if (meetings.length === 0) {
-      isRunning = false;
-      return;
-    }
+    if (meetings.length === 0) return;
 
     const bookingIds = meetings.map((m) => m.bookingId);
 
-    // Only an actual PRESENT mark suppresses the alert. The extension writes
-    // 'present' when it detects the BDA in the Meet room; a manual CRM mark writes
-    // 'manual'. An 'unmarked' row (no response / bad join URL) means nobody is in
-    // the meeting, so it must NOT suppress the alert.
+    // Someone joined or marked present anyway (a BDA covering an unowned meeting): nothing to raise.
     const presentRows = await BdaAttendanceModel.find({
       bookingId: { $in: bookingIds },
       status: { $in: ['present', 'manual'] },
@@ -146,54 +141,20 @@ export async function pollForAbsentBDAs() {
       .lean();
     const alreadyPinged = new Set(pingedRows.map((a) => a.bookingId));
 
-    let absentCount = 0;
+    let alertCount = 0;
 
     for (const meeting of meetings) {
-      // BDA is marked present (extension or manual), nothing to alert about.
       if (presentBookingIds.has(meeting.bookingId)) continue;
-
-      // Already pinged for this meeting and still no present mark, don't repeat.
       if (alreadyPinged.has(meeting.bookingId)) continue;
 
-      // Ask Google directly before alerting: if the BDA is in the conference,
-      // this writes a present row and the re-check below skips the alert.
-      // The extension misses some real joins; Google's records do not.
-      await syncBookingFromMeetNow(meeting);
-
-      // Re-check immediately before alerting. A join can land between the batch
-      // read above and this iteration (the extension reports asynchronously), and
-      // a recorded PRESENT mark must ALWAYS win over the "no response" alert.
-      const lateJoin = await BdaAttendanceModel.findOne({
-        bookingId: meeting.bookingId,
-        status: { $in: ['present', 'manual'] },
-      })
-        .select('_id status firstJoinedAt')
-        .lean();
-      if (lateJoin) {
-        console.log(
-          `[BdaAbsentScheduler] Skipping ${meeting.bookingId}: BDA marked ${lateJoin.status}`
-        );
-        continue;
-      }
-
-      // The assigned BDA is the Calendly round-robin host (nearly every booking
-      // has one and no manual claim); a CRM claim is the fallback. Reading only
-      // claimedBy posted "NO BDA ASSIGNED" for meetings that did have a BDA.
-      const assignee = meeting.calendlyHost?.email ? meeting.calendlyHost : meeting.claimedBy;
-      const isClaimed = !!(assignee?.email);
-      const bdaEmail = isClaimed ? String(assignee.email).trim().toLowerCase() : 'unassigned';
-      const bdaName = assignee?.name || (isClaimed ? bdaEmail : 'Unassigned');
-
-      // No attendance record — record as "unmarked", NOT "absent".
-      // The BDA may have attended but forgotten to mark; only an explicit
-      // mark-absent action is allowed to set status: 'absent'.
+      // The row marks "already alerted" and carries bdaEmail 'unassigned'. It is never anyone's attendance.
       try {
         await BdaAttendanceModel.findOneAndUpdate(
-          { bookingId: meeting.bookingId, bdaEmail },
+          { bookingId: meeting.bookingId, bdaEmail: 'unassigned' },
           {
             $set: {
-              bdaName,
-              bdaEmail,
+              bdaName: 'Unassigned',
+              bdaEmail: 'unassigned',
               bookingId: meeting.bookingId,
               status: 'unmarked',
               source: 'scheduler',
@@ -201,9 +162,7 @@ export async function pollForAbsentBDAs() {
               meetingScheduledStart: meeting.scheduledEventStartTime,
               meetingScheduledEnd: meeting.scheduledEventEndTime || null,
               discordNotified: true,
-              notes: isClaimed
-                ? `No response captured ${ABSENT_GRACE_MINUTES}m after start — BDA must confirm present or mark absent`
-                : 'Meeting not claimed by any BDA — no one joined',
+              notes: 'Meeting not claimed by any BDA, no one joined',
             },
             $setOnInsert: {
               attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -212,35 +171,24 @@ export async function pollForAbsentBDAs() {
           { upsert: true, new: true }
         );
 
-        const message = isClaimed
-          ? `⚠️ **BDA No Response (Unmarked)**\n` +
-            `**BDA:** ${bdaName} (${bdaEmail})\n` +
-            `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
-            `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
-            `_No response ${ABSENT_GRACE_MINUTES}m after start. Not marked absent yet — attendance will be auto-verified from Google Meet records after the meeting._`
-          : `🚨 **NO BDA ASSIGNED — Meeting Started!**\n` +
+        await sendAbsentDiscord(
+          `🚨 **NO BDA ASSIGNED: Meeting Started!**\n` +
             `**Client:** ${meeting.clientName} (${meeting.clientEmail || ''})\n` +
             `**Meeting:** ${formatIST(meeting.scheduledEventStartTime)}\n` +
             `**Status:** No BDA has claimed this lead\n` +
-            `_Someone needs to join this meeting NOW!_`;
-
-        await sendAbsentDiscord(message);
-        absentCount++;
+            `_Someone needs to join this meeting NOW!_`
+        );
+        alertCount++;
       } catch (err) {
-        // Duplicate key is expected if record was just created by extension
+        // Duplicate key is expected if two instances raced
         if (err.code !== 11000) {
-          console.error(
-            `[BdaAbsentScheduler] Error recording unmarked attendance for ${meeting.bookingId}:`,
-            err.message
-          );
+          console.error(`[BdaAbsentScheduler] Error raising unassigned alert for ${meeting.bookingId}:`, err.message);
         }
       }
     }
 
-    if (absentCount > 0) {
-      console.log(
-        `[BdaAbsentScheduler] Marked ${absentCount} BDA(s) absent out of ${meetings.length} meetings checked`
-      );
+    if (alertCount > 0) {
+      console.log(`[BdaAbsentScheduler] Raised ${alertCount} unassigned-meeting alert(s) out of ${meetings.length} checked`);
     }
   } catch (error) {
     console.error('[BdaAbsentScheduler] Poll error:', error.message);
@@ -256,7 +204,7 @@ export function startBdaAbsentScheduler() {
   }
 
   console.log(
-    `[BdaAbsentScheduler] Starting BDA absent detection scheduler (poll every ${POLL_INTERVAL_MS / 1000}s, ` +
+    `[BdaAbsentScheduler] Starting stale-session and unassigned-meeting checks (poll every ${POLL_INTERVAL_MS / 1000}s, ` +
       `grace ${ABSENT_GRACE_MINUTES}m after scheduled start)`
   );
 

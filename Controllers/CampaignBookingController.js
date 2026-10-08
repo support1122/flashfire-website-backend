@@ -20,6 +20,9 @@ import { sendScheduleEvent } from '../Services/FacebookConversionAPI.js';
 import { sendScheduleEvent as sendGoogleAdsScheduleEvent } from '../Services/GoogleAdsConversionAPI.js';
 import { sendScheduleEvent as sendLinkedInScheduleEvent } from '../Services/LinkedInConversionAPI.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
+import { getCallSummariesSafe } from '../Utils/BookingCallSummary.js';
+import { getAttendanceRowFieldsSafe } from '../Utils/attendanceRowFields.js';
+import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
 import { normalizeCurrency, formatMoney } from '../Utils/currency.js';
 import { crmUserMetaLeadsOnly, crmUserBdaOwnEmailScope } from '../Middlewares/CrmAuth.js';
 
@@ -2474,6 +2477,20 @@ export const getLeadsPaginated = async (req, res) => {
       console.warn('resolveLeadOwnersForPage failed (leads):', e.message);
     }
 
+    // BDA attendance (plan 6.3): did the assigned BDA call this client? One CallLog query for the whole page.
+    const leadCallSummaries = await getCallSummariesSafe(finalBookings);
+    finalBookings = finalBookings.map((b) => ({ ...b, callSummary: leadCallSummaries.get(b.bookingId) ?? null }));
+
+    // BDA attendance (plan 9.2): verdict, status trail, deductions. Two queries for the whole page; admins see every deduction.
+    const leadAttendance = await getAttendanceRowFieldsSafe(finalBookings, {
+      email: req.crmUser?.email,
+      isAdmin: await isCrmAdmin(req.crmUser).catch(() => false)
+    });
+    finalBookings = finalBookings.map((b) => {
+      const f = leadAttendance.get(b.bookingId);
+      return { ...b, attendance: f?.attendance ?? null, statusUpdate: f?.statusUpdate ?? null, deductions: f?.deductions ?? [], transcript: null };
+    });
+
     const baseMatchQuery = { ...matchQuery };
     delete baseMatchQuery.bookingStatus;
     const qualStatsPipeline = [
@@ -3028,7 +3045,13 @@ export const getMeetingLinks = async (req, res) => {
     const [bookings, totalCount, bdaAbsentResult] = await Promise.all([
       CampaignBookingModel.find(
         match,
-        { clientName: 1, scheduledEventStartTime: 1, scheduledEventEndTime: 1, meetingVideoUrl: 1, bookingId: 1 }
+        {
+          clientName: 1, scheduledEventStartTime: 1, scheduledEventEndTime: 1, meetingVideoUrl: 1, bookingId: 1,
+          // Read-only inputs for callSummary (phone to match calls, fields that decide the assigned BDA).
+          clientPhone: 1, normalizedClientPhone: 1, calendlyHost: 1, claimedBy: 1, attendanceAssignee: 1,
+          // Read-only inputs for the attendance fields (status trail and the stuck-status flag).
+          bookingStatus: 1, statusHistory: 1, statusChangedAt: 1, statusChangedBy: 1, statusChangedByName: 1
+        }
       )
         .sort({ scheduledEventStartTime: -1 })
         .skip(skip)
@@ -3063,6 +3086,15 @@ export const getMeetingLinks = async (req, res) => {
     ]);
     const bdaAbsentCount = bdaAbsentResult?.[0]?.bdaAbsentCount ?? 0;
 
+    // BDA attendance (plan 6.3): did the assigned BDA call this client? One CallLog query for the whole page.
+    const callSummaries = await getCallSummariesSafe(bookings);
+
+    // BDA attendance (plan 9.2): verdict, status trail, deductions. Two queries for the whole page; admins see every deduction.
+    const attendanceFields = await getAttendanceRowFieldsSafe(bookings, {
+      email: req.crmUser?.email,
+      isAdmin: await isCrmAdmin(req.crmUser).catch(() => false)
+    });
+
     const data = bookings.map((b) => {
       const meetEnd = b.scheduledEventEndTime
         ? new Date(b.scheduledEventEndTime).getTime()
@@ -3078,7 +3110,12 @@ export const getMeetingLinks = async (req, res) => {
         clientName: b.clientName || '—',
         dateOfMeet: b.scheduledEventStartTime || null,
         meetingVideoUrl: hasVideo ? b.meetingVideoUrl : null,
-        bdaAbsent
+        bdaAbsent,
+        callSummary: callSummaries.get(b.bookingId) ?? null,
+        attendance: attendanceFields.get(b.bookingId)?.attendance ?? null,
+        statusUpdate: attendanceFields.get(b.bookingId)?.statusUpdate ?? null,
+        deductions: attendanceFields.get(b.bookingId)?.deductions ?? [],
+        transcript: null
       };
     });
 

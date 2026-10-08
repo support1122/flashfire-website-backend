@@ -180,6 +180,63 @@ const BdaAttendanceSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+
+    // ---- Server-decided attendance (plan sections 2.2 and 5.2) ----
+
+    /** Every present signal, append-only. One row per kind (repeats are idempotent). */
+    signals: {
+      type: [
+        {
+          _id: false,
+          kind: {
+            type: String,
+            enum: ["button_meet", "button_crm", "extension_join", "google_meet"],
+          },
+          /** Server-corrected time the BDA did the thing */
+          eventAt: { type: Date },
+          /** When the server got it */
+          receivedAt: { type: Date },
+        },
+      ],
+      default: [],
+    },
+
+    /** Earliest eventAt of any signal that counted toward the window */
+    markedPresentAt: { type: Date, default: null },
+
+    verdict: { type: String, enum: ["present", "absent", null], default: null },
+    verdictAt: { type: Date, default: null },
+    /** Which signal won; null when absent */
+    verdictSignal: { type: String, default: null },
+    /** Set when late evidence flips an absent verdict to present */
+    verdictCorrectedAt: { type: Date, default: null },
+
+    /** Button-only present with no join seen by start + 3 h (admin review list) */
+    integrityFlag: {
+      type: String,
+      enum: ["marked_never_joined", null],
+      default: null,
+    },
+    /** Admin closed or converted the integrity flag (never deleted) */
+    integrityResolved: {
+      at: { type: Date, default: null },
+      by: { type: String, default: null },
+      action: { type: String, default: null }, // dismissed | converted
+      reason: { type: String, default: null },
+    },
+
+    /** Pre-meeting "extension offline" Discord warning dedupe */
+    heartbeatWarnedAt: { type: Date, default: null },
+
+    /**
+     * How the Meet participant was matched to this BDA. Written by the identity
+     * code in MeetAttendanceScheduler. Only 'stable_id' may decide a verdict.
+     */
+    matchedBy: {
+      type: String,
+      enum: ["stable_id", "name", null],
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -190,6 +247,7 @@ const BdaAttendanceSchema = new mongoose.Schema(
 BdaAttendanceSchema.index({ bookingId: 1, bdaEmail: 1 }, { unique: true });
 BdaAttendanceSchema.index({ bdaEmail: 1, meetingScheduledStart: -1 });
 BdaAttendanceSchema.index({ status: 1, meetingScheduledStart: -1 });
+BdaAttendanceSchema.index({ verdict: 1, meetingScheduledStart: -1 });
 
 export const BdaAttendanceModel = mongoose.model(
   "BdaAttendance",

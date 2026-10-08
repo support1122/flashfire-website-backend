@@ -7,10 +7,11 @@ import {
   BdaAttendanceEndEventModel,
   END_SOURCES,
 } from '../Schema_Models/BdaAttendanceEndEvent.js';
-import { BdaAttendanceWarnDedupeModel } from '../Schema_Models/BdaAttendanceWarnDedupe.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { DiscordConnect } from '../Utils/DiscordConnect.js';
+import { isBookingAssignedTo } from '../Utils/BdaAssignment.js';
+import { recordPresentSignal } from '../Utils/recordPresentSignal.js';
 import { setOtp, getOtp, decrementAttempts, deleteOtp, getOtpCacheStats } from '../Utils/CrmOtpCache.js';
 import { sendBdaOtpEmail } from '../Utils/SendGridHelper.js';
 
@@ -98,7 +99,7 @@ setInterval(() => {
       rateLimitMap.delete(key);
     }
   }
-}, 10 * 60 * 1000);
+}, 10 * 60 * 1000).unref(); // unref: a cleanup timer must not keep a script or a test process alive on its own
 
 // SSE connections map: bdaEmail -> Set<res>
 const sseConnections = new Map();
@@ -158,20 +159,6 @@ function bdaDisplayNameFromUser(user) {
 function assertBookingClaimedBy(booking, bdaEmail) {
   const claimed = booking?.claimedBy?.email;
   return claimed && normalizeEmail(claimed) === normalizeEmail(bdaEmail);
-}
-
-/**
- * True when the booking belongs to this BDA: the Calendly round-robin host
- * (how ~all meetings are assigned) or a manual CRM claim. Every BDA's extension
- * receives every meeting, so absence reminders/marks must be gated on this —
- * otherwise each BDA gets reminded, and marked absent, for colleagues' meetings.
- */
-function isBookingAssignedTo(booking, bdaEmail) {
-  const me = normalizeEmail(bdaEmail);
-  if (!me) return false;
-  return [booking?.calendlyHost?.email, booking?.claimedBy?.email]
-    .filter(Boolean)
-    .some((e) => normalizeEmail(e) === me);
 }
 
 // ==================== Meet link + session close helpers (join/leave/end) ====================
@@ -776,7 +763,7 @@ export async function getMyMeetings(req, res) {
     })
       .sort({ scheduledEventStartTime: 1 })
       .select(
-        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy calendlyHost'
+        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy calendlyHost attendanceAssignee'
       )
       .limit(100)
       .lean();
@@ -817,6 +804,8 @@ export async function getMyMeetings(req, res) {
           bdaEmail: a.bdaEmail || null,
           // In time survives session close via firstJoinedAt; fall back for old rows.
           joinedAt: a.firstJoinedAt || a.joinedAt || a.markedAt || null,
+          // When the BDA's counted present signal reached the server (button or auto-detect). Null when none did in time.
+          markedPresentAt: a.markedPresentAt || null,
           leftAt: a.leftAt || null,
           // Null while in-progress (no completed segment yet) so the UI shows "—"
           // instead of a misleading "0 min"; cumulative default 0 must not surface.
@@ -861,11 +850,15 @@ export async function getMyMeetings(req, res) {
 
     previous.sort((a, b) => new Date(b.scheduledStart) - new Date(a.scheduledStart));
 
+    // Oldest extension version still allowed to run. Unset means no gate, so the key is left out entirely.
+    const minExtensionVersion = String(process.env.MIN_EXTENSION_VERSION || '').trim();
+
     return res.status(200).json({
       success: true,
       upcoming,
       previous,
       serverTime: now.toISOString(),
+      ...(minExtensionVersion ? { minExtensionVersion } : {}),
     });
   } catch (error) {
     console.error('[BdaAttendance] getMyMeetings error:', error);
@@ -1004,16 +997,34 @@ export async function reportJoin(req, res) {
     // separate document and leaves a phantom "unmarked" row behind. A recorded
     // join supersedes it — otherwise the CRM shows a false absence for a BDA who
     // was actually in the meeting.
+    // Rows that carry a verdict, a signal or a heartbeat-warning mark are real attendance data, never phantoms.
     const supersededPhantom = await BdaAttendanceModel.deleteMany({
       bookingId,
       source: 'scheduler',
       status: 'unmarked',
       bdaEmail: { $ne: emailNorm },
+      verdict: null,
+      heartbeatWarnedAt: null,
+      'signals.0': { $exists: false },
     });
     if (supersededPhantom.deletedCount) {
       console.log(
         `[BdaAttendance] Superseded ${supersededPhantom.deletedCount} phantom "unmarked" row(s) for ${bookingId} after real join by ${emailNorm}`
       );
+    }
+
+    // The extension saw the BDA in the call: store it as an extension_join signal with the real (server-corrected)
+    // join time. The server decides present or absent from signals; this never fails the join report itself.
+    try {
+      await recordPresentSignal({
+        bookingId,
+        bdaEmail: emailNorm,
+        bdaName: name,
+        kind: 'extension_join',
+        eventAt: joinDate,
+      });
+    } catch (signalError) {
+      console.error('[BdaAttendance] could not record extension_join signal:', signalError?.message || signalError);
     }
 
     if (notifyJoin) {
@@ -1238,183 +1249,19 @@ export async function manualMark(req, res) {
   }
 }
 
-// ==================== POST /api/bda-attendance/mark-absent ====================
+// ==================== POST /api/bda-attendance/mark-absent and /warn-absent ====================
+// Retired (plan 4.4.5 and 5.4). The server decides absence from signals now, in the verdict job, so a client can
+// no longer mark anyone absent or fire a warning. Extensions older than v2.0.0 still call these endpoints; answer
+// with a clean skip so they stop retrying, and write nothing.
 
-export async function markAbsent(req, res) {
-  try {
-    const { email, name } = req.bdaUser;
-    const emailNorm = normalizeEmail(email);
-    const { bookingId, reason } = req.body;
+const SERVER_DECIDES = { success: true, skipped: true, reason: 'server_decides' };
 
-    if (!bookingId) {
-      return res.status(400).json({ success: false, error: 'bookingId is required' });
-    }
-
-    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
-
-    if (!booking) {
-      return res.status(404).json({ success: false, error: 'Booking not found' });
-    }
-
-    // Joins may be reported for any meeting (a BDA can cover for a colleague),
-    // but absence only applies to the BDA the meeting is assigned to. Older
-    // extension builds call this for every meeting in the company; answer them
-    // with a skip so they stop, instead of writing a false absent row for the
-    // wrong BDA (88 such rows in 30 days before this guard).
-    if (!isBookingAssignedTo(booking, emailNorm)) {
-      return res.status(200).json({ success: true, skipped: true, reason: 'not_assigned' });
-    }
-
-    // Don't overwrite a recorded attendance (present, manual, or already absent).
-    // The absent-poller's 'unmarked' row is only a "no response yet" marker, so
-    // it is upgraded to absent here.
-    const existing = await BdaAttendanceModel.findOne({
-      bookingId,
-      bdaEmail: emailNorm,
-    });
-
-    if (existing && existing.status !== 'unmarked') {
-      // Already has a record - return success (idempotent) but don't re-notify
-      return res.status(200).json({
-        success: true,
-        message: existing.status === 'absent' ? 'Already marked absent' : 'Attendance already recorded',
-      });
-    }
-
-    const absentFields = {
-      bdaName: name,
-      bdaEmail: emailNorm,
-      bookingId,
-      status: 'absent',
-      source: 'manual',
-      markedAt: new Date(),
-      meetingScheduledStart: booking.scheduledEventStartTime,
-      meetingScheduledEnd: booking.scheduledEventEndTime || null,
-      notes: reason || 'No response to popup',
-      discordNotified: true,
-    };
-    // Conditional on status so a join landing between the read above and this
-    // write is never overwritten with absent.
-    const attendance = existing
-      ? await BdaAttendanceModel.findOneAndUpdate(
-          { _id: existing._id, status: 'unmarked' },
-          { $set: absentFields },
-          { new: true }
-        )
-      : await BdaAttendanceModel.create({
-          attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-          ...absentFields,
-        });
-
-    if (!attendance) {
-      return res.status(200).json({ success: true, message: 'Attendance already recorded' });
-    }
-
-    const message =
-      `❌ **BDA Absent**\n` +
-      `**BDA:** ${name} (${emailNorm})\n` +
-      `**Client:** ${booking.clientName}\n` +
-      `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
-      `_Reason: ${reason || 'No response after 5min popup'}_`;
-
-    await sendAbsentDiscord(message);
-
-    return res.status(200).json({ success: true });
-  } catch (error) {
-    console.error('[BdaAttendance] markAbsent error:', error);
-    return res.status(500).json({ success: false, error: 'Internal server error' });
-  }
+export async function markAbsent(_req, res) {
+  return res.status(200).json(SERVER_DECIDES);
 }
 
-// ==================== POST /api/bda-attendance/warn-absent ====================
-
-const WARN_DISCORD_LINE = '';
-
-export async function warnAbsent(req, res) {
-  try {
-    const { email } = req.bdaUser;
-    const emailNorm = normalizeEmail(email);
-    const { bookingId } = req.body;
-
-    if (!bookingId) {
-      return res.status(400).json({ success: false, error: 'bookingId is required' });
-    }
-
-    const booking = await CampaignBookingModel.findOne({ bookingId }).lean();
-
-    if (!booking) {
-      return res.status(404).json({ success: false, error: 'Booking not found' });
-    }
-
-    // Warnings only go to the assigned BDA (see markAbsent).
-    if (!isBookingAssignedTo(booking, emailNorm)) {
-      return res.status(200).json({ success: true, skipped: true, reason: 'not_assigned' });
-    }
-
-    const existing = await BdaAttendanceModel.findOne({
-      bookingId,
-      bdaEmail: emailNorm,
-      status: { $in: ['present', 'manual'] },
-    });
-
-    if (existing) {
-      return res.status(200).json({ success: true, skipped: true, message: 'Already in meeting' });
-    }
-
-    // The warn message is intentionally blank (the absent-poller owns the
-    // Discord "no response" alert). Discord rejects empty content with a 400,
-    // which used to surface as a 502 and made every extension retry this call
-    // every 30s for two hours per meeting. Report a clean skip instead.
-    if (!WARN_DISCORD_LINE) {
-      return res.status(200).json({ success: true, skipped: true, reason: 'disabled' });
-    }
-
-    const webhookUrl =
-      process.env.BDA_ATTENDANCE_WARN_WEBHOOK_URL ||
-      process.env.DISCORD_BDA_ATTENDANCE_WEBHOOK_URL ||
-      process.env.DISCORD_MEET_WEB_HOOK_URL;
-
-    try {
-      await BdaAttendanceWarnDedupeModel.create({
-        bookingId,
-        bdaEmail: emailNorm,
-        sentAt: new Date(),
-      });
-    } catch (err) {
-      if (err.code === 11000) {
-        return res.status(200).json({ success: true, skipped: true, reason: 'already_warned' });
-      }
-      throw err;
-    }
-
-    if (!webhookUrl) {
-      console.warn('[BdaAttendance] warn-absent: no Discord webhook configured');
-      await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
-      return res.status(200).json({ success: true, skipped: true, reason: 'no_webhook' });
-    }
-
-    try {
-      const response = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: WARN_DISCORD_LINE }),
-      });
-      if (!response.ok) {
-        await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
-        return res.status(502).json({ success: false, error: 'Discord delivery failed' });
-      }
-    } catch (err) {
-      await BdaAttendanceWarnDedupeModel.deleteOne({ bookingId, bdaEmail: emailNorm }).catch(() => {});
-      return res.status(502).json({ success: false, error: 'Discord delivery failed' });
-    }
-
-    notifyBdaSSE(emailNorm, 'attendance_update', { bookingId });
-
-    return res.status(200).json({ success: true });
-  } catch (error) {
-    console.error('[BdaAttendance] warnAbsent error:', error);
-    return res.status(500).json({ success: false, error: 'Internal server error' });
-  }
+export async function warnAbsent(_req, res) {
+  return res.status(200).json(SERVER_DECIDES);
 }
 
 // ==================== GET /api/bda-attendance/sse ====================

@@ -10,6 +10,7 @@ import { getCrmJwtSecret } from '../Middlewares/CrmAuth.js';
 import { getClientIp, detectCountryFromIp } from '../Utils/GeoIP.js';
 import { parseUserAgent } from '../Utils/UserAgentParser.js';
 import { computeDeviceKey } from '../Utils/DeviceKey.js';
+import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
 
 /**
  * Issues a CRM JWT + session record for a fully-authenticated user (OTP verified,
@@ -249,6 +250,9 @@ export async function crmMe(req, res) {
     if (!email) return res.status(401).json({ success: false, error: 'Invalid token' });
     const user = await CrmUserModel.findOne({ email }).lean();
     if (!user || user.isActive === false) return res.status(401).json({ success: false, error: 'Unauthorized' });
+    // Attendance: the CRM shows admin-only screens from this flag, not from `role`, because some admin accounts have
+    // role 'bda' with isAdmin set (plan 8.3). One shared rule, isCrmAdmin, decides it.
+    const isAdmin = await isCrmAdmin(req.crmUser);
     return res.status(200).json({
       success: true,
       user: {
@@ -256,6 +260,7 @@ export async function crmMe(req, res) {
         name: user.name,
         permissions: user.permissions || [],
         role: user.role || 'bda',
+        isAdmin,
       },
     });
   } catch (error) {

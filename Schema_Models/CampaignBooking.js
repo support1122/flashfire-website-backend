@@ -577,6 +577,24 @@ export const CampaignBookingSchema = new mongoose.Schema({
       default: null
     }
   },
+  // BDA attendance: an admin hands this meeting to another tracked BDA (leave cover,
+  // swaps). Wins over calendlyHost and claimedBy in getAssignedBdaEmail. Only settable
+  // before the mark window opens (start - 5 min). The reassign endpoint uses
+  // findOneAndUpdate, which skips save hooks, so it pushes its own history entry.
+  attendanceAssignee: {
+    email: { type: String, default: null, lowercase: true, trim: true },
+    name: { type: String, default: null },
+    setBy: { type: String, default: null },
+    setAt: { type: Date, default: null }
+  },
+  attendanceAssigneeHistory: [{
+    _id: false,
+    email: { type: String, default: null },
+    name: { type: String, default: null },
+    previousEmail: { type: String, default: null },
+    setBy: { type: String, default: null },
+    setAt: { type: Date, default: null }
+  }],
   attachedCustomWorkflowIds: {
     type: [String],
     default: []
