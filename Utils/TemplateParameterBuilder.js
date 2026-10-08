@@ -317,6 +317,8 @@ const builders = {
   // 134 is the immediate step, 123 the 8-hour one.
   meta__revised_134: metaSchedulingParams,
   meta_2_revised_123: metaSchedulingParams,
+  // The 2-day follow-up, with Europe in the markets line. Same two variables.
+  meta_31_revised_eu_v2: metaSchedulingParams,
 
   cancelled1: async ({ booking }) => {
     if (!booking.scheduledEventStartTime) {
