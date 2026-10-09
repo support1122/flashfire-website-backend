@@ -49,10 +49,28 @@ export function finesAreLive() {
   return getDeductionsMode() === 'live';
 }
 
+// The admin's choice from the CRM (AppSetting 'deductions'), cached here so these getters stay synchronous.
+// Utils/DeductionSettings.js refreshes it every 30 s and right after an admin change. Env vars always win.
+let dbSettings = { mode: null, liveFrom: null };
+
+/** Called by Utils/DeductionSettings.js with the stored setting (or nulls to clear it). */
+export function setDbDeductionSettings({ mode = null, liveFrom = null } = {}) {
+  dbSettings = {
+    mode: DEDUCTION_MODES.includes(mode) ? mode : null,
+    liveFrom: liveFrom && Number.isFinite(new Date(liveFrom).getTime()) ? new Date(liveFrom) : null,
+  };
+}
+
+/** 'env' when DEDUCTIONS_MODE is set (the CRM switch is then read-only), else 'crm'. */
+export function deductionsModeSource() {
+  return String(process.env.DEDUCTIONS_MODE ?? '').trim() ? 'env' : 'crm';
+}
+
 /** off (default) writes nothing, shadow writes admin-only rows, live writes real rows. Read on every call. */
 export function getDeductionsMode() {
   const raw = String(process.env.DEDUCTIONS_MODE ?? '').trim().toLowerCase();
-  return DEDUCTION_MODES.includes(raw) ? raw : 'off';
+  if (raw) return DEDUCTION_MODES.includes(raw) ? raw : 'off';
+  return dbSettings.mode || 'off';
 }
 
 /**
@@ -61,7 +79,7 @@ export function getDeductionsMode() {
  */
 export function getLiveFrom() {
   const raw = String(process.env.DEDUCTIONS_LIVE_FROM ?? '').trim();
-  if (!raw) return null;
+  if (!raw) return deductionsModeSource() === 'env' ? null : dbSettings.liveFrom;
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(raw)
     ? DateTime.fromISO(raw, { zone: IST_ZONE })
     : DateTime.fromISO(raw, { zone: IST_ZONE, setZone: true }); // no offset in the string means IST, not the server's zone

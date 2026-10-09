@@ -2491,7 +2491,7 @@ export const getLeadsPaginated = async (req, res) => {
     });
     finalBookings = finalBookings.map((b) => {
       const f = leadAttendance.get(b.bookingId);
-      return { ...b, attendance: f?.attendance ?? null, statusUpdate: f?.statusUpdate ?? null, deductions: f?.deductions ?? [], transcript: null };
+      return { ...b, attendance: f?.attendance ?? null, statusUpdate: f?.statusUpdate ?? null, deductions: f?.deductions ?? [], transcript: f?.transcript ?? null };
     });
 
     const baseMatchQuery = { ...matchQuery };
@@ -3010,6 +3010,19 @@ export const getMeetingLinks = async (req, res) => {
     const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(String(limit), 10) || 20));
     const skip = (pageNum - 1) * limitNum;
+    // Optional BDA filter: the meeting's ASSIGNED BDA (attendanceAssignee, else Calendly host, else CRM claim),
+    // the same precedence as getAssignedBdaEmail, written as a query so counts and pages stay correct.
+    const bdaEmail = typeof req.query.bdaEmail === 'string' ? req.query.bdaEmail.trim().toLowerCase().slice(0, 200) : '';
+    const blank = { $in: [null, ''] };
+    const assignedTo = bdaEmail
+      ? {
+          $or: [
+            { 'attendanceAssignee.email': bdaEmail },
+            { 'attendanceAssignee.email': blank, 'calendlyHost.email': bdaEmail },
+            { 'attendanceAssignee.email': blank, 'calendlyHost.email': blank, 'claimedBy.email': bdaEmail },
+          ],
+        }
+      : null;
 
     const now = new Date();
     const twoHoursMs = 2 * 60 * 60 * 1000;
@@ -3029,7 +3042,7 @@ export const getMeetingLinks = async (req, res) => {
       startTimeCond.$lte = to;
     }
     const startTimeCondWithCutoff = { ...startTimeCond, $lt: cutoff };
-    const match = {
+    const baseMatch = {
       bookingStatus: { $nin: ['canceled', 'rescheduled'] },
       $or: [
         {
@@ -3044,6 +3057,7 @@ export const getMeetingLinks = async (req, res) => {
         }
       ]
     };
+    const match = assignedTo ? { $and: [baseMatch, assignedTo] } : baseMatch;
 
     const [bookings, totalCount, bdaAbsentResult] = await Promise.all([
       CampaignBookingModel.find(
@@ -3118,7 +3132,8 @@ export const getMeetingLinks = async (req, res) => {
         attendance: attendanceFields.get(b.bookingId)?.attendance ?? null,
         statusUpdate: attendanceFields.get(b.bookingId)?.statusUpdate ?? null,
         deductions: attendanceFields.get(b.bookingId)?.deductions ?? [],
-        transcript: null
+        // The Calendly Notetaker summary saved by the Apps Script: { url, summaryPreview, sentAt, bookingId } or null.
+        transcript: attendanceFields.get(b.bookingId)?.transcript ?? null
       };
     });
 

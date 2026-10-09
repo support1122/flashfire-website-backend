@@ -287,7 +287,7 @@ async function myMonth(req, res) {
         callSummary: callSummaries.get(b.bookingId) ?? null,
         statusUpdate: f?.statusUpdate ?? null,
         deductions: f?.deductions ?? [],
-        transcript: null,
+        transcript: f?.transcript ?? null, // the Calendly Notetaker summary, when one is stored
       };
     });
     return res.status(200).json({ success: true, month: monthStart.toFormat('yyyy-LL'), rows });
@@ -574,6 +574,18 @@ export function registerAttendanceRoutes(app) {
   // CRM, any signed-in user
   app.post('/api/crm/attendance/:bookingId/mark-present', requireCrmUser, markPresentRateLimit, crmMarkPresent);
   app.get('/api/crm/attendance/my-window', requireCrmUser, myWindow);
+  // The tracked BDAs, for filter dropdowns (Meeting Info). Names and emails only.
+  app.get('/api/crm/attendance/bdas', requireCrmUser, async (req, res) => {
+    try {
+      const tracked = await getTrackedBdas();
+      const bdas = tracked
+        .map((p) => ({ email: p.email, displayName: p.displayName || p.email.split('@')[0] }))
+        .sort((a, b) => a.displayName.localeCompare(b.displayName));
+      return res.status(200).json({ success: true, bdas });
+    } catch (err) {
+      return internal(res, 'bdas', err);
+    }
+  });
   app.get('/api/crm/attendance/my-month', requireCrmUser, myMonth);
 
   // CRM, admins (crm_admin token or an admin crm_user)
