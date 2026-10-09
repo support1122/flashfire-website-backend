@@ -14,7 +14,7 @@ import { BdaProfileModel } from '../Schema_Models/BdaProfile.js';
 import { AttendanceSetupRunModel } from '../Schema_Models/AttendanceSetupRun.js';
 import { invalidateRegistryCache } from '../Utils/BdaRegistry.js';
 import { SEED_PROFILES } from '../Utils/BdaSeed.js';
-import { registerAttendanceSetupRoutes } from '../Routes/attendanceSetupRoutes.js';
+import { registerAttendanceSetupRoutes, resetSeedShortcutLimiter } from '../Routes/attendanceSetupRoutes.js';
 
 const SEED_EMAILS = SEED_PROFILES.map((s) => s.email);
 const BASE = '/api/crm/admin/attendance/setup';
@@ -53,7 +53,10 @@ after(async () => {
   await new Promise((resolve) => server.close(resolve));
   await disconnectTestDb();
 });
-beforeEach(wipe);
+beforeEach(async () => {
+  await wipe();
+  resetSeedShortcutLimiter();
+});
 
 describe('who may call it', () => {
   it('rejects a request with no token (401) and a non-admin token (403)', async () => {
@@ -215,5 +218,95 @@ describe('run (everything in order)', () => {
     assert.ok(SEED_EMAILS.every((e) => r.body.status.registry.trackedEmails.includes(e)));
     assert.ok(!r.body.status.problems.some((p) => /No tracked BDAs/.test(p)));
     assert.equal(await AttendanceSetupRunModel.countDocuments({ byEmail: 'admin@setup.test', action: 'run' }), 1);
+  });
+});
+
+describe('GET /script/seed/bda (the one-click shortcut)', () => {
+  const get = async (path) => {
+    const res = await fetch(`${baseUrl}${path}`); // no token, no body
+    return { status: res.status, body: await res.json() };
+  };
+
+  it('works with no token: seeds both BDAs and says alerts are active', async () => {
+    const r = await get('/script/seed/bda');
+    assert.equal(r.status, 200);
+    assert.equal(r.body.success, true);
+    assert.match(r.body.message, /Absent alerts are now active/);
+    assert.deepEqual(r.body.profiles.map((p) => [p.name, p.action]), [['Siddhartha', 'created'], ['Kalpataru', 'created']]);
+    assert.equal(await seededCount(), 2);
+    const rows = await BdaProfileModel.find({ email: { $in: SEED_EMAILS } }).lean();
+    assert.ok(rows.every((p) => p.tracked && p.active));
+  });
+
+  it('the dba spelling is the same route', async () => {
+    const r = await get('/script/seed/dba');
+    assert.equal(r.status, 200);
+    assert.equal(await seededCount(), 2);
+  });
+
+  it('a second call changes nothing, says so, and does not log a run', async () => {
+    await get('/script/seed/bda');
+    resetSeedShortcutLimiter();
+    const again = await get('/script/seed/bda');
+    assert.equal(again.status, 200);
+    assert.match(again.body.message, /Already set up/);
+    assert.deepEqual(again.body.profiles.map((p) => p.action), ['unchanged', 'unchanged']);
+    assert.equal(await AttendanceSetupRunModel.countDocuments({ byName: 'public seed route' }) >= 1, true);
+    assert.equal(await seededCount(), 2, 'no duplicates');
+  });
+
+  it('never overwrites what an admin changed', async () => {
+    await get('/script/seed/bda');
+    await BdaProfileModel.updateOne({ email: 'siddhartha@flashfirehq.com' }, { $set: { tracked: false, discordUserId: '42' } });
+    resetSeedShortcutLimiter();
+    await get('/script/seed/bda');
+    const sid = await BdaProfileModel.findOne({ email: 'siddhartha@flashfirehq.com' }).lean();
+    assert.equal(sid.tracked, false);
+    assert.equal(sid.discordUserId, '42');
+  });
+
+  it('is limited to one call per 5 seconds', async () => {
+    assert.equal((await get('/script/seed/bda')).status, 200);
+    const second = await get('/script/seed/bda');
+    assert.equal(second.status, 429);
+    assert.equal(second.body.error.code, 'rate_limited');
+  });
+
+  it('returns no emails, config or secrets', async () => {
+    const r = await get('/script/seed/bda');
+    const text = JSON.stringify(r.body);
+    assert.ok(!text.includes('@'), 'no email addresses in the response');
+    assert.deepEqual(Object.keys(r.body).sort(), ['message', 'profiles', 'success', 'trackedBdas']);
+  });
+
+  it('switches itself off after SEED_ROUTE_UNTIL (404, writes nothing)', async () => {
+    process.env.SEED_ROUTE_UNTIL = '2020-01-01';
+    try {
+      const r = await get('/script/seed/bda');
+      assert.equal(r.status, 404);
+      assert.equal(await seededCount(), 0);
+    } finally {
+      delete process.env.SEED_ROUTE_UNTIL;
+    }
+  });
+
+  it('is still on before the expiry date', async () => {
+    process.env.SEED_ROUTE_UNTIL = '2999-12-31';
+    try {
+      assert.equal((await get('/script/seed/bda')).status, 200);
+    } finally {
+      delete process.env.SEED_ROUTE_UNTIL;
+    }
+  });
+
+  it('can be switched off with DISABLE_SEED_ROUTE=true (404, writes nothing)', async () => {
+    process.env.DISABLE_SEED_ROUTE = 'true';
+    try {
+      const r = await get('/script/seed/bda');
+      assert.equal(r.status, 404);
+      assert.equal(await seededCount(), 0);
+    } finally {
+      delete process.env.DISABLE_SEED_ROUTE;
+    }
   });
 });

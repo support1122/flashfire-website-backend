@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 import { AttendanceSetupRunModel } from '../Schema_Models/AttendanceSetupRun.js';
-import { applySeed, planSeed } from '../Utils/BdaSeed.js';
+import { SEED_PROFILES, applySeed, planSeed } from '../Utils/BdaSeed.js';
 import { getAllBdaProfiles } from '../Utils/BdaRegistry.js';
 import { SYNC_LIMITS_MS, getAllSyncHealth } from '../Utils/SyncHealth.js';
 import { describeMeetCredentials } from '../Utils/MeetAttendanceScheduler.js';
@@ -26,6 +26,20 @@ const fail = (res, status, code, message, extra = {}) =>
   res.status(status).json({ success: false, error: { code, message }, ...extra });
 
 const dbName = () => mongoose.connection?.name || null;
+const SEED_SHORTCUT_MIN_GAP_MS = 5000;
+// TEMPORARY route (bsc, 2026-10-09: "we will remove it in the next few days"). It switches itself off on this date
+// even if nobody remembers to delete it. Override with SEED_ROUTE_UNTIL=YYYY-MM-DD; delete the route when done.
+const SEED_SHORTCUT_DEFAULT_UNTIL = '2026-10-23';
+function seedShortcutExpired(now = Date.now()) {
+  const raw = String(process.env.SEED_ROUTE_UNTIL || SEED_SHORTCUT_DEFAULT_UNTIL).trim();
+  const until = Date.parse(`${raw}T23:59:59+05:30`);
+  return !Number.isFinite(until) || now > until;
+}
+let lastSeedShortcutAt = 0;
+/** Tests only: lets two calls in a row run without waiting out the rate limit. */
+export function resetSeedShortcutLimiter() {
+  lastSeedShortcutAt = 0;
+}
 const adminOnly = [requireCrmUserOrAdmin, requireAdminLive];
 
 /** Returns an error response (already sent) when a write was asked for without the matching database name. */
@@ -134,7 +148,62 @@ function parseDays(raw) {
   return Number.isInteger(n) && n >= 1 && n <= 90 ? n : null;
 }
 
+/**
+ * The one-click version: GET /script/seed/bda (and /script/seed/dba, the same thing) with no token and no body.
+ * Open it in a browser or curl it and it makes the BDA registry ready so the absent alerts start working.
+ *
+ * Why a public write is acceptable here, and where the limits are:
+ *   - It takes NO input, so there is nothing to inject or tamper with.
+ *   - It only ensures two fixed, intended profiles exist (Utils/BdaSeed.js). It is idempotent: once they exist it
+ *     changes nothing, and it never overwrites what an admin edited.
+ *   - It does not return emails, counts of customers, config or secrets, only a name and what happened.
+ *   - Calls are limited to one per 5 seconds.
+ *   - Set DISABLE_SEED_ROUTE=true on the server to turn it off completely (it then answers 404).
+ *   - It is temporary: it also answers 404 after SEED_ROUTE_UNTIL (default 2026-10-23).
+ * The heavier jobs (call linking) stay behind the admin routes below.
+ */
+function registerSeedShortcut(app) {
+  const handler = async (req, res) => {
+    if (String(process.env.DISABLE_SEED_ROUTE || '').trim().toLowerCase() === 'true' || seedShortcutExpired()) {
+      return res.status(404).json({ success: false, error: { code: 'not_found', message: 'Not found' } });
+    }
+    const now = Date.now();
+    if (now - lastSeedShortcutAt < SEED_SHORTCUT_MIN_GAP_MS) {
+      return fail(res, 429, 'rate_limited', 'Try again in a few seconds');
+    }
+    lastSeedShortcutAt = now;
+    try {
+      const results = await applySeed();
+      const changed = results.filter((r) => r.action !== 'unchanged');
+      if (changed.length > 0) {
+        await AttendanceSetupRunModel.create({
+          action: 'seed-profiles',
+          database: dbName(),
+          byEmail: null,
+          byName: 'public seed route',
+          summary: results,
+        });
+      }
+      const tracked = (await getAllBdaProfiles()).filter((p) => p.tracked && p.active).length;
+      return res.status(200).json({
+        success: true,
+        message: changed.length
+          ? 'BDA registry is ready. Absent alerts are now active.'
+          : 'Already set up. Nothing needed changing.',
+        profiles: results.map((r) => ({ name: SEED_PROFILES.find((p) => p.email === r.email)?.displayName, action: r.action })),
+        trackedBdas: tracked,
+      });
+    } catch (err) {
+      console.error('[attendanceSetup] seed shortcut failed:', err?.message || err);
+      return fail(res, 500, 'seed_failed', 'Seeding the BDA profiles failed');
+    }
+  };
+  app.get('/script/seed/bda', handler);
+  app.get('/script/seed/dba', handler);
+}
+
 export function registerAttendanceSetupRoutes(app) {
+  registerSeedShortcut(app);
   const BASE = '/api/crm/admin/attendance/setup';
 
   app.get(`${BASE}/status`, ...adminOnly, async (req, res) => {
