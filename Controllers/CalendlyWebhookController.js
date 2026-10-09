@@ -31,7 +31,7 @@ function assignedBdaLabel(booking) {
     'Not assigned'
   );
 }
-import { triggerWorkflow, cancelScheduledWorkflows } from './WorkflowController.js';
+import { triggerWorkflow, cancelScheduledWorkflows, cancelNotScheduledWorkflowsForClient } from './WorkflowController.js';
 import { normalizePhoneForMatching } from '../Utils/normalizePhoneForMatching.js';
 import { DateTime } from 'luxon';
 import crypto from 'crypto';
@@ -837,6 +837,22 @@ async function handleCreatedEvent(req, res, payload) {
     .then(({ resolveBookingMeetCode }) => resolveBookingMeetCode(newBooking))
     .catch((e) => Logger.warn('Meet code resolution failed (will retry lazily)', { error: e?.message }));
   } // end if (!shouldMergeIntoExisting) — campaign + new booking
+
+  // The lead-form record for this client is a separate not-scheduled booking (different
+  // bookingId, often a different email), so its queued "you have not booked" nudges
+  // would keep firing. Cancel them now; the send-time guard in cronScheduler is the backstop.
+  try {
+    const stop = await cancelNotScheduledWorkflowsForClient(
+      inviteeEmail, inviteePhone || newBooking?.clientPhone, newBooking?.bookingId
+    );
+    if (stop.cancelledBookings > 0) {
+      Logger.info('Cancelled not-scheduled workflows on sibling lead records', {
+        bookingId: newBooking?.bookingId, siblings: stop.cancelledBookings,
+      });
+    }
+  } catch (siblingCancelErr) {
+    Logger.warn('Failed to cancel sibling not-scheduled workflows', { error: siblingCancelErr.message });
+  }
 
   // Mark user as booked
   try {

@@ -94,6 +94,51 @@ export async function clientHasPaidBooking(clientEmail, clientPhone) {
   return !!paid;
 }
 
+const clientMatchConditions = (clientEmail, clientPhone) => {
+  const conditions = [];
+  if (clientEmail) conditions.push({ clientEmail: String(clientEmail).trim().toLowerCase() });
+  const norm = clientPhone ? normalizePhoneForMatching(clientPhone) : null;
+  if (norm) conditions.push({ normalizedClientPhone: norm });
+  return conditions;
+};
+
+// A "you have not booked yet" nudge is wrong once the client holds a booking that is
+// scheduled, rescheduled, completed or paid. Matching is by email OR phone, because
+// the Calendly booking often arrives under a different email than the lead form.
+const BOOKED_STATUSES = ['scheduled', 'rescheduled', 'completed', 'paid'];
+
+/**
+ * True if the client (email or phone) has a booking, other than excludeBookingId,
+ * in a booked state. Used to stop not-scheduled workflows reaching clients who booked.
+ */
+export async function clientHasBookedElsewhere(clientEmail, clientPhone, excludeBookingId = null) {
+  const conditions = clientMatchConditions(clientEmail, clientPhone);
+  if (conditions.length === 0) return false;
+
+  const query = { $or: conditions, bookingStatus: { $in: BOOKED_STATUSES } };
+  if (excludeBookingId) query.bookingId = { $ne: excludeBookingId };
+  return !!(await CampaignBookingModel.exists(query));
+}
+
+/**
+ * Cancel pending not-scheduled workflows on every OTHER not-scheduled booking this
+ * client holds. Called when a booking lands, so a lead-form record with a different
+ * bookingId stops getting nudges the moment the client books.
+ */
+export async function cancelNotScheduledWorkflowsForClient(clientEmail, clientPhone, keepBookingId = null) {
+  const conditions = clientMatchConditions(clientEmail, clientPhone);
+  if (conditions.length === 0) return { cancelledBookings: 0 };
+
+  const query = { $or: conditions, bookingStatus: 'not-scheduled' };
+  if (keepBookingId) query.bookingId = { $ne: keepBookingId };
+  const siblings = await CampaignBookingModel.find(query).select('bookingId').lean();
+
+  for (const sibling of siblings) {
+    await cancelScheduledWorkflows(sibling.bookingId, 'scheduled', 'not-scheduled');
+  }
+  return { cancelledBookings: siblings.length };
+}
+
 function deduplicateBookings(bookings) {
   const groupedMap = new Map();
   

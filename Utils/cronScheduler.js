@@ -11,7 +11,7 @@ import { scheduleEmailBatch, scheduleWhatsAppBatch } from './JobScheduler.js';
 import { buildTemplateParameters } from './TemplateParameterBuilder.js';
 import { safeErrorDetails } from './safeErrorDetails.js';
 import { sendgridCircuitBreaker } from './CircuitBreaker.js';
-import { clientHasPaidBooking } from '../Controllers/WorkflowController.js';
+import { clientHasPaidBooking, clientHasBookedElsewhere } from '../Controllers/WorkflowController.js';
 import { DesignedEmailTemplateModel } from '../Schema_Models/DesignedEmailTemplate.js';
 import { renderDesignedEmail, buildBookingTokens, unsubscribeAsm } from '../Controllers/DesignedEmailTemplateController.js';
 import { ScheduledWhatsAppReminderModel } from '../Schema_Models/ScheduledWhatsAppReminder.js';
@@ -165,6 +165,26 @@ export async function executeWorkflowLog(log) {
       );
       console.log(`⏭️ Skipped workflow log ${log.logId}: client has paid booking elsewhere`);
       return;
+    }
+
+    // Not-scheduled nudges say "you have not booked yet". Re-check at send time, since the
+    // client may have booked after the log was queued, under another email or phone.
+    if (log.triggerAction === 'not-scheduled') {
+      const bookedHere = booking.bookingStatus !== 'not-scheduled';
+      const bookedElsewhere = bookedHere
+        ? false
+        : await clientHasBookedElsewhere(booking.clientEmail, booking.clientPhone, booking.bookingId);
+      if (bookedHere || bookedElsewhere) {
+        const reason = bookedHere
+          ? `Skipped: booking is now ${booking.bookingStatus}, client already booked`
+          : 'Skipped: client already has a booking under another record';
+        await WorkflowLogModel.updateOne(
+          { logId: log.logId },
+          { $set: { status: 'cancelled', error: reason, executedAt: null } }
+        );
+        console.log(`⏭️ Skipped not-scheduled workflow log ${log.logId}: ${reason}`);
+        return;
+      }
     }
 
     if (log.step.channel === 'email') {
