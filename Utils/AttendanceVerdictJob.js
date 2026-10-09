@@ -507,7 +507,7 @@ export function startAttendanceVerdictJob() {
   console.log(`[AttendanceVerdict] starting (verdicts every ${VERDICT_EVERY_MS / 1000}s)`);
   // The job only judges BDAs who are in the registry with tracked: true. An empty registry means NO absent alert
   // will ever fire, which looks exactly like "alerts stopped working", so say it loudly at startup and tell the
-  // admin channel once. Fix: node scripts/seed-bda-profiles.js --apply
+  // admin channel once. Fix: POST /api/crm/admin/attendance/setup/seed-profiles (see GET .../setup/status).
   getTrackedBdas()
     .then((tracked) => {
       if (tracked.length > 0) {
@@ -517,7 +517,7 @@ export function startAttendanceVerdictJob() {
       console.warn('[AttendanceVerdict] NO tracked BDAs in the registry: no verdicts or absent alerts until it is seeded');
       return postAdminChannel(
         '⚠️ **Attendance alerts are OFF**: the BDA registry has no tracked BDAs, so nobody is judged and no absent alert will fire. ' +
-          'Run `node scripts/seed-bda-profiles.js --apply` (or set `tracked` on the BDA registry page).'
+          'Call `POST /api/crm/admin/attendance/setup/run` (dry run first, then with apply), or set `tracked` on the BDA registry page.'
       );
     })
     .catch((err) => console.warn('[AttendanceVerdict] could not read the registry at startup:', err?.message || err));

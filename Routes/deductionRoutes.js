@@ -57,7 +57,7 @@ async function requestIsAdmin(req) {
   return isCrmAdmin(req.crmUser);
 }
 
-async function requireAdminLive(req, res, next) {
+export async function requireAdminLive(req, res, next) {
   try {
     if (await requestIsAdmin(req)) return next();
     return fail(res, 403, 'forbidden', 'Admin access required');
@@ -68,7 +68,7 @@ async function requireAdminLive(req, res, next) {
 }
 
 /** Who to write into waivedBy / reviewedBy. The old password gate issues a token with no email. */
-function actorOf(req) {
+export function actorOf(req) {
   if (req.crmAdmin) return { email: norm(req.crmAdmin.email) || null, name: req.crmAdmin.name || 'Admin' };
   return { email: norm(req.crmUser?.email) || null, name: req.crmUser?.name || null };
 }

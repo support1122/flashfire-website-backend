@@ -243,6 +243,7 @@ import express from 'express';
 import { registerAttendanceRoutes } from "./Routes/attendanceRoutes.js";
 import { registerDeductionRoutes } from "./Routes/deductionRoutes.js";
 import { registerBdaProfileRoutes } from "./Routes/bdaProfileRoutes.js";
+import { registerAttendanceSetupRoutes } from "./Routes/attendanceSetupRoutes.js";
 
 export default function Routes(app) {
 
@@ -463,6 +464,8 @@ export default function Routes(app) {
   registerDeductionRoutes(app);
   // BDA registry admin (aliases, leave days, tracked flag).
   registerBdaProfileRoutes(app);
+  // One-call setup (seed the registry, audit and re-link calls, status checklist). Dry run unless apply is sent.
+  registerAttendanceSetupRoutes(app);
 
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);
