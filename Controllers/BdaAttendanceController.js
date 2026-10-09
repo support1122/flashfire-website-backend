@@ -305,7 +305,9 @@ async function closeBdaAttendanceSession({
       `**Left At:** ${formatIST(leaveTime)}\n` +
       `_Source: extension (live detection) — final times verified from Google Meet records after the meeting_`;
 
-    await sendDurationDiscord(message);
+    // Not awaited: the leave is already saved, and a slow or retrying Discord call must not delay the response
+    // (the extension closes its session on it) or the SSE update below. Failures are logged, never swallowed.
+    sendDurationDiscord(message).catch((e) => console.error('[BdaAttendance] leave alert failed:', e?.message || e));
   }
 
   const durationMin = Math.round(attendance.cumulativeDurationMs / 60000);
@@ -1054,7 +1056,9 @@ export async function reportJoin(req, res) {
         `**Joined At:** ${formatIST(joinDate)}\n` +
         `_Source: extension (live detection) — final times verified from Google Meet records after the meeting_`;
 
-      await sendPresentDiscord(message);
+      // Not awaited: the join is already saved. Discord (with its retries) must not hold up the extension's
+      // response, so the alert goes out the instant the join is detected and the API answers immediately.
+      sendPresentDiscord(message).catch((e) => console.error('[BdaAttendance] join alert failed:', e?.message || e));
       await BdaAttendanceModel.updateOne({ _id: doc._id }, { discordNotified: true });
     }
 

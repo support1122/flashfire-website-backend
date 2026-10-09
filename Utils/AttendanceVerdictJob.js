@@ -6,7 +6,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { EVENTS, emitAttendanceEvent } from './attendanceEvents.js';
 import { postAbsentChannel, postAdminChannel, postAttendanceChannel } from './attendanceDiscord.js';
 import { countableReason, getAssignedBdaEmail, istDate } from './BdaAssignment.js';
-import { getBdaProfile } from './BdaRegistry.js';
+import { getBdaProfile, getTrackedBdas } from './BdaRegistry.js';
 import { SYNC_LIMITS_MS, getAllSyncHealth, recordSyncError, recordSyncOk, syncOkBetween, wasSourceHealthy } from './SyncHealth.js';
 import { WINDOW_CLOSES_AFTER_MS, VERDICT_SETTLE_MS, countedSignals, formatIstTime } from './recordPresentSignal.js';
 
@@ -196,9 +196,21 @@ async function writeVerdict({ booking, bdaEmail, profile, nowMs, now }, d) {
 
   if (verdict === 'absent') {
     const who = profile?.displayName || row?.bdaName || bdaEmail;
+    // Posted at start + 90 s, the moment the verdict is written. Google's own confirmation ("verified from Google
+    // Meet records") follows from MeetAttendanceScheduler once its data is settled.
+    const roster = (row?.participantsAtJoin || []).map((p) => p.displayName).filter(Boolean).join(', ');
+    // The fine line only appears when fines are really on, so the channel never promises a deduction that is off.
+    const finesLive = String(process.env.DEDUCTIONS_MODE || '').trim().toLowerCase() === 'live';
     await safePost(
       d.poster,
-      `❌ Absent: ${who} did not mark present by ${formatIstTime(startMs + WINDOW_CLOSES_AFTER_MS)} for ${booking.clientName || 'the client'}. Fine applies per policy.`,
+      `🚫 **BDA Absent**\n` +
+        `**BDA:** ${who} (${bdaEmail})\n` +
+        `**Client:** ${booking.clientName || 'the client'}\n` +
+        `**Meeting:** ${DateTime.fromMillis(startMs, { zone: 'Asia/Kolkata' }).toFormat('dd MMM yyyy, hh:mm a')}\n` +
+        `**Not marked present by:** ${formatIstTime(startMs + WINDOW_CLOSES_AFTER_MS)}\n` +
+        (roster ? `**Who was in the call:** ${roster}\n` : '') +
+        `_No present signal arrived in time. Google Meet records will confirm shortly._` +
+        (finesLive ? ' A fine applies per policy.' : ''),
       'absent'
     );
   }
@@ -493,6 +505,22 @@ export function startAttendanceVerdictJob() {
     return;
   }
   console.log(`[AttendanceVerdict] starting (verdicts every ${VERDICT_EVERY_MS / 1000}s)`);
+  // The job only judges BDAs who are in the registry with tracked: true. An empty registry means NO absent alert
+  // will ever fire, which looks exactly like "alerts stopped working", so say it loudly at startup and tell the
+  // admin channel once. Fix: node scripts/seed-bda-profiles.js --apply
+  getTrackedBdas()
+    .then((tracked) => {
+      if (tracked.length > 0) {
+        console.log(`[AttendanceVerdict] judging ${tracked.length} tracked BDA(s)`);
+        return null;
+      }
+      console.warn('[AttendanceVerdict] NO tracked BDAs in the registry: no verdicts or absent alerts until it is seeded');
+      return postAdminChannel(
+        '⚠️ **Attendance alerts are OFF**: the BDA registry has no tracked BDAs, so nobody is judged and no absent alert will fire. ' +
+          'Run `node scripts/seed-bda-profiles.js --apply` (or set `tracked` on the BDA registry page).'
+      );
+    })
+    .catch((err) => console.warn('[AttendanceVerdict] could not read the registry at startup:', err?.message || err));
   const tick = async () => {
     if (ticking) return; // a slow Google check must not stack passes
     ticking = true;

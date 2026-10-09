@@ -4,6 +4,7 @@ import { DateTime } from 'luxon';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
+import { postAbsentChannel } from './attendanceDiscord.js';
 import { getAssignedBdaEmail } from './BdaAssignment.js';
 import {
   extractMeetCode,
@@ -53,6 +54,11 @@ const WINDOW_LEAD_MS = 60 * 1000;               // start polling 1 min before st
 const WINDOW_GRACE_MS = 30 * 60 * 1000;         // keep polling 30 min after scheduled end
 const DEFAULT_MEETING_MS = 60 * 60 * 1000;      // window when scheduledEnd is missing
 const MAX_SESSION_MS = 6 * 60 * 60 * 1000;      // sanity clamp per session
+// Google's numbers are final enough to report once the call (or the BDA's part of it) has been over this long. A BDA
+// who rejoins inside this gap simply updates the recap; waiting for the scheduled end made the recap hours late.
+const EARLY_FINALIZE_SETTLE_MS = 2 * 60 * 1000;
+// Mark Present closes 60 s after start (plan 2.2). A first join later than this is "joined late".
+const LATE_AFTER_START_MS = 60 * 1000;
 
 let isRunning = false;
 let disabledLogged = false;
@@ -256,7 +262,9 @@ export async function processBooking(booking, now, deps = {}) {
     bookingId: booking.bookingId,
     bdaEmail: assignedEmail,
   });
-  if (existing?.meetApiFinalizedAt) return;
+  // Finalized AFTER the scheduled end is final. Finalized earlier (call over, BDA done) stays open until the slot
+  // ends, because the BDA may rejoin; the recap is then re-sent as an update (see the recap block below).
+  if (existing?.meetApiFinalizedAt && new Date(existing.meetApiFinalizedAt).getTime() > scheduledEnd.getTime()) return;
 
   const meetCode = await getMeetCode(booking);
   if (!meetCode) return;
@@ -307,7 +315,16 @@ export async function processBooking(booking, now, deps = {}) {
   // or unconditionally once the grace window is exhausted.
   const allEnded = records.every((r) => Boolean(r.endTime));
   const pastGrace = now.getTime() > scheduledEnd.getTime() + WINDOW_GRACE_MS;
-  const finalize = (allEnded && now.getTime() > scheduledEnd.getTime()) || pastGrace;
+  // Report as soon as Google's data is settled instead of waiting for the scheduled end: the whole call has been
+  // over for a couple of minutes, or the BDA left (all their sessions ended) a couple of minutes ago.
+  const settledFor = (endTime) => {
+    const t = endTime ? new Date(endTime).getTime() : 0;
+    return t > 0 && now.getTime() - t >= EARLY_FINALIZE_SETTLE_MS;
+  };
+  const lastRecordEnd = records.reduce((m, r) => Math.max(m, r.endTime ? new Date(r.endTime).getTime() : 0), 0);
+  const bdaDone = Boolean(bda && bda.sessions?.length && bda.sessions.every((s) => s.endTime) && settledFor(bda.latestEndTime));
+  const finalize =
+    (allEnded && now.getTime() > scheduledEnd.getTime()) || pastGrace || (allEnded && settledFor(lastRecordEnd)) || bdaDone;
 
   const windowStart = new Date(scheduledStart.getTime() - PRESENCE_BUFFER_MS);
   const windowEnd = new Date(scheduledEnd.getTime() + PRESENCE_BUFFER_MS);
@@ -393,19 +410,50 @@ export async function processBooking(booking, now, deps = {}) {
       }
     }
 
-    // Authoritative recap once per booking, after the final numbers are stored.
+    // Google-verified messages, sent as soon as the data is settled (see `finalize` above).
     if (finalize) {
       const late = punctualityLabel(set.lateByMs);
       const roster = (set.participantsAtJoin || []).map((p) => p.displayName).join(', ');
-      await sendVerifiedDiscord(
-        `📋 **Attendance Verified: Google Meet records**\n` +
-        `**BDA:** ${set.bdaName} (${assignedEmail})\n` +
-        `**Client:** ${booking.clientName || 'Unknown'}\n` +
-        `**In:** ${formatIST(firstJoin)}${late ? ` (${late})` : ''}\n` +
-        `**Out:** ${formatIST(set.leftAt)}\n` +
-        `**Duration (total):** ${Math.round((set.durationMs || 0) / 60000)} min\n` +
-        `**In call when BDA joined:** ${roster || 'nobody (BDA was first)'}`
-      );
+      const durationMs = set.durationMs || 0;
+
+      // 1) The recap. Sent once; if the BDA rejoined afterwards and the total moved by a minute or more, sent
+      //    again as an update so the channel always ends on the right numbers.
+      const sentBefore = Boolean(existing?.verifiedRecapSentAt);
+      const moved = Math.abs(durationMs - (existing?.verifiedRecapDurationMs ?? 0)) >= 60 * 1000;
+      if (!sentBefore || moved) {
+        await sendVerifiedDiscord(
+          `${sentBefore ? '🔄 **Attendance Verified (updated): Google Meet records**' : '📋 **Attendance Verified: Google Meet records**'}\n` +
+          `**BDA:** ${set.bdaName} (${assignedEmail})\n` +
+          `**Client:** ${booking.clientName || 'Unknown'}\n` +
+          `**In:** ${formatIST(firstJoin)}${late ? ` (${late})` : ''}\n` +
+          `**Out:** ${formatIST(set.leftAt)}\n` +
+          `**Duration (total):** ${Math.round(durationMs / 60000)} min\n` +
+          `**In call when BDA joined:** ${roster || 'nobody (BDA was first)'}`
+        );
+        await BdaAttendanceModel.updateOne(
+          { bookingId: booking.bookingId, bdaEmail: assignedEmail },
+          { $set: { verifiedRecapSentAt: now, verifiedRecapDurationMs: durationMs } }
+        );
+      }
+
+      // 2) Joined, but after the Mark Present window closed. The verdict job already told the channel "absent"
+      //    at start + 90 s; this confirms it from Google's exact join time. Skipped when the BDA was marked present
+      //    in time by a button or the extension (the verdict is then present).
+      const joinedLate = firstJoin && firstJoin.getTime() > scheduledStart.getTime() + LATE_AFTER_START_MS;
+      if (joinedLate && existing?.verdict !== 'present' && !existing?.verifiedAbsentNotifiedAt) {
+        await postAbsentChannel(
+          `🚫 **BDA Absent: verified from Google Meet records**\n` +
+          `**BDA:** ${set.bdaName} (${assignedEmail})\n` +
+          `**Client:** ${booking.clientName || 'Unknown'}\n` +
+          `**Meeting:** ${formatIST(scheduledStart)}\n` +
+          `**Joined At:** ${formatIST(firstJoin)}${late ? ` (${late})` : ''}\n` +
+          `_The BDA joined, but after the Mark Present window closed (1 min after the start)._`
+        );
+        await BdaAttendanceModel.updateOne(
+          { bookingId: booking.bookingId, bdaEmail: assignedEmail },
+          { $set: { verifiedAbsentNotifiedAt: now } }
+        );
+      }
     }
     return;
   }
@@ -462,6 +510,25 @@ export async function processBooking(booking, now, deps = {}) {
       },
       { upsert: true, new: true }
     );
+
+    // Google confirms the call ran without the assigned BDA in it. Posted once per booking; the verdict job
+    // already announced the absence at start + 90 s, this is the verification. Not for canceled bookings, and not
+    // when a button or the extension had the BDA present in time.
+    if (!existing?.verifiedAbsentNotifiedAt && existing?.verdict !== 'present') {
+      const whoWasThere = participants.map((p) => p.displayName || 'Unknown').join(', ');
+      await postAbsentChannel(
+        `🚫 **BDA Absent: verified from Google Meet records**\n` +
+        `**BDA:** ${base.bdaName} (${assignedEmail})\n` +
+        `**Client:** ${booking.clientName || 'Unknown'}\n` +
+        `**Meeting:** ${formatIST(scheduledStart)}\n` +
+        `**Who was in the call:** ${whoWasThere}\n` +
+        `_The meeting ran, but the assigned BDA never joined._`
+      );
+      await BdaAttendanceModel.updateOne(
+        { bookingId: booking.bookingId, bdaEmail: assignedEmail },
+        { $set: { verifiedAbsentNotifiedAt: now } }
+      );
+    }
   }
 }
 

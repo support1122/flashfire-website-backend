@@ -224,7 +224,10 @@ describe('mark window and verdict (plan 2.2, 5.6)', () => {
     await runVerdictPass(new Date(start + 95 * 1000), deps);
     assert.equal((await rowOf(bookingId)).verdict, 'absent');
     assert.equal(posts.length, 1);
-    assert.match(posts[0], /^❌ Absent: Siddhartha did not mark present by \d{1,2}:\d{2} [AP]M for Client \d+\. Fine applies per policy\.$/);
+    assert.match(posts[0], /^🚫 \*\*BDA Absent\*\*\n\*\*BDA:\*\* Siddhartha \(/);
+    assert.match(posts[0], /\*\*Client:\*\* Client \d+\n/);
+    assert.match(posts[0], /\*\*Not marked present by:\*\* \d{1,2}:\d{2} [AP]M\n/);
+    assert.ok(!posts[0].includes('A fine applies'), 'no fine promise while DEDUCTIONS_MODE is not live');
     assert.ok(!posts[0].includes('—'), 'no em dash');
   });
 
