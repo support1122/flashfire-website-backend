@@ -1529,6 +1529,10 @@ export async function getMissedMeetingLogs(req, res) {
     // Missed = explicitly absent OR unmarked (no response captured). Unmarked
     // is NOT a confirmed absence — surfaced here so admin can follow up.
     const attendanceMatch = { status: { $in: ['absent', 'unmarked'] } };
+    // Optional BDA filter (Meeting Info's BDA dropdown): only that BDA's missed rows.
+    if (typeof req.query.bdaEmail === 'string' && req.query.bdaEmail.trim()) {
+      attendanceMatch.bdaEmail = req.query.bdaEmail.trim().toLowerCase().slice(0, 200);
+    }
     if (fromDate || toDate) {
       attendanceMatch.meetingScheduledStart = {};
       if (fromDate) {

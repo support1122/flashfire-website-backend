@@ -1,3 +1,5 @@
+import { currentDeductionSettings, saveDeductionSettings } from '../Utils/DeductionSettings.js';
+import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import jwt from 'jsonwebtoken';
 import { getCrmJwtSecret, requireCrmPermission, requireCrmUser } from '../Middlewares/CrmAuth.js';
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
@@ -141,6 +143,34 @@ const sendAction = async (res, result) => {
 // ---- routes ---------------------------------------------------------------------------------------------------
 
 export function registerDeductionRoutes(app) {
+  // The fines switch (off / shadow / live), stored in the database so no env var is needed. Admin only.
+  app.get('/api/crm/admin/deductions/settings', requireCrmUserOrAdmin, requireAdminLive, (req, res) =>
+    res.status(200).json({ success: true, settings: currentDeductionSettings() })
+  );
+  app.put('/api/crm/admin/deductions/settings', requireCrmUserOrAdmin, requireAdminLive, async (req, res) => {
+    try {
+      const by = req.crmUser?.email || req.crmAdmin?.email || 'admin';
+      const before = currentDeductionSettings();
+      const out = await saveDeductionSettings({ mode: req.body?.mode, liveFrom: req.body?.liveFrom, by });
+      if (!out.ok) return fail(res, out.status, out.code, out.message);
+      if (out.settings.mode !== before.mode) {
+        const when = out.settings.liveFrom
+          ? new Date(out.settings.liveFrom).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })
+          : null;
+        const text = {
+          live: `💰 **Fines are LIVE** from ${when} IST (set by ${by}). Meetings from then on are fined per policy; earlier meetings never are.`,
+          shadow: `👀 **Fines in SHADOW mode** from ${when} IST (set by ${by}). Rows are created for admins only; nobody is charged.`,
+          off: `⏹️ **Fines are OFF** (set by ${by}). No new deduction rows are created; existing ones stay in the ledger.`,
+        }[out.settings.mode];
+        postAdminChannel(text).catch((err) => console.warn('[deductionRoutes] settings notice failed:', err?.message));
+      }
+      return res.status(200).json({ success: true, settings: out.settings });
+    } catch (err) {
+      console.error('[deductionRoutes] settings save failed:', err?.message);
+      return fail(res, 500, 'internal_error', 'Could not save the fines setting');
+    }
+  });
+
   // BDA: own rows only. Admin: everyone, optional bdaEmail.
   app.get('/api/crm/deductions', requireCrmUserOrAdmin, async (req, res) => {
     try {
@@ -169,6 +199,8 @@ export function registerDeductionRoutes(app) {
         success: true,
         month,
         mode: getDeductionsMode(),
+        liveFrom: currentDeductionSettings().liveFrom,
+        modeSource: currentDeductionSettings().source,
         rows: docs.map((d) => toRow(d, names)),
         totals: buildTotals(docs), // active rows only, so needs_review ("Under review") never counts
       });

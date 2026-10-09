@@ -1,3 +1,4 @@
+import { refreshDeductionSettings, startDeductionSettingsRefresher } from './DeductionSettings.js';
 import { findOverlappingMeetings } from './DoubleBooking.js';
 import { bookingPhoneKey } from './CallLinking.js';
 import { countedSignals } from './recordPresentSignal.js';
@@ -998,7 +999,9 @@ export function startDeductionEngine() {
       ticking = false;
     }
   };
-  tick();
+  // The CRM fines switch lives in the database: load it before the first tick, then keep it fresh every 30 s.
+  startDeductionSettingsRefresher();
+  refreshDeductionSettings().finally(tick);
   timer = setInterval(tick, getEvaluatorIntervalMs());
   console.log(`[DeductionEngine] started, mode=${getDeductionsMode()}`);
 }
