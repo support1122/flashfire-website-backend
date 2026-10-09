@@ -1236,6 +1236,15 @@ export async function manualMark(req, res) {
       { upsert: true, new: true }
     );
 
+    // Extensions older than v2 still mark present through this endpoint. Record it as a present signal too, so a mark
+    // made inside the window counts for the server's verdict. The window and assignment rules live in
+    // recordPresentSignal; a mark outside them is simply not counted (this endpoint still saves its own row).
+    try {
+      await recordPresentSignal({ bookingId, bdaEmail: emailNorm, bdaName: name, kind: 'button_meet' });
+    } catch (signalError) {
+      console.error('[BdaAttendance] could not record legacy manual mark as a signal:', signalError?.message || signalError);
+    }
+
     // Discord notification
     const resolvedMeetLink = meetLink || booking.googleMeetUrl || 'N/A';
     const message =
@@ -1246,7 +1255,8 @@ export async function manualMark(req, res) {
       `**Meet Link:** ${resolvedMeetLink}\n` +
       `_Note: Auto-detection did not trigger; BDA manually confirmed attendance._`;
 
-    await sendPresentDiscord(message);
+    // Not awaited, like the join alert: the mark is saved, Discord must not delay the response.
+    sendPresentDiscord(message).catch((e) => console.error('[BdaAttendance] manual mark alert failed:', e?.message || e));
     await BdaAttendanceModel.updateOne(
       { _id: attendance._id },
       { discordNotified: true }

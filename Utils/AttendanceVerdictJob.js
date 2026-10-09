@@ -142,6 +142,14 @@ export async function runVerdictPass(now = new Date(), deps = {}) {
     // Leave days, untracked BDAs and meetings canceled before they started get no verdict and no message.
     if (!countableReason(booking, profile, nowMs).countable) continue;
 
+    // Go-live: judge only meetings that started after this BDA was put in the registry. Without this, seeding the
+    // registry would judge the last 24 hours at once, and every meeting recorded by the old system (no signals yet)
+    // would be called absent, firing a burst of false alerts. `ignoreGoLive` is for tests only.
+    if (!d.ignoreGoLive) {
+      const liveFromMs = profile?.createdAt ? toMs(profile.createdAt) : 0;
+      if (toMs(booking.scheduledEventStartTime) < liveFromMs) continue;
+    }
+
     const written = await writeVerdict({ booking, bdaEmail, profile, nowMs, now: new Date(nowMs) }, d);
     if (written) verdicts.push(written);
   }
