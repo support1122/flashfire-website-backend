@@ -295,7 +295,8 @@ describe('mark window and verdict (plan 2.2, 5.6)', () => {
   });
 
   it('an extension join at +2 min is absent, but in time and signal are still recorded', async () => {
-    const start = Date.now() - 10 * MIN;
+    // The join reaches the server as it happens (real joins arrive within seconds), so no back-dating cap applies.
+    const start = Date.now() - 2 * MIN - 5000;
     const bookingId = await mkBooking({ start });
     const joinedAt = new Date(start + 2 * MIN).toISOString();
     const r = await call('POST', '/api/bda-attendance/report-join', {
@@ -315,7 +316,7 @@ describe('mark window and verdict (plan 2.2, 5.6)', () => {
   });
 
   it('a timely extension join is present via extension_join', async () => {
-    const start = Date.now() - 10 * MIN;
+    const start = Date.now() - 30 * 1000 - 5000; // the join at +30 s reaches the server right away
     const bookingId = await mkBooking({ start });
     await call('POST', '/api/bda-attendance/report-join', {
       token: extToken(SID),
@@ -825,17 +826,21 @@ describe('endpoints', () => {
   it('heartbeat stores the extension state and whether the profile matches', async () => {
     const ok = await call('POST', '/api/bda-attendance/heartbeat', {
       token: extToken(SID),
-      body: { version: '2.0.0', profileEmail: `SID@other-domain.test`, meetTabs: [{ code: 'abc-defg-hij', inCall: true }, { code: 5 }], loggedIn: true },
+      // Same name on another COMPANY domain: the Workspace account can differ from the CRM login's domain.
+      body: { version: '2.0.0', profileEmail: `SID@flashfirejobs.com`, meetTabs: [{ code: 'abc-defg-hij', inCall: true }, { code: 5 }], loggedIn: true },
     });
     assert.deepEqual(ok.body, { success: true });
     const beat = await BdaExtensionHeartbeatModel.findOne({ bdaEmail: SID }).lean();
     assert.equal(beat.version, '2.0.0');
-    assert.equal(beat.profileEmail, 'sid@other-domain.test');
-    assert.equal(beat.profileMatchesLogin, true, 'only the part before the @ is compared');
+    assert.equal(beat.profileEmail, 'sid@flashfirejobs.com');
+    assert.equal(beat.profileMatchesLogin, true, 'same name on a company domain matches');
     assert.deepEqual(beat.meetTabs, [{ code: 'abc-defg-hij', inCall: true }, { code: null, inCall: null }]);
     assert.ok(Date.now() - new Date(beat.lastHeartbeatAt).getTime() < 5000);
 
     await call('POST', '/api/bda-attendance/heartbeat', { token: extToken(SID), body: { version: '2.0.0', profileEmail: 'feedback.flashfire@gmail.com', meetTabs: [] } });
+    assert.equal((await BdaExtensionHeartbeatModel.findOne({ bdaEmail: SID }).lean()).profileMatchesLogin, false);
+    // Same name on a personal domain is a different Google account: Meet records would not match the BDA.
+    await call('POST', '/api/bda-attendance/heartbeat', { token: extToken(SID), body: { version: '2.0.0', profileEmail: 'sid@gmail.com', meetTabs: [] } });
     assert.equal((await BdaExtensionHeartbeatModel.findOne({ bdaEmail: SID }).lean()).profileMatchesLogin, false);
     await call('POST', '/api/bda-attendance/heartbeat', { token: extToken(SID), body: {} });
     assert.equal((await BdaExtensionHeartbeatModel.findOne({ bdaEmail: SID }).lean()).profileMatchesLogin, null);
@@ -1187,6 +1192,9 @@ describe('getAttendanceRowFields contract', () => {
       sessions: [{ joinedAt: new Date(start0 + 20 * 1000).toISOString(), leftAt: new Date(start0 + 20 * MIN).toISOString() }],
       verified: true,
       matchedBy: 'stable_id',
+      // Google signal only, no extension join and no stored device yet: unknown, so null (Utils/JoinDevice.js).
+      joinDevice: null,
+      joinDeviceReason: null,
       integrityFlag: null,
     });
     assert.equal(first.transcript, null);
@@ -1199,7 +1207,7 @@ describe('getAttendanceRowFields contract', () => {
     const empty = own.get(ids[2]).attendance;
     assert.deepEqual(empty, {
       verdict: null, verdictAt: null, markedPresentAt: null, signals: [], inAt: null, outAt: null,
-      timeSpentMs: 0, sessions: [], verified: false, matchedBy: null, integrityFlag: null,
+      timeSpentMs: 0, sessions: [], verified: false, matchedBy: null, joinDevice: null, joinDeviceReason: null, integrityFlag: null,
     });
   });
 
@@ -1372,7 +1380,8 @@ describe('review fixes: alert delivery, go-live clock, forged times', () => {
     const posts = [];
     const r = await recordPresentSignal(
       { bookingId, bdaEmail: SID, kind: 'extension_join', eventAt: new Date(start + 20 * 1000) },
-      { postCorrection: async (m) => posts.push(m) }
+      // Received at +100 s: 80 s after the join, inside the 2-minute back-dating cap.
+      { postCorrection: async (m) => posts.push(m), now: () => start + 100 * 1000 }
     );
     assert.equal(r.correction ? true : r.ok, true);
     assert.equal(posts.length, 1);

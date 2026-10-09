@@ -8,6 +8,7 @@ import { postAbsentChannel, postAdminChannel, postAttendanceChannel } from './at
 import { countableReason, getAssignedBdaEmail, isAfterGoLive, istDate } from './BdaAssignment.js';
 import { getBdaProfile, getTrackedBdas } from './BdaRegistry.js';
 import { finesAreLive } from './deductionPolicy.js';
+import { doubleBookedLine, findOverlappingMeetings } from './DoubleBooking.js';
 import { SYNC_LIMITS_MS, getAllSyncHealth, recordSyncError, recordSyncOk, syncOkBetween, wasSourceHealthy } from './SyncHealth.js';
 import { WINDOW_CLOSES_AFTER_MS, VERDICT_SETTLE_MS, countedSignals, formatIstTime } from './recordPresentSignal.js';
 
@@ -88,21 +89,26 @@ async function safePost(poster, message, label) {
  *   - the verdict job ran between start + 60 s and start + 5 min (this pass is that run when it is on time)
  *   - Google's sync was no older than 10 min at verdict time, unless the BDA's extension sent a heartbeat
  */
-export async function computeVerdictHealth({ startMs, nowMs, bdaEmail }, deps) {
+export async function computeVerdictHealth({ startMs, nowMs, bdaEmail, googleChecked = true }, deps) {
   const jobOk =
     nowMs <= startMs + JOB_HEALTH_DEADLINE_MS ||
     (await deps.health.syncOkBetween('verdict_job', startMs + WINDOW_CLOSES_AFTER_MS, startMs + JOB_HEALTH_DEADLINE_MS));
   if (!jobOk) return false;
 
-  const googleOk = await deps.health.wasSourceHealthy('google_meet', {
-    fromMs: nowMs,
-    toMs: nowMs,
-    maxAgeMs: SYNC_LIMITS_MS.google_meet,
-  });
+  const googleOk =
+    googleChecked &&
+    (await deps.health.wasSourceHealthy('google_meet', {
+      fromMs: nowMs,
+      toMs: nowMs,
+      maxAgeMs: SYNC_LIMITS_MS.google_meet,
+    }));
   if (googleOk) return true;
 
+  // The extension proves it was alive only with a heartbeat around the window itself. A heartbeat from long after
+  // (a catch-up verdict hours later) says nothing about the meeting, so it does not count.
   const beat = await deps.getHeartbeat(bdaEmail);
-  return Boolean(beat?.lastHeartbeatAt && toMs(beat.lastHeartbeatAt) >= startMs - 5 * 60 * 1000);
+  const beatMs = beat?.lastHeartbeatAt ? toMs(beat.lastHeartbeatAt) : NaN;
+  return Number.isFinite(beatMs) && beatMs >= startMs - 5 * 60 * 1000 && beatMs <= startMs + JOB_HEALTH_DEADLINE_MS;
 }
 
 /**
@@ -113,7 +119,7 @@ export async function computeVerdictHealth({ startMs, nowMs, bdaEmail }, deps) {
  * The immediate absent alert. Posted at start + 90 s, the moment the verdict is written; Google's own confirmation
  * ("verified from Google Meet records") follows from MeetAttendanceScheduler once its data has settled.
  */
-function absentAlertMessage({ who, bdaEmail, clientName, startMs, roster }) {
+function absentAlertMessage({ who, bdaEmail, clientName, startMs, roster, doubleBooked = '' }) {
   return (
     `🚫 **BDA Absent**\n` +
     `**BDA:** ${who} (${bdaEmail})\n` +
@@ -121,6 +127,7 @@ function absentAlertMessage({ who, bdaEmail, clientName, startMs, roster }) {
     `**Meeting:** ${DateTime.fromMillis(startMs, { zone: 'Asia/Kolkata' }).toFormat('dd MMM yyyy, hh:mm a')}\n` +
     `**Not marked present by:** ${formatIstTime(startMs + WINDOW_CLOSES_AFTER_MS)}\n` +
     (roster ? `**Who was in the call:** ${roster}\n` : '') +
+    doubleBooked +
     `_No present signal arrived in time. Google Meet records will confirm shortly._` +
     // The fine line only appears when fines are really on, so the channel never promises a deduction that is off.
     (finesAreLive() ? ' A fine applies per policy.' : '')
@@ -129,19 +136,25 @@ function absentAlertMessage({ who, bdaEmail, clientName, startMs, roster }) {
 
 /** Re-send absent alerts whose first delivery failed (Discord down at start + 90 s). Only the last 30 minutes. */
 async function retryPendingAbsentAlerts(nowMs, d) {
+  // Only rows whose first post is at least 60 s old: the first attempt (with DiscordConnect's own retries) can
+  // still be in flight, and a second instance retrying it now would post the alert twice.
   const pending = await BdaAttendanceModel.find({
     verdict: 'absent',
     verdictAlertPending: true,
-    verdictAt: { $gte: new Date(nowMs - 30 * 60 * 1000) },
+    verdictAt: { $gte: new Date(nowMs - 30 * 60 * 1000), $lte: new Date(nowMs - 60 * 1000) },
   })
     .limit(20)
     .lean();
-  for (const row of pending) {
+  for (const candidate of pending) {
+    // Claim it first, conditionally, so exactly one instance re-sends it. Undone below if the post fails.
+    const row = await BdaAttendanceModel.findOneAndUpdate(
+      { _id: candidate._id, verdict: 'absent', verdictAlertPending: true },
+      { $set: { verdictAlertPending: false } },
+      { new: true }
+    ).lean();
+    if (!row) continue;
     const booking = await CampaignBookingModel.findOne({ bookingId: row.bookingId }).select(BOOKING_FIELDS).lean();
-    if (!booking) {
-      await BdaAttendanceModel.updateOne({ _id: row._id }, { $set: { verdictAlertPending: false } });
-      continue;
-    }
+    if (!booking) continue; // already claimed (flag cleared); nothing to say about a deleted booking
     const profile = await d.registry.getBdaProfile(row.bdaEmail);
     const delivered = await safePost(
       d.poster,
@@ -154,7 +167,7 @@ async function retryPendingAbsentAlerts(nowMs, d) {
       }),
       'absent-retry'
     );
-    if (delivered) await BdaAttendanceModel.updateOne({ _id: row._id }, { $set: { verdictAlertPending: false } });
+    if (!delivered) await BdaAttendanceModel.updateOne({ _id: row._id, verdict: 'absent' }, { $set: { verdictAlertPending: true } });
   }
 }
 
@@ -210,11 +223,15 @@ async function writeVerdict({ booking, bdaEmail, profile, nowMs, now }, d) {
 
   // One live Google check per meeting, then judge from what is stored. The verifier never throws, but a fake might.
   // Bounded: one hung Google call must not stall every verdict behind it (the tick would never finish).
+  // googleChecked: Google was really asked about THIS meeting. A sync that resolved no Meet code or had no API
+  // client returns checked: false, and must not count as "Google is healthy" for this verdict (finding 2026-10-09).
+  let googleChecked = false;
   try {
-    await Promise.race([
+    const checkedResult = await Promise.race([
       d.meetVerifier(booking),
       new Promise((_, reject) => setTimeout(() => reject(new Error('Google check timed out after 20 s')), 20000).unref?.()),
     ]);
+    googleChecked = checkedResult?.checked === true;
   } catch (err) {
     console.warn(`[AttendanceVerdict] live Meet check failed for ${booking.bookingId}: ${err?.message}`);
   }
@@ -222,7 +239,7 @@ async function writeVerdict({ booking, bdaEmail, profile, nowMs, now }, d) {
   const row = await BdaAttendanceModel.findOne({ bookingId: booking.bookingId, bdaEmail }).lean();
   if (row?.verdict) return null; // an overlapping pass or another instance got there first
 
-  const counted = countedSignals(row?.signals, startMs);
+  const counted = countedSignals(row?.signals, startMs, row);
   const verdict = counted.length > 0 ? 'present' : 'absent';
   const verdictSignal = counted[0]?.kind ?? null;
 
@@ -253,13 +270,34 @@ async function writeVerdict({ booking, bdaEmail, profile, nowMs, now }, d) {
   }
   if (!won) return null;
 
-  const healthy = await computeVerdictHealth({ startMs, nowMs, bdaEmail }, d);
+  // Close the race: a signal can be pushed between the read above and the write (its own check then saw verdict
+  // null and skipped the correction). Re-read once; if in-time evidence is there now, the absent never stands, never
+  // alerts and never fines. A signal pushed after this re-read sees verdict 'absent' and corrects it itself.
+  if (verdict === 'absent') {
+    const after = await BdaAttendanceModel.findOne({ bookingId: booking.bookingId, bdaEmail }).lean();
+    const late = countedSignals(after?.signals, startMs, after);
+    if (late.length > 0) {
+      await BdaAttendanceModel.updateOne(
+        { bookingId: booking.bookingId, bdaEmail, verdict: 'absent' },
+        { $set: { verdict: 'present', verdictSignal: late[0].kind, verdictCorrectedAt: now, verdictAlertPending: false } }
+      );
+      return { bookingId: booking.bookingId, bdaEmail, verdict: 'present', healthy: true, raceCorrected: true };
+    }
+  }
+
+  const healthy = await computeVerdictHealth({ startMs, nowMs, bdaEmail, googleChecked }, d);
 
   if (verdict === 'absent') {
     const who = profile?.displayName || row?.bdaName || bdaEmail;
+    let doubleBooked = '';
+    try {
+      doubleBooked = doubleBookedLine(await (d.findOverlapping || findOverlappingMeetings)(booking, bdaEmail, { nowMs }), formatIstTime);
+    } catch (err) {
+      console.warn(`[AttendanceVerdict] double-booking check failed for ${booking.bookingId}: ${err?.message}`);
+    }
     const delivered = await safePost(
       d.poster,
-      absentAlertMessage({ who, bdaEmail, clientName: booking.clientName, startMs, roster: (row?.participantsAtJoin || []).map((p) => p.displayName).filter(Boolean).join(', ') }),
+      absentAlertMessage({ who, bdaEmail, clientName: booking.clientName, startMs, roster: (row?.participantsAtJoin || []).map((p) => p.displayName).filter(Boolean).join(', '), doubleBooked }),
       'absent'
     );
     // Delivered: clear the flag. Not delivered (Discord down): leave it set so the next pass retries the alert.
@@ -328,6 +366,53 @@ export async function runIntegrityCheck(now = new Date(), deps = {}) {
 // ---------------------------------------------------------------------------
 
 /** 9 to 11 minutes before a countable meeting, warn once when the assigned BDA's extension has gone quiet. */
+/**
+ * 25 to 35 minutes before a slot where a tracked BDA has two (or more) countable meetings at the same time, warn the
+ * admin channel once so someone can reassign one. Otherwise the second meeting is a certain absent and a fine.
+ */
+export async function runDoubleBookingAlert(now = new Date(), deps = {}) {
+  const d = buildDeps(deps);
+  const nowMs = toMs(now);
+  const bookings = await CampaignBookingModel.find(
+    withFilter(
+      { scheduledEventStartTime: { $gte: new Date(nowMs + 25 * 60 * 1000), $lte: new Date(nowMs + 35 * 60 * 1000) }, $or: ASSIGNED_ANYONE },
+      d
+    )
+  )
+    .select(BOOKING_FIELDS)
+    .lean();
+
+  const posted = [];
+  for (const booking of bookings) {
+    const bdaEmail = getAssignedBdaEmail(booking);
+    const profile = bdaEmail ? await d.registry.getBdaProfile(bdaEmail) : null;
+    if (!bdaEmail || !countableReason(booking, profile, nowMs).countable) continue;
+    const clashes = await (d.findOverlapping || findOverlappingMeetings)(booking, bdaEmail, { nowMs });
+    if (clashes.length === 0) continue;
+
+    // One warning per set of clashing meetings, whichever of them this loop reaches first.
+    const ids = [booking.bookingId, ...clashes.map((c) => c.bookingId)].sort();
+    try {
+      await BdaAttendanceWarnDedupeModel.create({ bookingId: `double_booked:${ids.join('+')}`, bdaEmail, sentAt: new Date(nowMs) });
+    } catch (err) {
+      if (err?.code === 11000) continue;
+      throw err;
+    }
+    const who = profile?.discordUserId ? `<@${profile.discordUserId}>` : `**${profile?.displayName || bdaEmail}**`;
+    const list = [{ clientName: booking.clientName, startMs: toMs(booking.scheduledEventStartTime) }, ...clashes]
+      .sort((a, b) => a.startMs - b.startMs)
+      .map((m) => `- ${formatIstTime(m.startMs)} ${m.clientName || 'client'}`)
+      .join('\n');
+    await safePost(
+      d.adminPoster,
+      `⚠️ **Double-booked:** ${who} has overlapping meetings:\n${list}\nReassign one in the CRM before the mark window opens (5 min before the start), or the other will be marked absent.`,
+      'double-booked'
+    );
+    posted.push(ids);
+  }
+  return { posted };
+}
+
 export async function runHeartbeatAlert(now = new Date(), deps = {}) {
   const d = buildDeps(deps);
   const nowMs = toMs(now);
@@ -537,6 +622,7 @@ export async function runAttendanceTick(now = new Date(), deps = {}) {
   if (nowMs - lastHeartbeatRun >= HEARTBEAT_ALERT_EVERY_MS) {
     lastHeartbeatRun = nowMs;
     await step('heartbeat alert', () => runHeartbeatAlert(now, d));
+    await step('double-booking alert', () => runDoubleBookingAlert(now, d));
   }
   if (nowMs - lastSlowRun >= SLOW_STEPS_EVERY_MS) {
     lastSlowRun = nowMs;

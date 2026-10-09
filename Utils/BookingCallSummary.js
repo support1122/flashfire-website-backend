@@ -60,10 +60,23 @@ export function buildCallSummaries(bookings, calls, { assignedEmailOf, callerEma
   }
 
   const acc = new Map(); // bookingId -> counted calls
+  // caller|phone key -> outbound call times, whatever booking each call is linked to. Used ONLY for the ₹100
+  // no-show rule: a call to the client's number in the window is a call, even when the linker gave it to a
+  // duplicate booking of the same client (the dead twin), which used to fine the real no-show.
+  const byCallerPhone = new Map();
   for (const c of calls || []) {
     if (c.direction !== 'outbound') continue; // inbound and internal calls never count
     const when = callTimeMs(c);
     if (when == null) continue;
+
+    // Re-normalized: older rows stored 11/12-digit keys, which would never equal a booking's 10-digit key.
+    const phoneKey = normalizeLeadPhone(c.leadNumberNormalized) || normalizeLeadPhone(c.leadNumber);
+    const callerForPhone = phoneKey ? callerEmailOf(c) : null;
+    if (callerForPhone) {
+      const k = `${callerForPhone}|${phoneKey}`;
+      if (!byCallerPhone.has(k)) byCallerPhone.set(k, []);
+      byCallerPhone.get(k).push(when);
+    }
 
     let target = null;
     if (c.bookingId) {
@@ -83,10 +96,14 @@ export function buildCallSummaries(bookings, calls, { assignedEmailOf, callerEma
   }
 
   const out = new Map();
-  for (const [bookingId, { startMs }] of eligible) {
+  for (const [bookingId, { booking, startMs, assigned }] of eligible) {
     const counted = (acc.get(bookingId) || []).sort((a, b) => a.when - b.when);
+    const phoneKey = bookingPhoneKey(booking);
+    const calledByPhoneInWindow = Boolean(
+      phoneKey && (byCallerPhone.get(`${assigned}|${phoneKey}`) || []).some((t) => t >= startMs && t <= startMs + CALLED_WITHIN_MS)
+    );
     if (counted.length === 0) {
-      out.set(bookingId, emptyCallSummary());
+      out.set(bookingId, { ...emptyCallSummary(), calledWithin30Min: calledByPhoneInWindow });
       continue;
     }
     const first = counted[0].when;
@@ -98,7 +115,7 @@ export function buildCallSummaries(bookings, calls, { assignedEmailOf, callerEma
       firstCallAt: new Date(first),
       firstCallOffsetMin: offset === 0 ? 0 : offset, // avoid -0
       talkSec: counted.reduce((sum, { call }) => sum + (Number(call.durationSec) || 0), 0),
-      calledWithin30Min: counted.some(({ when }) => when >= startMs && when <= startMs + CALLED_WITHIN_MS),
+      calledWithin30Min: calledByPhoneInWindow || counted.some(({ when }) => when >= startMs && when <= startMs + CALLED_WITHIN_MS),
       lastCallAt: new Date(last),
     });
   }

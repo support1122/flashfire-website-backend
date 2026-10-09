@@ -35,6 +35,9 @@ export function shapeAttendance(row) {
     sessions: (row?.sessions || []).map((s) => ({ joinedAt: iso(s.startTime), leftAt: iso(s.endTime) })),
     verified: Boolean(row && (row.source === 'meet_api' || row.meetApiFinalizedAt)),
     matchedBy: row?.matchedBy ?? null,
+    // pc | mobile | phone_dial_in | unknown | null. Before Google reports, an extension join already means PC.
+    joinDevice: row?.joinDevice ?? ((row?.signals || []).some((s) => s.kind === 'extension_join') ? 'pc' : null),
+    joinDeviceReason: row?.joinDeviceReason ?? null,
     // A flag an admin already closed (dismissed or converted) no longer shows on the row.
     integrityFlag: resolved ? null : row?.integrityFlag ?? null,
   };
@@ -101,6 +104,21 @@ export async function getAttendanceRowFields(bookings, viewer = {}, opts = {}) {
     }
   }
 
+  // Calendly Notetaker recaps, newest per booking. One query for the page.
+  const recapByBooking = new Map();
+  try {
+    const { CalendlyRecapModel } = await import('../Schema_Models/CalendlyRecap.js');
+    // Newest per booking, and only the 280-character preview leaves the database (summaries run to 20,000).
+    const recaps = await CalendlyRecapModel.aggregate([
+      { $match: { bookingId: { $in: ids } } },
+      { $sort: { sentAt: -1 } },
+      { $group: { _id: '$bookingId', recapUrl: { $first: '$recapUrl' }, sentAt: { $first: '$sentAt' }, summary: { $first: { $substrCP: ['$summary', 0, 280] } } } },
+    ]);
+    for (const r of recaps) recapByBooking.set(r._id, r);
+  } catch (err) {
+    console.error('[attendanceRowFields] recaps unavailable:', err?.message);
+  }
+
   for (const b of list) {
     const assigned = getAssignedBdaEmail(b);
     // Only the assigned BDA's row decides the meeting. A colleague who covered has their own row, shown nowhere here.
@@ -109,7 +127,16 @@ export async function getAttendanceRowFields(bookings, viewer = {}, opts = {}) {
       attendance,
       statusUpdate: shapeStatusUpdate(b, nowMs),
       deductions: byBooking.get(b.bookingId) || [],
-      transcript: null,
+      // { url, summaryPreview, sentAt, bookingId }: url is Calendly's recap link when the email had one. The CRM
+      // opens the full summary from GET /api/crm/bookings/:bookingId/recap.
+      transcript: recapByBooking.has(b.bookingId)
+        ? {
+            url: recapByBooking.get(b.bookingId).recapUrl || null,
+            summaryPreview: String(recapByBooking.get(b.bookingId).summary || '').slice(0, 280),
+            sentAt: iso(recapByBooking.get(b.bookingId).sentAt),
+            bookingId: b.bookingId,
+          }
+        : null,
     });
   }
   return out;

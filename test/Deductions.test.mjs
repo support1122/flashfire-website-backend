@@ -811,7 +811,8 @@ describe('engine lifecycle', () => {
   });
 
   it('turns a VERDICT event from the bus into a row, and VERDICT_CORRECTED into a void (real registry, shadow mode)', async () => {
-    await BdaProfileModel.create({ email: SID, displayName: 'Sid', firstName: 'sid', lastName: 'x', tracked: true });
+    // Tracked since before the meeting: a meeting from before tracking began is never fined.
+    await BdaProfileModel.create({ email: SID, displayName: 'Sid', firstName: 'sid', lastName: 'x', tracked: true, trackedSince: new Date('2026-09-01T00:00:00Z') });
     invalidateRegistryCache();
     const id = await mkBooking('bus', '2026-10-05T10:00:00Z');
 

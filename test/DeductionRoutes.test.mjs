@@ -379,6 +379,7 @@ describe('POST /api/crm/admin/attendance/:bookingId/convert-to-miss', () => {
     assert.equal(off.body.error.code, 'deductions_off');
 
     process.env.DEDUCTIONS_MODE = 'shadow';
+    process.env.DEDUCTIONS_LIVE_FROM = '2026-10-01'; // shadow mode writes nothing without a go-live date
     const res = await call('POST', path, { token: adminGateToken(), body: { reason: 'Never joined per Google', bdaEmail: SID } });
     assert.equal(res.status, 200);
     assert.equal(res.body.deduction.status, 'shadow');

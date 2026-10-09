@@ -10,6 +10,7 @@ import {
   extractMeetCode,
   findConferenceRecords,
   hasMeetApiCredentials,
+  meetClientFor,
   listParticipantsWithSessions,
   mergeParticipants,
   resolveCalendlyMeetUrl,
@@ -19,6 +20,8 @@ import { foldName, isNonHuman, isShared, resolveBda } from './BdaIdentity.js';
 import { getAllBdaProfiles, getBdaProfile, learnGoogleUserId, logUnknownName } from './BdaRegistry.js';
 import { recordPresentSignal } from './recordPresentSignal.js';
 import { recordSyncError, recordSyncOk } from './SyncHealth.js';
+import { classifyJoinDevice, deviceLine, loadHeartbeatsForSessions } from './JoinDevice.js';
+import { doubleBookedLine, findOverlappingMeetings } from './DoubleBooking.js';
 
 dotenv.config();
 
@@ -240,7 +243,17 @@ function rosterAtJoin(participants, bdaParticipant, bdaJoin) {
  * `deps` is for tests only: { resolveMeetCode, findConferenceRecords, listParticipants, registry, resolveEmail,
  * recordSignal }. Every default is the real Google-backed function.
  */
+/**
+ * Sync one booking from Google. Returns { checked, reason }: checked is true only when Google was really asked
+ * about this meeting (or already gave final numbers). The verdict job treats a meeting Google never looked at
+ * (no Meet code resolved, no API client) as unverified, so its fine is needs_review, never active.
+ */
 export async function processBooking(booking, now, deps = {}) {
+  const result = await processBookingInner(booking, now, deps);
+  return result ?? { checked: true, reason: 'synced' };
+}
+
+async function processBookingInner(booking, now, deps = {}) {
   const getMeetCode = deps.resolveMeetCode || resolveBookingMeetCode;
   const findRecords = deps.findConferenceRecords || findConferenceRecords;
   const listParticipants = deps.listParticipants || listParticipantsWithSessions;
@@ -255,7 +268,7 @@ export async function processBooking(booking, now, deps = {}) {
   // is keyed on it. Google is still asked as the original organizer, because reassigning a meeting for leave cover
   // does not move the Meet space to the covering BDA.
   const assignedEmail = getAssignedBdaEmail(booking);
-  if (!assignedEmail) return; // absent scheduler already alerts unassigned meetings
+  if (!assignedEmail) return { checked: false, reason: 'unassigned' }; // absent scheduler alerts unassigned meetings
   const hostEmail = normEmail(booking.calendlyHost?.email || booking.claimedBy?.email) || assignedEmail;
 
   // Skip if already finalized from the API (check before the Calendly
@@ -266,7 +279,9 @@ export async function processBooking(booking, now, deps = {}) {
   });
   // Finalized AFTER the scheduled end is final. Finalized earlier (call over, BDA done) stays open until the slot
   // ends, because the BDA may rejoin; the recap is then re-sent as an update (see the recap block below).
-  if (existing?.meetApiFinalizedAt && new Date(existing.meetApiFinalizedAt).getTime() > scheduledEnd.getTime()) return;
+  if (existing?.meetApiFinalizedAt && new Date(existing.meetApiFinalizedAt).getTime() > scheduledEnd.getTime()) {
+    return { checked: true, reason: 'finalized' };
+  }
 
   // Discord posts from here are only for meetings the verdict job also judges: assigned to a TRACKED BDA, not on
   // leave, not canceled, and started after tracking began. Otherwise an untracked host (the shared FLASHFIRE account,
@@ -278,7 +293,9 @@ export async function processBooking(booking, now, deps = {}) {
     (deps.ignoreGoLive || isAfterGoLive(profile, scheduledStart.getTime()));
 
   const meetCode = await getMeetCode(booking);
-  if (!meetCode) return;
+  if (!meetCode) return { checked: false, reason: 'no_meet_code' };
+  // findConferenceRecords answers [] when it has no API client, which would look like "no conference happened".
+  if (!deps.findConferenceRecords && !meetClientFor(hostEmail)) return { checked: false, reason: 'no_api_client' };
 
   // One booking can span SEVERAL conference records on the same code
   // ("end call for everyone" + rejoin starts a new record) — take them all
@@ -289,7 +306,7 @@ export async function processBooking(booking, now, deps = {}) {
     scheduledStart,
     windowEnd: new Date(scheduledEnd.getTime() + WINDOW_GRACE_MS),
   });
-  if (records.length === 0) return; // no conference on this code yet
+  if (records.length === 0) return { checked: true, reason: 'no_conference' }; // Google answered: nobody joined yet
 
   const perRecord = [];
   for (const r of records) {
@@ -301,7 +318,7 @@ export async function processBooking(booking, now, deps = {}) {
     );
   }
   const participants = mergeParticipants(perRecord);
-  if (participants.length === 0) return;
+  if (participants.length === 0) return { checked: true, reason: 'no_participants' };
 
   const record = records[records.length - 1]; // latest — drives ended/reference
 
@@ -376,7 +393,21 @@ export async function processBooking(booking, now, deps = {}) {
       // 'stable_id' (Directory email or Google user ID) or 'name'. Only a stable match may decide a verdict;
       // a name match still fills in, out and time spent, and the CRM shows it as "matched by name".
       matchedBy: match.matchedBy,
+      // 'signedin' | 'anonymous' | 'phone'. 'phone' is a dial-in; it drives the join-device answer.
+      googleParticipantKind: bda.kind || null,
     };
+
+    // Which device (pc / mobile / dial-in / unknown), from Google's sessions plus the extension's heartbeats in
+    // that time (Utils/JoinDevice.js). Display only: it never decides a verdict or a fine.
+    try {
+      const rowForDevice = { ...(existing?.toObject ? existing.toObject() : existing || {}), ...set };
+      const logs = await (deps.loadHeartbeats || loadHeartbeatsForSessions)(assignedEmail, rowForDevice, now.getTime());
+      const device = classifyJoinDevice({ row: rowForDevice, meetCode, logs, nowMs: now.getTime() });
+      set.joinDevice = device.device;
+      set.joinDeviceReason = device.reason;
+    } catch (err) {
+      console.warn(`[MeetAttendance] join device check failed for ${booking.bookingId}: ${err?.message}`);
+    }
 
     if (present && (!existing || !['manual', 'absent'].includes(existing.status))) {
       set.status = 'present';
@@ -439,6 +470,7 @@ export async function processBooking(booking, now, deps = {}) {
           `**In:** ${formatIST(firstJoin)}${late ? ` (${late})` : ''}\n` +
           `**Out:** ${formatIST(set.leftAt)}\n` +
           `**Duration (total):** ${Math.round(durationMs / 60000)} min\n` +
+          deviceLine(set.joinDevice) +
           `**In call when BDA joined:** ${roster || 'nobody (BDA was first)'}`
         );
         // Only record it as sent when Discord took it, so a failed send is retried on the next pass.
@@ -534,12 +566,20 @@ export async function processBooking(booking, now, deps = {}) {
     // when a button or the extension had the BDA present in time.
     if (alertable && existing?.verdict === 'absent' && !existing?.verifiedAbsentNotifiedAt) {
       const whoWasThere = participants.map((p) => p.displayName || 'Unknown').join(', ');
+      // Say WHY when we can: a BDA in another meeting at the same time (double-booked) is a scheduling problem.
+      let doubleBooked = '';
+      try {
+        doubleBooked = doubleBookedLine(await findOverlappingMeetings(booking, assignedEmail, { nowMs: now.getTime() }), (t) => formatIST(t));
+      } catch (err) {
+        console.warn(`[MeetAttendance] double-booking check failed for ${booking.bookingId}: ${err?.message}`);
+      }
       const posted = await postAbsentChannel(
         `🚫 **BDA Absent: verified from Google Meet records**\n` +
         `**BDA:** ${base.bdaName} (${assignedEmail})\n` +
         `**Client:** ${booking.clientName || 'Unknown'}\n` +
         `**Meeting:** ${formatIST(scheduledStart)}\n` +
         `**Who was in the call:** ${whoWasThere}\n` +
+        doubleBooked +
         `_The meeting ran, but the assigned BDA never joined._`
       );
       if (posted) {
@@ -564,13 +604,15 @@ function meetApiEnabled() {
  * Never throws; a Meet API failure must not block the alert path.
  */
 export async function syncBookingFromMeetNow(booking) {
-  if (!meetApiEnabled() || !hasMeetApiCredentials()) return;
+  if (!meetApiEnabled() || !hasMeetApiCredentials()) return { checked: false, reason: 'disabled' };
   try {
-    await processBooking(booking, new Date());
+    const result = await processBooking(booking, new Date());
     await recordSyncOk('google_meet');
+    return result;
   } catch (err) {
     console.warn(`[MeetAttendance] live check failed for ${booking?.bookingId}: ${err?.message}`);
     await recordSyncError('google_meet', err);
+    return { checked: false, reason: 'error' };
   }
 }
 
