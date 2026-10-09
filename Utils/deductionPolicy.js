@@ -44,6 +44,11 @@ export const DEDUCTION_RULES = Object.freeze(['missed_meeting', 'no_show_not_cal
 export const DEDUCTION_STATUSES = Object.freeze(['shadow', 'needs_review', 'active', 'waived', 'voided']);
 export const DEDUCTION_MODES = Object.freeze(['off', 'shadow', 'live']);
 
+/** True only when real fines are being written. Every alert that mentions a fine must check this first. */
+export function finesAreLive() {
+  return getDeductionsMode() === 'live';
+}
+
 /** off (default) writes nothing, shadow writes admin-only rows, live writes real rows. Read on every call. */
 export function getDeductionsMode() {
   const raw = String(process.env.DEDUCTIONS_MODE ?? '').trim().toLowerCase();

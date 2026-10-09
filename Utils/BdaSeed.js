@@ -63,7 +63,7 @@ export async function applySeed() {
     await BdaProfileModel.updateOne(
       { email },
       {
-        $setOnInsert: { email, ...identity, tracked: true, active: true },
+        $setOnInsert: { email, ...identity, tracked: true, active: true, trackedSince: new Date() },
         $addToSet: { aliases: { $each: aliases } },
       },
       { upsert: true }

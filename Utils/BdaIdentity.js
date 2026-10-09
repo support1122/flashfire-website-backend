@@ -114,9 +114,10 @@ export function resolveBda(hint, registry) {
   if (aliasHits.length === 1) return { bda: aliasHits[0], via: 'alias' };
   if (aliasHits.length > 1) return null;
 
-  // Exact display or full name next.
+  // Exact display or full name next. `exact` is true only for a multi-word name: a lone first name that equals a
+  // profile's first name is still a weak match, and money code (payroll) must not rely on it.
   const exactHits = candidates.filter((p) => fullNameKeys(p).includes(folded));
-  if (exactHits.length === 1) return { bda: exactHits[0], via: 'name' };
+  if (exactHits.length === 1) return { bda: exactHits[0], via: 'name', exact: folded.includes(' ') };
   if (exactHits.length > 1) return null;
 
   // Finally the first-name regex, which must hit exactly one BDA.
@@ -124,7 +125,7 @@ export function resolveBda(hint, registry) {
     const re = bdaNameRegex(p);
     return re && re.test(folded);
   });
-  if (regexHits.length === 1) return { bda: regexHits[0], via: 'name' };
+  if (regexHits.length === 1) return { bda: regexHits[0], via: 'name', exact: false };
   return null;
 }
 

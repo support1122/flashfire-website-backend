@@ -178,8 +178,16 @@ describe('judgeNoShowNotCalled', () => {
     assert.equal(judge({ summary: undefined }).reason, 'call_data_unknown');
   });
 
-  it('needs a client phone', () => {
-    assert.equal(judge({ booking: booking({ clientPhone: null, normalizedClientPhone: null }) }).reason, 'no_client_phone');
+  it('needs a phone number a call could actually be linked to', () => {
+    // No number at all, and numbers with no usable key: a call the BDA really made could never link, so no fine.
+    for (const [clientPhone, normalizedClientPhone] of [[null, null], ['N/A', null], ['---', null], ['12345', null]]) {
+      const r = judge({ booking: booking({ clientPhone, normalizedClientPhone }) });
+      assert.equal(r.fine, false, `clientPhone ${clientPhone}`);
+      assert.equal(r.reason, 'no_callable_phone', `clientPhone ${clientPhone}`);
+    }
+    // A normal number still gets judged, and so does one with an extension: the extension is stripped, so the call links.
+    assert.equal(judge({ booking: booking({ clientPhone: '+1 415 555 0100', normalizedClientPhone: '4155550100' }) }).fine, true);
+    assert.equal(judge({ booking: booking({ clientPhone: '+1 415 555 0100 x123', normalizedClientPhone: '550100x123' }) }).fine, true, 'a corrupted stored key is recomputed');
   });
 
   it('keeps judging for 60 days and stops after', () => {

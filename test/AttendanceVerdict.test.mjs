@@ -1308,3 +1308,74 @@ describe('legacy manual-mark (extensions older than v2)', () => {
     assert.deepEqual(row.signals, []);
   });
 });
+
+describe('review fixes: alert delivery, go-live clock, forged times', () => {
+  const rowFor = (bookingId) => BdaAttendanceModel.findOne({ bookingId, bdaEmail: SID }).lean();
+
+  it('an absent alert that Discord refused is retried on the next pass, and only then cleared', async () => {
+    const start = Date.now() - 10 * MIN;
+    const bookingId = await mkBooking({ start });
+    const down = mkDeps();
+    down.deps.poster = async (m) => (down.posts.push(m), false); // Discord is down
+    await runVerdictPass(new Date(start + 95 * 1000), down.deps);
+    let row = await rowFor(bookingId);
+    assert.equal(row.verdict, 'absent');
+    assert.equal(row.verdictAlertPending, true, 'the verdict exists but nobody has been told yet');
+
+    const up = mkDeps();
+    await runVerdictPass(new Date(), up.deps); // the next pass
+    assert.equal(up.posts.length, 1, 'the alert is delivered now');
+    assert.match(up.posts[0], /^🚫 \*\*BDA Absent\*\*/);
+    row = await rowFor(bookingId);
+    assert.equal(row.verdictAlertPending, false);
+
+    const again = mkDeps();
+    await runVerdictPass(new Date(), again.deps);
+    assert.deepEqual(again.posts, [], 'and never repeated');
+  });
+
+  it('tracking switched on later starts a new go-live clock (an old createdAt does not reopen the last 24 hours)', async () => {
+    const start = Date.now() - 10 * MIN;
+    // The profile was created long ago but only switched to tracked just now.
+    await BdaProfileModel.collection.updateOne({ email: SID }, { $set: { createdAt: new Date(start - 24 * 60 * MIN), trackedSince: new Date() } });
+    invalidateRegistryCache();
+    const bookingId = await mkBooking({ start });
+    const { deps, posts } = mkDeps({ ignoreGoLive: false });
+    await runVerdictPass(new Date(), deps);
+    assert.equal((await rowFor(bookingId))?.verdict ?? null, null);
+    assert.deepEqual(posts, []);
+  });
+
+  it('a join time in the future is clamped to now, so it cannot fake an in-window signal', async () => {
+    const start = Date.now() - 10 * MIN; // the window closed 9 minutes ago
+    const bookingId = await mkBooking({ start });
+    const r = await recordPresentSignal({
+      bookingId,
+      bdaEmail: SID,
+      kind: 'extension_join',
+      eventAt: new Date(start + 10 * 1000), // claims to be in the window, but this is the past: stored as sent
+    });
+    assert.equal(r.ok, true);
+    const forged = await mkBooking({ start });
+    const f = await recordPresentSignal({ bookingId: forged, bdaEmail: SID, kind: 'extension_join', eventAt: new Date(Date.now() + 60 * MIN) });
+    assert.equal(f.ok, true);
+    const row = await rowFor(forged);
+    assert.ok(new Date(row.signals[0].eventAt).getTime() <= Date.now() + 6000, 'clamped to receipt time');
+    assert.equal(f.counted, false, 'receipt time is after the window, so it does not count');
+  });
+
+  it('the correction message does not mention a fine while fines are off', async () => {
+    const start = Date.now() - 10 * MIN;
+    const bookingId = await mkBooking({ start });
+    const { deps } = mkDeps();
+    await runVerdictPass(new Date(start + 95 * 1000), deps); // absent
+    const posts = [];
+    const r = await recordPresentSignal(
+      { bookingId, bdaEmail: SID, kind: 'extension_join', eventAt: new Date(start + 20 * 1000) },
+      { postCorrection: async (m) => posts.push(m) }
+    );
+    assert.equal(r.correction ? true : r.ok, true);
+    assert.equal(posts.length, 1);
+    assert.ok(!/fine/i.test(posts[0]), posts[0]);
+  });
+});

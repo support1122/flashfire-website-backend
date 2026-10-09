@@ -6,7 +6,7 @@ const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const EXCLUDE_PATTERNS = [
   /^\/api\/webhooks\//,
   /webhook/i,
-  /^\/api\/bda-attendance\/(sse|beacon|report-|manual-mark|mark-absent|warn-absent)/,
+  /^\/api\/bda-attendance\/(sse|beacon|report-|manual-mark|mark-present|heartbeat|mark-absent|warn-absent)/,
   /^\/api\/crm\/admin\/activity-logs/,
   /\/calendly-webhook/,
 ];

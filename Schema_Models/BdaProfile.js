@@ -27,6 +27,10 @@ const BdaProfileSchema = new mongoose.Schema(
     },
     active: { type: Boolean, default: true },
     tracked: { type: Boolean, default: false },
+    // When tracking last switched on (tracked and active both true). Meetings that started before this are never
+    // judged, so switching a BDA on later cannot trigger a burst of alerts for the last 24 hours. Falls back to
+    // createdAt for profiles written before this field existed.
+    trackedSince: { type: Date, default: null },
   },
   { timestamps: true }
 );

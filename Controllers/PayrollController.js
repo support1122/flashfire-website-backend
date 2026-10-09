@@ -114,7 +114,14 @@ export const pullDeductions = async (req, res) => {
     if (!bdaEmail) {
       // Names are only a fallback: resolveBda refuses an ambiguous or unknown name, so it can never pick the wrong BDA.
       const hit = resolveBda({ name: record.employeeName }, await getAllBdaProfiles());
+      // A first-name-only match (exact === false) is too weak to put money on: a different employee called Siddhartha
+      // would be charged the BDA's fines. An alias or a full-name match is accepted; otherwise the admin names the BDA.
+      if (hit?.via === 'name' && hit.exact !== true) {
+        return fail(422, 'bda_not_resolved', `"${record.employeeName}" only matches a BDA by first name, send bdaEmail`);
+      }
       bdaEmail = hit?.bda?.email || '';
+    } else if (!(await getAllBdaProfiles()).some((p) => p.email === bdaEmail)) {
+      return fail(422, 'bda_not_in_registry', `${bdaEmail} is not in the BDA registry`);
     }
     if (!bdaEmail) {
       return fail(422, 'bda_not_resolved', `Could not match "${record.employeeName}" to one BDA, send bdaEmail`);
@@ -145,6 +152,13 @@ export const pullDeductions = async (req, res) => {
 
     const previousDeduction = record.deduction;
     const applied = apply === true;
+    if (applied && record.isPaid === true) {
+      return fail(409, 'payroll_already_paid', 'This payroll record is already marked paid, so its deduction is not changed');
+    }
+    if (applied && Number(previousDeduction) > 0 && Number(previousDeduction) !== breakdown.totalInr && req.body?.overwrite !== true) {
+      // The admin may have typed this number by hand. Replacing it needs an explicit "overwrite": true.
+      return fail(409, 'deduction_already_set', `This record already has a deduction of ${previousDeduction}. Send "overwrite": true to replace it`);
+    }
     if (applied) {
       record.deduction = breakdown.totalInr;
       record.deductionBreakdown = breakdown;

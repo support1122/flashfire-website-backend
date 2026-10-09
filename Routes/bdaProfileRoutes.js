@@ -1,9 +1,9 @@
 import { DateTime } from 'luxon';
-import { requireCrmUser } from '../Middlewares/CrmAuth.js';
 import { BdaProfileModel } from '../Schema_Models/BdaProfile.js';
 import { foldName } from '../Utils/BdaIdentity.js';
 import { getRecentUnknownNames, invalidateRegistryCache } from '../Utils/BdaRegistry.js';
-import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
+// Accepts the CRM user token AND the crm_admin token that /admin/analysis (where this screen lives) sends.
+import { requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
 
 // Admin screen backend for the BDA registry (plan 2.8). Errors use the shared contract shape:
 // { success: false, error: { code, message } }.
@@ -16,16 +16,6 @@ const DISCORD_ID_RE = /^\d{15,25}$/;
 const LEAVE_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 const fail = (res, status, code, message) => res.status(status).json({ success: false, error: { code, message } });
-
-async function requireAdminLive(req, res, next) {
-  try {
-    if (await isCrmAdmin(req.crmUser)) return next();
-    return fail(res, 403, 'forbidden', 'Admin access required');
-  } catch (err) {
-    console.error('[bdaProfileRoutes] admin check failed:', err?.message);
-    return fail(res, 503, 'admin_check_failed', 'Could not verify admin access, try again');
-  }
-}
 
 function isRealDate(day) {
   return LEAVE_DAY_RE.test(day) && DateTime.fromISO(day, { zone: 'Asia/Kolkata' }).isValid;
@@ -112,7 +102,7 @@ async function findAliasConflict(email, aliases) {
 }
 
 export function registerBdaProfileRoutes(app) {
-  app.get('/api/crm/admin/bda-profiles', requireCrmUser, requireAdminLive, async (req, res) => {
+  app.get('/api/crm/admin/bda-profiles', requireCrmUserOrAdmin, requireAdminLive, async (req, res) => {
     try {
       const [profiles, unknownNames] = await Promise.all([
         BdaProfileModel.find({}).select('-__v').sort({ displayName: 1 }).lean(),
@@ -125,7 +115,7 @@ export function registerBdaProfileRoutes(app) {
     }
   });
 
-  app.put('/api/crm/admin/bda-profiles/:email', requireCrmUser, requireAdminLive, async (req, res) => {
+  app.put('/api/crm/admin/bda-profiles/:email', requireCrmUserOrAdmin, requireAdminLive, async (req, res) => {
     try {
       const email = String(req.params.email ?? '').trim().toLowerCase();
       const checked = validateUpdate(req.body);
@@ -139,9 +129,18 @@ export function registerBdaProfileRoutes(app) {
         return fail(res, 409, 'alias_conflict', `"${conflict.alias}" already belongs to ${conflict.owner}`);
       }
 
+      // Switching tracking on starts the go-live clock: meetings before this moment are never judged.
+      const before = await BdaProfileModel.findOne({ email }).select('tracked active').lean();
+      const update = { ...checked.update };
+      const nextTracked = update.tracked ?? before?.tracked;
+      const nextActive = update.active ?? before?.active;
+      if (nextTracked === true && nextActive !== false && !(before?.tracked === true && before?.active !== false)) {
+        update.trackedSince = new Date();
+      }
+
       const profile = await BdaProfileModel.findOneAndUpdate(
         { email },
-        { $set: checked.update },
+        { $set: update },
         { new: true, runValidators: true }
       )
         .select('-__v')

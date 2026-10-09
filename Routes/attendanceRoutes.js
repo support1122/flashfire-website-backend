@@ -419,16 +419,36 @@ async function loadNeedsReview() {
   }
   if (!model) return [];
   const found = await model.find({ status: 'needs_review' }).sort({ createdAt: -1 }).limit(200).lean();
+  // The full deduction row (same fields as GET /api/crm/deductions), plus the flat convenience fields older callers
+  // read. The CRM opens the evidence drawer straight from this row, so `evidence` must be present.
   return found.map((d) => ({
     deductionId: d.deductionId,
     bookingId: d.bookingId,
     bdaEmail: d.bdaEmail,
+    bdaName: null,
     clientName: d.evidence?.clientName ?? null,
     scheduledStart: iso(d.evidence?.scheduledStart),
     rule: d.rule,
+    month: d.month ?? null,
     amountInr: d.amountInr,
+    tierIndex: d.tierIndex ?? null,
     status: d.status,
     healthy: d.evidence?.healthy ?? null,
+    evidence: {
+      scheduledStart: iso(d.evidence?.scheduledStart),
+      windowClosedAt: iso(d.evidence?.windowClosedAt),
+      signals: d.evidence?.signals ?? [],
+      bookingStatus: d.evidence?.bookingStatus ?? null,
+      callSummary: d.evidence?.callSummary ?? {},
+      clientName: d.evidence?.clientName ?? null,
+      healthy: d.evidence?.healthy ?? null,
+    },
+    waivedBy: d.waivedBy ?? null,
+    waivedByName: d.waivedByName ?? null,
+    waivedAt: iso(d.waivedAt),
+    waiverReason: d.waiverReason ?? null,
+    voidedAt: iso(d.voidedAt),
+    voidReason: d.voidReason ?? null,
     createdAt: iso(d.createdAt),
   }));
 }

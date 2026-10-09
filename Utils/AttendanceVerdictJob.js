@@ -5,8 +5,9 @@ import { BdaExtensionHeartbeatModel } from '../Schema_Models/BdaExtensionHeartbe
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { EVENTS, emitAttendanceEvent } from './attendanceEvents.js';
 import { postAbsentChannel, postAdminChannel, postAttendanceChannel } from './attendanceDiscord.js';
-import { countableReason, getAssignedBdaEmail, istDate } from './BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail, isAfterGoLive, istDate } from './BdaAssignment.js';
 import { getBdaProfile, getTrackedBdas } from './BdaRegistry.js';
+import { finesAreLive } from './deductionPolicy.js';
 import { SYNC_LIMITS_MS, getAllSyncHealth, recordSyncError, recordSyncOk, syncOkBetween, wasSourceHealthy } from './SyncHealth.js';
 import { WINDOW_CLOSES_AFTER_MS, VERDICT_SETTLE_MS, countedSignals, formatIstTime } from './recordPresentSignal.js';
 
@@ -108,9 +109,60 @@ export async function computeVerdictHealth({ startMs, nowMs, bdaEmail }, deps) {
  * Write the verdict for every countable meeting whose window closed at least 90 s ago and has none yet.
  * Returns { checked, verdicts: [{ bookingId, bdaEmail, verdict }] } for the verdicts THIS call wrote.
  */
+/**
+ * The immediate absent alert. Posted at start + 90 s, the moment the verdict is written; Google's own confirmation
+ * ("verified from Google Meet records") follows from MeetAttendanceScheduler once its data has settled.
+ */
+function absentAlertMessage({ who, bdaEmail, clientName, startMs, roster }) {
+  return (
+    `🚫 **BDA Absent**\n` +
+    `**BDA:** ${who} (${bdaEmail})\n` +
+    `**Client:** ${clientName || 'the client'}\n` +
+    `**Meeting:** ${DateTime.fromMillis(startMs, { zone: 'Asia/Kolkata' }).toFormat('dd MMM yyyy, hh:mm a')}\n` +
+    `**Not marked present by:** ${formatIstTime(startMs + WINDOW_CLOSES_AFTER_MS)}\n` +
+    (roster ? `**Who was in the call:** ${roster}\n` : '') +
+    `_No present signal arrived in time. Google Meet records will confirm shortly._` +
+    // The fine line only appears when fines are really on, so the channel never promises a deduction that is off.
+    (finesAreLive() ? ' A fine applies per policy.' : '')
+  );
+}
+
+/** Re-send absent alerts whose first delivery failed (Discord down at start + 90 s). Only the last 30 minutes. */
+async function retryPendingAbsentAlerts(nowMs, d) {
+  const pending = await BdaAttendanceModel.find({
+    verdict: 'absent',
+    verdictAlertPending: true,
+    verdictAt: { $gte: new Date(nowMs - 30 * 60 * 1000) },
+  })
+    .limit(20)
+    .lean();
+  for (const row of pending) {
+    const booking = await CampaignBookingModel.findOne({ bookingId: row.bookingId }).select(BOOKING_FIELDS).lean();
+    if (!booking) {
+      await BdaAttendanceModel.updateOne({ _id: row._id }, { $set: { verdictAlertPending: false } });
+      continue;
+    }
+    const profile = await d.registry.getBdaProfile(row.bdaEmail);
+    const delivered = await safePost(
+      d.poster,
+      absentAlertMessage({
+        who: profile?.displayName || row.bdaName || row.bdaEmail,
+        bdaEmail: row.bdaEmail,
+        clientName: booking.clientName,
+        startMs: toMs(booking.scheduledEventStartTime),
+        roster: (row.participantsAtJoin || []).map((p) => p.displayName).filter(Boolean).join(', '),
+      }),
+      'absent-retry'
+    );
+    if (delivered) await BdaAttendanceModel.updateOne({ _id: row._id }, { $set: { verdictAlertPending: false } });
+  }
+}
+
 export async function runVerdictPass(now = new Date(), deps = {}) {
   const d = buildDeps(deps);
   const nowMs = toMs(now);
+
+  await retryPendingAbsentAlerts(nowMs, d).catch((err) => console.warn('[AttendanceVerdict] alert retry failed:', err?.message));
 
   const bookings = await CampaignBookingModel.find(
     withFilter(
@@ -145,10 +197,7 @@ export async function runVerdictPass(now = new Date(), deps = {}) {
     // Go-live: judge only meetings that started after this BDA was put in the registry. Without this, seeding the
     // registry would judge the last 24 hours at once, and every meeting recorded by the old system (no signals yet)
     // would be called absent, firing a burst of false alerts. `ignoreGoLive` is for tests only.
-    if (!d.ignoreGoLive) {
-      const liveFromMs = profile?.createdAt ? toMs(profile.createdAt) : 0;
-      if (toMs(booking.scheduledEventStartTime) < liveFromMs) continue;
-    }
+    if (!d.ignoreGoLive && !isAfterGoLive(profile, toMs(booking.scheduledEventStartTime))) continue;
 
     const written = await writeVerdict({ booking, bdaEmail, profile, nowMs, now: new Date(nowMs) }, d);
     if (written) verdicts.push(written);
@@ -160,8 +209,12 @@ async function writeVerdict({ booking, bdaEmail, profile, nowMs, now }, d) {
   const startMs = toMs(booking.scheduledEventStartTime);
 
   // One live Google check per meeting, then judge from what is stored. The verifier never throws, but a fake might.
+  // Bounded: one hung Google call must not stall every verdict behind it (the tick would never finish).
   try {
-    await d.meetVerifier(booking);
+    await Promise.race([
+      d.meetVerifier(booking),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Google check timed out after 20 s')), 20000).unref?.()),
+    ]);
   } catch (err) {
     console.warn(`[AttendanceVerdict] live Meet check failed for ${booking.bookingId}: ${err?.message}`);
   }
@@ -174,7 +227,7 @@ async function writeVerdict({ booking, bdaEmail, profile, nowMs, now }, d) {
   const verdictSignal = counted[0]?.kind ?? null;
 
   const base = { bookingId: booking.bookingId, bdaEmail, verdict: null };
-  const update = { $set: { verdict, verdictAt: now, verdictSignal } };
+  const update = { $set: { verdict, verdictAt: now, verdictSignal, verdictAlertPending: verdict === 'absent' } };
   if (!row) {
     update.$setOnInsert = {
       attendanceId: `bda_att_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
@@ -204,23 +257,13 @@ async function writeVerdict({ booking, bdaEmail, profile, nowMs, now }, d) {
 
   if (verdict === 'absent') {
     const who = profile?.displayName || row?.bdaName || bdaEmail;
-    // Posted at start + 90 s, the moment the verdict is written. Google's own confirmation ("verified from Google
-    // Meet records") follows from MeetAttendanceScheduler once its data is settled.
-    const roster = (row?.participantsAtJoin || []).map((p) => p.displayName).filter(Boolean).join(', ');
-    // The fine line only appears when fines are really on, so the channel never promises a deduction that is off.
-    const finesLive = String(process.env.DEDUCTIONS_MODE || '').trim().toLowerCase() === 'live';
-    await safePost(
+    const delivered = await safePost(
       d.poster,
-      `🚫 **BDA Absent**\n` +
-        `**BDA:** ${who} (${bdaEmail})\n` +
-        `**Client:** ${booking.clientName || 'the client'}\n` +
-        `**Meeting:** ${DateTime.fromMillis(startMs, { zone: 'Asia/Kolkata' }).toFormat('dd MMM yyyy, hh:mm a')}\n` +
-        `**Not marked present by:** ${formatIstTime(startMs + WINDOW_CLOSES_AFTER_MS)}\n` +
-        (roster ? `**Who was in the call:** ${roster}\n` : '') +
-        `_No present signal arrived in time. Google Meet records will confirm shortly._` +
-        (finesLive ? ' A fine applies per policy.' : ''),
+      absentAlertMessage({ who, bdaEmail, clientName: booking.clientName, startMs, roster: (row?.participantsAtJoin || []).map((p) => p.displayName).filter(Boolean).join(', ') }),
       'absent'
     );
+    // Delivered: clear the flag. Not delivered (Discord down): leave it set so the next pass retries the alert.
+    if (delivered) await BdaAttendanceModel.updateOne({ bookingId: booking.bookingId, bdaEmail }, { $set: { verdictAlertPending: false } });
   }
 
   emitAttendanceEvent(EVENTS.VERDICT, {
@@ -451,7 +494,7 @@ export async function runSyncHealthAlert(now = new Date(), deps = {}) {
     const why = row?.lastError ? ` Last error: ${row.lastError}` : '';
     await safePost(
       d.adminPoster,
-      `⚠️ **${label} sync is stale.** ${since}${why} Fines that depend on it will go to review until it recovers.`,
+      `⚠️ **${label} sync is stale.** ${since}${why}${finesAreLive() ? ' Fines that depend on it will go to review until it recovers.' : ''}`,
       'sync-health'
     );
     alerts.push(source);

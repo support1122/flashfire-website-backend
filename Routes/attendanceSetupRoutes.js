@@ -96,6 +96,9 @@ export async function buildSetupStatus() {
   if (String(process.env.MEET_API_ATTENDANCE_ENABLED || '').trim().toLowerCase() === 'false') {
     problems.push('MEET_API_ATTENDANCE_ENABLED is false, so Google verification is switched off.');
   }
+  if (!process.env.ZOOM_WEBHOOK_SECRET_TOKEN) {
+    problems.push('ZOOM_WEBHOOK_SECRET_TOKEN is not set: Zoom call webhooks are accepted unsigned, so a fake call could clear a no-show fine.');
+  }
   if (!webhooks.attendance) problems.push('DISCORD_BDA_ATTENDANCE_WEBHOOK_URL is not set: join alerts will not post.');
   if (!webhooks.absent) problems.push('DISCORD_BDA_ABSENT_WEBHOOK_URL is not set: absent alerts will not post.');
   if (!webhooks.duration && !webhooks.attendance) {

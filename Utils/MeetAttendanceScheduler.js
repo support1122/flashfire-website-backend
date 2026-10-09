@@ -5,7 +5,7 @@ import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { postAbsentChannel } from './attendanceDiscord.js';
-import { getAssignedBdaEmail } from './BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail, isAfterGoLive } from './BdaAssignment.js';
 import {
   extractMeetCode,
   findConferenceRecords,
@@ -16,7 +16,7 @@ import {
   resolveUserEmail,
 } from './MeetApiHelper.js';
 import { foldName, isNonHuman, isShared, resolveBda } from './BdaIdentity.js';
-import { getAllBdaProfiles, learnGoogleUserId, logUnknownName } from './BdaRegistry.js';
+import { getAllBdaProfiles, getBdaProfile, learnGoogleUserId, logUnknownName } from './BdaRegistry.js';
 import { recordPresentSignal } from './recordPresentSignal.js';
 import { recordSyncError, recordSyncOk } from './SyncHealth.js';
 
@@ -76,11 +76,13 @@ function formatIST(date) {
 // pings still come from the extension flow — this is the authoritative recap.
 async function sendVerifiedDiscord(message) {
   const url = process.env.DISCORD_BDA_DURATION_WEBHOOK_URL || process.env.DISCORD_BDA_ATTENDANCE_WEBHOOK_URL || null;
-  if (!url) return;
+  if (!url) return false;
   try {
-    await DiscordConnect(url, message, false);
+    const res = await DiscordConnect(url, message, false);
+    return Boolean(res?.ok);
   } catch (e) {
     console.error('[MeetAttendance] Discord send failed:', e?.message);
+    return false;
   }
 }
 
@@ -266,6 +268,15 @@ export async function processBooking(booking, now, deps = {}) {
   // ends, because the BDA may rejoin; the recap is then re-sent as an update (see the recap block below).
   if (existing?.meetApiFinalizedAt && new Date(existing.meetApiFinalizedAt).getTime() > scheduledEnd.getTime()) return;
 
+  // Discord posts from here are only for meetings the verdict job also judges: assigned to a TRACKED BDA, not on
+  // leave, not canceled, and started after tracking began. Otherwise an untracked host (the shared FLASHFIRE account,
+  // someone not in the registry) or an old meeting would get alerts the rest of the system says should not exist.
+  // Row timing (in, out, duration) is still written for everyone.
+  const profile = await (deps.getProfile || getBdaProfile)(assignedEmail);
+  const alertable =
+    countableReason(booking, profile, now.getTime()).countable &&
+    (deps.ignoreGoLive || isAfterGoLive(profile, scheduledStart.getTime()));
+
   const meetCode = await getMeetCode(booking);
   if (!meetCode) return;
 
@@ -420,8 +431,8 @@ export async function processBooking(booking, now, deps = {}) {
       //    again as an update so the channel always ends on the right numbers.
       const sentBefore = Boolean(existing?.verifiedRecapSentAt);
       const moved = Math.abs(durationMs - (existing?.verifiedRecapDurationMs ?? 0)) >= 60 * 1000;
-      if (!sentBefore || moved) {
-        await sendVerifiedDiscord(
+      if (alertable && (!sentBefore || moved)) {
+        const sent = await sendVerifiedDiscord(
           `${sentBefore ? '🔄 **Attendance Verified (updated): Google Meet records**' : '📋 **Attendance Verified: Google Meet records**'}\n` +
           `**BDA:** ${set.bdaName} (${assignedEmail})\n` +
           `**Client:** ${booking.clientName || 'Unknown'}\n` +
@@ -430,18 +441,23 @@ export async function processBooking(booking, now, deps = {}) {
           `**Duration (total):** ${Math.round(durationMs / 60000)} min\n` +
           `**In call when BDA joined:** ${roster || 'nobody (BDA was first)'}`
         );
-        await BdaAttendanceModel.updateOne(
-          { bookingId: booking.bookingId, bdaEmail: assignedEmail },
-          { $set: { verifiedRecapSentAt: now, verifiedRecapDurationMs: durationMs } }
-        );
+        // Only record it as sent when Discord took it, so a failed send is retried on the next pass.
+        if (sent) {
+          await BdaAttendanceModel.updateOne(
+            { bookingId: booking.bookingId, bdaEmail: assignedEmail },
+            { $set: { verifiedRecapSentAt: now, verifiedRecapDurationMs: durationMs } }
+          );
+        }
       }
 
       // 2) Joined, but after the Mark Present window closed. The verdict job already told the channel "absent"
       //    at start + 90 s; this confirms it from Google's exact join time. Skipped when the BDA was marked present
       //    in time by a button or the extension (the verdict is then present).
       const joinedLate = firstJoin && firstJoin.getTime() > scheduledStart.getTime() + LATE_AFTER_START_MS;
-      if (joinedLate && existing?.verdict !== 'present' && !existing?.verifiedAbsentNotifiedAt) {
-        await postAbsentChannel(
+      // Needs the verdict job's absent verdict first (written at start + 90 s, only for judged BDAs): a Google record
+      // alone, for example the client sitting in the room before the start, must never produce an absent alert.
+      if (alertable && joinedLate && existing?.verdict === 'absent' && !existing?.verifiedAbsentNotifiedAt) {
+        const posted = await postAbsentChannel(
           `🚫 **BDA Absent: verified from Google Meet records**\n` +
           `**BDA:** ${set.bdaName} (${assignedEmail})\n` +
           `**Client:** ${booking.clientName || 'Unknown'}\n` +
@@ -449,10 +465,12 @@ export async function processBooking(booking, now, deps = {}) {
           `**Joined At:** ${formatIST(firstJoin)}${late ? ` (${late})` : ''}\n` +
           `_The BDA joined, but after the Mark Present window closed (1 min after the start)._`
         );
-        await BdaAttendanceModel.updateOne(
-          { bookingId: booking.bookingId, bdaEmail: assignedEmail },
-          { $set: { verifiedAbsentNotifiedAt: now } }
-        );
+        if (posted) {
+          await BdaAttendanceModel.updateOne(
+            { bookingId: booking.bookingId, bdaEmail: assignedEmail },
+            { $set: { verifiedAbsentNotifiedAt: now } }
+          );
+        }
       }
     }
     return;
@@ -514,9 +532,9 @@ export async function processBooking(booking, now, deps = {}) {
     // Google confirms the call ran without the assigned BDA in it. Posted once per booking; the verdict job
     // already announced the absence at start + 90 s, this is the verification. Not for canceled bookings, and not
     // when a button or the extension had the BDA present in time.
-    if (!existing?.verifiedAbsentNotifiedAt && existing?.verdict !== 'present') {
+    if (alertable && existing?.verdict === 'absent' && !existing?.verifiedAbsentNotifiedAt) {
       const whoWasThere = participants.map((p) => p.displayName || 'Unknown').join(', ');
-      await postAbsentChannel(
+      const posted = await postAbsentChannel(
         `🚫 **BDA Absent: verified from Google Meet records**\n` +
         `**BDA:** ${base.bdaName} (${assignedEmail})\n` +
         `**Client:** ${booking.clientName || 'Unknown'}\n` +
@@ -524,10 +542,12 @@ export async function processBooking(booking, now, deps = {}) {
         `**Who was in the call:** ${whoWasThere}\n` +
         `_The meeting ran, but the assigned BDA never joined._`
       );
-      await BdaAttendanceModel.updateOne(
-        { bookingId: booking.bookingId, bdaEmail: assignedEmail },
-        { $set: { verifiedAbsentNotifiedAt: now } }
-      );
+      if (posted) {
+        await BdaAttendanceModel.updateOne(
+          { bookingId: booking.bookingId, bdaEmail: assignedEmail },
+          { $set: { verifiedAbsentNotifiedAt: now } }
+        );
+      }
     }
   }
 }
@@ -592,7 +612,7 @@ export async function pollMeetApiAttendance() {
     // counts. Canceled bookings are present-only (never auto-absent, see
     // processBooking) since not joining a canceled meeting is correct.
     const bookings = await CampaignBookingModel.find({
-      bookingStatus: { $in: ['scheduled', 'completed', 'canceled'] },
+      bookingStatus: { $in: ['scheduled', 'completed', 'canceled', 'paid', 'no-show'] },
       scheduledEventStartTime: { $gte: lookback, $lte: lead },
     })
       .select(

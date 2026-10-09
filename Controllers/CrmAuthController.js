@@ -66,6 +66,9 @@ export async function issueCrmSessionAndToken({ user, ip, countryCode, country, 
       name: user.name,
       permissions: user.permissions || [],
       role: user.role || 'bda',
+      // The CRM decides what to show from role OR isAdmin. Without it an admin whose account is role 'bda' would be
+      // shown as a BDA until the next page reload (only /auth/me used to return it).
+      isAdmin: user.isAdmin === true,
     },
   };
 }
@@ -233,6 +236,7 @@ export async function getLoginApprovalStatus(req, res) {
           name: user.name,
           permissions: user.permissions || [],
           role: user.role || 'bda',
+          isAdmin: user.isAdmin === true,
         },
       });
     }
