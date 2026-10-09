@@ -1,11 +1,13 @@
+import { findOverlappingMeetings } from './DoubleBooking.js';
 import { bookingPhoneKey } from './CallLinking.js';
+import { countedSignals } from './recordPresentSignal.js';
 import { DateTime } from 'luxon';
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { BdaDeductionDigestModel } from '../Schema_Models/BdaDeductionDigest.js';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { attendanceEvents, EVENTS } from './attendanceEvents.js';
-import { countableReason, getAssignedBdaEmail, statusAtStart } from './BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail, isAfterGoLive, statusAtStart } from './BdaAssignment.js';
 import { getBdaProfile, getTrackedBdas } from './BdaRegistry.js';
 import { getCallSummaries } from './BookingCallSummary.js';
 import { SYNC_LIMITS_MS, syncOkBetween, wasSourceHealthy } from './SyncHealth.js';
@@ -109,7 +111,7 @@ export function makeContext(opts = {}) {
     loadAttendance:
       opts.loadAttendance ??
       (async (bookingId, bdaEmail) =>
-        BdaAttendanceModel.findOne({ bookingId, bdaEmail }).select('verdict verdictAt verdictCorrectedAt signals').lean()),
+        BdaAttendanceModel.findOne({ bookingId, bdaEmail }).select('verdict verdictAt verdictCorrectedAt signals sessions joinedAt leftAt').lean()),
     _profiles: new Map(),
   };
 }
@@ -120,21 +122,22 @@ const profileOf = async (ctx, email) => {
   return ctx._profiles.get(email);
 };
 
-/** Can this mode write rows at all? off never; live only once a go-live date exists. */
+/**
+ * Can this mode write rows at all? off never; shadow and live only once a go-live date exists. Shadow used to run
+ * without one, which back-filled 60 days on its first tick: hundreds of rows and one admin post each.
+ */
 export function canWrite(ctx) {
-  if (ctx.mode === 'shadow') return true;
-  if (ctx.mode === 'live') {
-    if (ctx.liveFrom) return true;
-    if (!warnedLiveWithoutDate) {
-      warnedLiveWithoutDate = true;
-      console.warn('[DeductionEngine] DEDUCTIONS_MODE=live but DEDUCTIONS_LIVE_FROM is unset or invalid: writing nothing');
-    }
+  if (ctx.mode !== 'shadow' && ctx.mode !== 'live') return false;
+  if (ctx.liveFrom) return true;
+  if (!warnedLiveWithoutDate) {
+    warnedLiveWithoutDate = true;
+    console.warn(`[DeductionEngine] DEDUCTIONS_MODE=${ctx.mode} but DEDUCTIONS_LIVE_FROM is unset or invalid: writing nothing`);
   }
   return false;
 }
 
-/** Meetings that start before the go-live date are never fined, in any mode. */
-const startAllowed = (ctx, startMs) => !ctx.liveFrom || startMs >= ctx.liveFrom.getTime();
+/** Meetings that start before the go-live date are never fined, in any mode (no date = nothing is allowed). */
+const startAllowed = (ctx, startMs) => Boolean(ctx.liveFrom) && startMs >= ctx.liveFrom.getTime();
 
 /** Earliest meeting start any evaluator looks at. */
 const lowerBoundMs = (ctx, lookbackMs) =>
@@ -328,6 +331,8 @@ async function announce(ctx, row, profile, booking) {
 
 /** Insert, reprice the month if it is a miss, then post once. Returns the final row or null when nothing new. */
 async function createAndAnnounce(ctx, args, profile, booking) {
+  // Never fine a meeting from before this BDA was tracked (the status and no-show rules ignored trackedSince).
+  if (profile && !isAfterGoLive(profile, args.startMs)) return null;
   const { created } = await insertDeduction(args);
   if (!created) return null;
   if (args.rule === 'missed_meeting') await repriceMonth(args.bdaEmail, monthKeyIST(args.startMs));
@@ -385,6 +390,8 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
   // Late evidence may have flipped the verdict while this event was in flight (plan 2.2). Never fine on a stale absent.
   const att = await ctx.loadAttendance(booking.bookingId, email);
   if (att && (att.verdict === 'present' || att.verdictCorrectedAt)) return { created: false, reason: 'verdict_corrected' };
+  // Belt and braces: never fine while in-time evidence sits on the row, whatever the verdict field says.
+  if (att && countedSignals(att.signals, startMs, att).length > 0) return { created: false, reason: 'has_in_time_evidence' };
 
   const evidence = {
     scheduledStart: new Date(startMs),
@@ -394,6 +401,8 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
     callSummary: plainJson(await callSummaryFor(ctx, booking)),
     clientName: booking.clientName ?? null,
     healthy: Boolean(healthy),
+    // Double-booked: the other meeting(s) at the same time, and whether the BDA was in one. Admins decide on waivers.
+    doubleBookedWith: plainJson(await overlappingFor(ctx, booking, email)),
   };
   const row = await createAndAnnounce(
     ctx,
@@ -410,6 +419,16 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
     booking
   );
   return { created: Boolean(row), reason: row ? null : 'exists', row };
+}
+
+async function overlappingFor(ctx, booking, email) {
+  try {
+    const list = await (ctx.findOverlapping || findOverlappingMeetings)(booking, email, { nowMs: ctx.nowMs });
+    return list.map((o) => ({ bookingId: o.bookingId, clientName: o.clientName, attended: o.attended }));
+  } catch (err) {
+    console.warn('[DeductionEngine] double-booking check failed:', err?.message);
+    return [];
+  }
 }
 
 /** VERDICT event: an absent verdict becomes a missed_meeting row. A present verdict is not our business. */

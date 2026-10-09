@@ -13,6 +13,7 @@ import { SYNC_LIMITS_MS, getAllSyncHealth } from '../Utils/SyncHealth.js';
 import { getAttendanceRowFields } from '../Utils/attendanceRowFields.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
 import { WINDOW_OPENS_BEFORE_MS, recordPresentSignal, windowFor } from '../Utils/recordPresentSignal.js';
+import { BdaHeartbeatLogModel } from '../Schema_Models/BdaHeartbeatLog.js';
 
 // Attendance endpoints (plan 5.3, api-contracts.md). Errors always look like
 // { success: false, error: { code, message } } with a matching status.
@@ -115,6 +116,13 @@ async function crmMarkPresent(req, res) {
 // ---------------------------------------------------------------------------
 
 const localPart = (email) => String(email ?? '').split('@')[0].toLowerCase();
+// Same rule as the extension: the same name on a COMPANY domain is the same person (the CRM login and the Workspace
+// account can sit on different company domains); the same name on a personal domain (gmail.com) is not.
+const COMPANY_DOMAINS = ['flashfirehq.com', 'flashfirejobs.com'];
+function sameBdaAccount(profileEmail, loginEmail) {
+  if (profileEmail === loginEmail) return true;
+  return localPart(profileEmail) === localPart(loginEmail) && COMPANY_DOMAINS.includes(String(profileEmail).split('@')[1]);
+}
 
 async function heartbeat(req, res) {
   try {
@@ -136,13 +144,15 @@ async function heartbeat(req, res) {
           updatedAt: now,
           version: typeof body.version === 'string' ? body.version.slice(0, 20) : null,
           profileEmail,
-          // Only the part before the @ is compared: the CRM login and the Workspace account can sit on different domains.
-          profileMatchesLogin: profileEmail ? localPart(profileEmail) === localPart(bdaEmail) : null,
+          profileMatchesLogin: profileEmail ? sameBdaAccount(profileEmail, bdaEmail) : null,
           meetTabs,
         },
       },
       { upsert: true }
     );
+    // History for join-device detection (mobile vs PC). Best effort: a failed log write must not fail the heartbeat.
+    BdaHeartbeatLogModel.create({ bdaEmail, at: now, meetTabs, profileMatchesLogin: profileEmail ? sameBdaAccount(profileEmail, bdaEmail) : null })
+      .catch((err) => console.warn('[attendanceRoutes] heartbeat log write failed:', err?.message));
     return res.status(200).json({ success: true });
   } catch (err) {
     return internal(res, 'heartbeat', err);
@@ -185,9 +195,11 @@ async function myWindow(req, res) {
       return res.status(200).json({ ...base, tracked: false, current: null, next: null });
     }
 
+    // At least 30 min ahead, past midnight IST when needed: a 00:02 meeting's window opens at 23:57.
     const endOfToday = DateTime.fromMillis(nowMs, { zone: 'Asia/Kolkata' }).endOf('day').toMillis();
+    const horizon = Math.max(endOfToday, nowMs + 30 * 60 * 1000);
     const bookings = await CampaignBookingModel.find({
-      scheduledEventStartTime: { $gte: new Date(nowMs - 30 * 60 * 1000), $lte: new Date(endOfToday) },
+      scheduledEventStartTime: { $gte: new Date(nowMs - 30 * 60 * 1000), $lte: new Date(horizon) },
       ...ASSIGNED_TO(email),
     })
       .select('bookingId clientName bookingStatus statusHistory scheduledEventStartTime calendlyHost claimedBy attendanceAssignee')
@@ -204,7 +216,8 @@ async function myWindow(req, res) {
     const inBand = mine.filter((b) => Math.abs(nowMs - startOf(b)) <= 30 * 60 * 1000);
     const current = inBand.sort((a, b) => Math.abs(nowMs - startOf(a)) - Math.abs(nowMs - startOf(b)))[0] || null;
     const after = current ? startOf(current) : nowMs;
-    const next = mine.find((b) => b !== current && startOf(b) > after && !inBand.includes(b)) || null;
+    // The first meeting after current, even when it is also inside the ±30 min band (10:00 and 10:20 meetings).
+    const next = mine.find((b) => b !== current && startOf(b) > after) || null;
 
     const rows = await BdaAttendanceModel.find({
       bookingId: { $in: [current, next].filter(Boolean).map((b) => b.bookingId) },
@@ -425,8 +438,8 @@ async function loadNeedsReview() {
     deductionId: d.deductionId,
     bookingId: d.bookingId,
     bdaEmail: d.bdaEmail,
-    bdaName: null,
-    clientName: d.evidence?.clientName ?? null,
+    bdaName: d.bdaEmail ? d.bdaEmail.split('@')[0] : null,
+    clientName: d.evidence?.clientName || d.bookingId || '',
     scheduledStart: iso(d.evidence?.scheduledStart),
     rule: d.rule,
     month: d.month ?? null,

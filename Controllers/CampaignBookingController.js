@@ -163,6 +163,7 @@ function applyBookedDateRange(matchQuery, bookedFromDate, bookedToDate) {
 
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibility.js';
+import { SYSTEM_ACTOR, statusChangeSet, statusHistoryPush } from '../Utils/statusHistoryOps.js';
 
 const PHONE_REGEX = /^\+?[1-9]\d{9,14}$/;
 
@@ -464,6 +465,7 @@ export const saveCalendlyBooking = async (bookingData) => {
         {
           $set: {
             bookingStatus: 'scheduled',
+            ...statusChangeSet(existingMetaLead.bookingStatus, 'scheduled', SYSTEM_ACTOR),
             clientName: clientName?.trim() || existingMetaLead.clientName,
             clientPhone: mergedPhone || existingMetaLead.clientPhone,
             normalizedClientPhone: normalizePhoneForMatching(mergedPhone) || null,
@@ -478,7 +480,8 @@ export const saveCalendlyBooking = async (bookingData) => {
             visitorId: visitorId || null,
             userAgent: userAgent || null,
             ipAddress: ipAddress || null
-          }
+          },
+          ...statusHistoryPush(existingMetaLead.bookingStatus, 'scheduled', SYSTEM_ACTOR),
         },
         { new: true }
       );

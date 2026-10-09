@@ -171,6 +171,7 @@ import {
   saveDesignedTemplate,
   deleteDesignedTemplate,
   sendDesignedTemplate,
+  getEmailSignaturePreview,
 } from './Controllers/DesignedEmailTemplateController.js';
 import {
   getBdaMeetingsAnalytics,
@@ -243,6 +244,7 @@ import express from 'express';
 import { registerAttendanceRoutes } from "./Routes/attendanceRoutes.js";
 import { registerDeductionRoutes } from "./Routes/deductionRoutes.js";
 import { registerBdaProfileRoutes } from "./Routes/bdaProfileRoutes.js";
+import { registerCalendlyRecapRoutes } from "./Routes/calendlyRecapRoutes.js";
 import { registerAttendanceSetupRoutes } from "./Routes/attendanceSetupRoutes.js";
 
 export default function Routes(app) {
@@ -464,6 +466,8 @@ export default function Routes(app) {
   registerDeductionRoutes(app);
   // BDA registry admin (aliases, leave days, tracked flag).
   registerBdaProfileRoutes(app);
+  // Calendly Notetaker recaps sent by the Gmail Apps Script, and the CRM views of them.
+  registerCalendlyRecapRoutes(app);
   // One-call setup (seed the registry, audit and re-link calls, status checklist). Dry run unless apply is sent.
   registerAttendanceSetupRoutes(app);
 
@@ -475,6 +479,8 @@ export default function Routes(app) {
 
   // Designed (in-dashboard, self-hosted HTML) email templates — gated by email_campaign.
   app.get('/api/crm/email-templates/designed', requireCrmUser, requireCrmPermission('email_campaign'), listDesignedTemplates);
+  // Must stay above /designed/:id, or Express matches "signature" as an id.
+  app.get('/api/crm/email-templates/designed/signature', requireCrmUser, requireCrmPermission('email_campaign'), getEmailSignaturePreview);
   app.get('/api/crm/email-templates/designed/:id', requireCrmUser, requireCrmPermission('email_campaign'), getDesignedTemplate);
   app.post('/api/crm/email-templates/designed', requireCrmUser, requireCrmEdit('email_campaign'), saveDesignedTemplate);
   app.delete('/api/crm/email-templates/designed/:id', requireCrmUser, requireCrmEdit('email_campaign'), deleteDesignedTemplate);

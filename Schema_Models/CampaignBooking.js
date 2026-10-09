@@ -726,6 +726,11 @@ CampaignBookingSchema.index({ 'scheduledWorkflows.status': 1, 'scheduledWorkflow
 // Call Leads tab: Meta leads still on 'not-scheduled', newest first.
 CampaignBookingSchema.index({ leadSource: 1, bookingStatus: 1, bookingCreatedAt: -1 });
 CampaignBookingSchema.index({ 'callLeadAssignee.email': 1 });
+// BDA attendance v2: the verdict job (every 15 s), the reminder/heartbeat steps and the CRM my-window poll all
+// query by start time, often with the assigned BDA. Without these they scanned the whole collection.
+CampaignBookingSchema.index({ scheduledEventStartTime: 1 });
+CampaignBookingSchema.index({ 'calendlyHost.email': 1, scheduledEventStartTime: 1 });
+CampaignBookingSchema.index({ 'attendanceAssignee.email': 1, scheduledEventStartTime: 1 });
 // Leads list: filter by the post-meeting rating (hot/warm/cold).
 CampaignBookingSchema.index({ 'leadTemperature.value': 1 });
 

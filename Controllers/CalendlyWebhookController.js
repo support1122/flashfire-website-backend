@@ -39,6 +39,7 @@ import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { CalendlyWebhookDedupeModel } from '../Schema_Models/CalendlyWebhookDedupe.js';
 import { CalendlyWebhookLogModel } from '../Schema_Models/CalendlyWebhookLog.js';
 import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibility.js';
+import { CALENDLY_ACTOR, statusChangeSet, statusHistoryPush } from '../Utils/statusHistoryOps.js';
 
 /** Compare stored Date / ISO string to Calendly start_time (same instant within 2 min). */
 function sameScheduledInstant(stored, isoFromPayload) {
@@ -502,9 +503,11 @@ async function handleCreatedEvent(req, res, payload) {
           utmContent: utmContent ?? existingBooking.utmContent,
           utmTerm: utmTerm ?? existingBooking.utmTerm,
           bookingStatus: 'scheduled',
+          ...statusChangeSet(existingBooking.bookingStatus, 'scheduled', CALENDLY_ACTOR),
           ...(calendlyHost ? { calendlyHost } : {}),
           ...firstBdaPatch(existingBooking, calendlyHost),
-        }
+        },
+        ...statusHistoryPush(existingBooking.bookingStatus, 'scheduled', CALENDLY_ACTOR),
       },
       { new: true }
     ));
@@ -557,6 +560,7 @@ async function handleCreatedEvent(req, res, payload) {
       {
         $set: {
           bookingStatus: 'scheduled',
+          ...statusChangeSet(existingMetaLead.bookingStatus, 'scheduled', CALENDLY_ACTOR),
           clientName: inviteeName || existingMetaLead.clientName,
           clientPhone: mergedPhone || existingMetaLead.clientPhone,
           normalizedClientPhone: normalizePhoneForMatching(mergedPhone) || null,
@@ -574,7 +578,8 @@ async function handleCreatedEvent(req, res, payload) {
           ipAddress: req.ip || req.connection.remoteAddress,
           ...(calendlyHost ? { calendlyHost } : {}),
           ...firstBdaPatch(existingMetaLead, calendlyHost)
-        }
+        },
+        ...statusHistoryPush(existingMetaLead.bookingStatus, 'scheduled', CALENDLY_ACTOR),
       },
       { new: true }
     );

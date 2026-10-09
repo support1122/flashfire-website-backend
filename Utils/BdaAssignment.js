@@ -47,11 +47,19 @@ export function statusAtStart(booking, startMs) {
     if (h.at > startMs) break;
     atStart = h.status;
   }
-  if (atStart) return atStart;
-
   // Every recorded change happened after the start, so the status before the first one applied at start.
   // The history only records the new status, so when the previous one is not stored we assume the default.
-  return history[0].previousStatus || 'scheduled';
+  if (!atStart) atStart = history[0].previousStatus || 'scheduled';
+
+  // Incomplete history: some writers $set bookingStatus with findOneAndUpdate, which skips the save hook, so the
+  // last entry can disagree with the current status. Those writers are the Calendly cancel+rebook and Meta-lead
+  // merges, which turn a dead booking live again when the client books, which is always before the meeting. So a
+  // live current status that the history cannot explain was already live at the start. Without this, every Meta
+  // lead that booked through Calendly looked 'not-scheduled' at start and its absences were never judged.
+  const current = booking?.bookingStatus ?? null;
+  const last = history[history.length - 1].status;
+  if (current && last !== current && !DEAD_STATUSES.has(current) && DEAD_STATUSES.has(atStart)) return current;
+  return atStart;
 }
 
 /** IST calendar date ('YYYY-MM-DD') of an instant, the key leaveDays uses. */

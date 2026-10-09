@@ -64,7 +64,7 @@ export function getLiveFrom() {
   if (!raw) return null;
   const parsed = /^\d{4}-\d{2}-\d{2}$/.test(raw)
     ? DateTime.fromISO(raw, { zone: IST_ZONE })
-    : DateTime.fromISO(raw, { setZone: true });
+    : DateTime.fromISO(raw, { zone: IST_ZONE, setZone: true }); // no offset in the string means IST, not the server's zone
   return parsed.isValid ? parsed.toJSDate() : null;
 }
 

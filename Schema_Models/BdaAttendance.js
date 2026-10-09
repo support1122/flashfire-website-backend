@@ -169,6 +169,23 @@ const BdaAttendanceSchema = new mongoose.Schema(
       default: [],
     },
 
+    /** Google's participant type for the BDA: 'signedin' | 'anonymous' | 'phone' (dial-in). */
+    googleParticipantKind: {
+      type: String,
+      default: null,
+    },
+
+    /** pc | mobile | phone_dial_in | unknown (Utils/JoinDevice.js). Display only, never decides a verdict. */
+    joinDevice: {
+      type: String,
+      enum: ['pc', 'mobile', 'phone_dial_in', 'unknown', null],
+      default: null,
+    },
+    joinDeviceReason: {
+      type: String,
+      default: null,
+    },
+
     /** Last successful Meet API sync for this row */
     meetApiSyncedAt: {
       type: Date,

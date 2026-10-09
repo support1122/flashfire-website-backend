@@ -2,6 +2,7 @@ import { DateTime } from 'luxon';
 import { BdaProfileModel } from '../Schema_Models/BdaProfile.js';
 import { foldName } from '../Utils/BdaIdentity.js';
 import { getRecentUnknownNames, invalidateRegistryCache } from '../Utils/BdaRegistry.js';
+import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 // Accepts the CRM user token AND the crm_admin token that /admin/analysis (where this screen lives) sends.
 import { requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
 
@@ -9,6 +10,10 @@ import { requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
 // { success: false, error: { code, message } }.
 
 const EDITABLE_FIELDS = ['aliases', 'discordUserId', 'leaveDays', 'tracked', 'active'];
+// Atomic list edits ($addToSet / $pull). Sending a whole list from a cached screen let two admins overwrite each
+// other: the second save dropped the first admin's leave day, and a meeting on that day was fined.
+const LIST_OPS = ['addAliases', 'removeAliases', 'addLeaveDays', 'removeLeaveDays'];
+const ACCEPTED_FIELDS = [...EDITABLE_FIELDS, ...LIST_OPS];
 const MAX_ALIASES = 20;
 const MAX_ALIAS_LENGTH = 80;
 const MAX_LEAVE_DAYS = 400;
@@ -26,15 +31,56 @@ function validateUpdate(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
     return { status: 400, error: { code: 'invalid_body', message: 'Send a JSON object' } };
   }
-  const unknown = Object.keys(body).filter((k) => !EDITABLE_FIELDS.includes(k));
+  const unknown = Object.keys(body).filter((k) => !ACCEPTED_FIELDS.includes(k));
   if (unknown.length > 0) {
     return { status: 422, error: { code: 'unknown_field', message: `Cannot edit: ${unknown.join(', ')}` } };
   }
   if (Object.keys(body).length === 0) {
-    return { status: 422, error: { code: 'empty_update', message: `Send at least one of: ${EDITABLE_FIELDS.join(', ')}` } };
+    return { status: 422, error: { code: 'empty_update', message: `Send at least one of: ${ACCEPTED_FIELDS.join(', ')}` } };
+  }
+  // MongoDB cannot set, add to and pull from the same list in one update.
+  for (const [field, add, remove] of [['aliases', 'addAliases', 'removeAliases'], ['leaveDays', 'addLeaveDays', 'removeLeaveDays']]) {
+    const used = [field, add, remove].filter((k) => k in body);
+    if (used.length > 1) {
+      return { status: 422, error: { code: 'conflicting_list_edit', message: `Send only one of ${used.join(', ')} per request` } };
+    }
   }
 
   const update = {};
+  const addToSet = {};
+  const pull = {};
+
+  const cleanAliases = (raw, code) => {
+    if (!Array.isArray(raw) || raw.length > MAX_ALIASES || raw.some((a) => typeof a !== 'string')) {
+      return { error: { code, message: `${code.replace('invalid_', '')} must be an array of at most ${MAX_ALIASES} strings` } };
+    }
+    const out = [];
+    for (const a of raw.map((x) => x.trim())) {
+      if (!foldName(a) || a.length > MAX_ALIAS_LENGTH) {
+        return { error: { code, message: `Each alias needs letters and at most ${MAX_ALIAS_LENGTH} characters` } };
+      }
+      if (!out.includes(a)) out.push(a);
+    }
+    return { list: out };
+  };
+  const cleanDays = (raw, code) => {
+    if (!Array.isArray(raw) || raw.length > MAX_LEAVE_DAYS || !raw.every((d) => typeof d === 'string' && isRealDate(d))) {
+      return { error: { code, message: 'Send an array of real YYYY-MM-DD dates' } };
+    }
+    return { list: [...new Set(raw)].sort() };
+  };
+  for (const [key, field, clean, target] of [
+    ['addAliases', 'aliases', cleanAliases, addToSet],
+    ['removeAliases', 'aliases', cleanAliases, pull],
+    ['addLeaveDays', 'leaveDays', cleanDays, addToSet],
+    ['removeLeaveDays', 'leaveDays', cleanDays, pull],
+  ]) {
+    if (!(key in body)) continue;
+    const r = clean(body[key], `invalid_${key}`);
+    if (r.error) return { status: 422, error: r.error };
+    // $pullAll takes a plain list; {$pull: {$in}} trips the leaveDays update validator ("days.every is not a function").
+    if (r.list.length) target[field] = target === addToSet ? { $each: r.list } : r.list;
+  }
 
   if ('aliases' in body) {
     const raw = body.aliases;
@@ -80,7 +126,7 @@ function validateUpdate(body) {
     }
   }
 
-  return { update };
+  return { update, addToSet, pull };
 }
 
 /** An alias that equals another person's name or alias would make both unmatchable, so refuse it up front. */
@@ -124,7 +170,7 @@ export function registerBdaProfileRoutes(app) {
       if (!(await BdaProfileModel.exists({ email }))) {
         return fail(res, 404, 'profile_not_found', `No BDA profile for ${email}`);
       }
-      const conflict = await findAliasConflict(email, checked.update.aliases);
+      const conflict = await findAliasConflict(email, checked.update.aliases ?? checked.addToSet.aliases?.$each);
       if (conflict) {
         return fail(res, 409, 'alias_conflict', `"${conflict.alias}" already belongs to ${conflict.owner}`);
       }
@@ -138,9 +184,13 @@ export function registerBdaProfileRoutes(app) {
         update.trackedSince = new Date();
       }
 
+      const ops = {};
+      if (Object.keys(update).length) ops.$set = update;
+      if (Object.keys(checked.addToSet).length) ops.$addToSet = checked.addToSet;
+      if (Object.keys(checked.pull).length) ops.$pullAll = checked.pull;
       const profile = await BdaProfileModel.findOneAndUpdate(
         { email },
-        { $set: update },
+        ops,
         { new: true, runValidators: true }
       )
         .select('-__v')
@@ -148,6 +198,18 @@ export function registerBdaProfileRoutes(app) {
       if (!profile) return fail(res, 404, 'profile_not_found', `No BDA profile for ${email}`);
 
       invalidateRegistryCache();
+      // Tell the admin channel when judging starts or stops for someone: the counterpart of the startup
+      // "Attendance alerts are OFF" warning, so nobody has to guess whether alerts are live.
+      const nowOn = profile.tracked === true && profile.active !== false;
+      const wasOn = before?.tracked === true && before?.active !== false;
+      if (nowOn !== wasOn) {
+        const name = profile.displayName || profile.email;
+        postAdminChannel(
+          nowOn
+            ? `✅ **Attendance tracking ON for ${name}** from now. Meetings that start from this moment are judged (Mark Present window and absent alerts; fines follow DEDUCTIONS_MODE). Earlier meetings are not.`
+            : `⏸️ **Attendance tracking OFF for ${name}.** Their meetings are no longer judged and no absent alerts fire.`
+        ).catch((err) => console.warn('[bdaProfileRoutes] tracking notice failed:', err?.message));
+      }
       return res.status(200).json({ success: true, profile });
     } catch (err) {
       console.error('[bdaProfileRoutes] update failed:', err?.message);

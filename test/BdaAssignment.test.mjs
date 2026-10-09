@@ -101,12 +101,43 @@ describe('statusAtStart', () => {
 
   it('sorts unordered history and counts a change at exactly the start as in force', () => {
     const b = booking({
+      bookingStatus: 'canceled', // a real booking's current status matches its last history entry
       statusHistory: [
         { status: 'canceled', changedAt: START },
         { status: 'scheduled', changedAt: BEFORE_START },
       ],
     });
     assert.equal(statusAtStart(b, START.getTime()), 'canceled');
+  });
+
+  it('repairs history a findOneAndUpdate merge skipped: dead history but live status means live at start', () => {
+    // A Meta lead (not-scheduled) that booked through Calendly: the merge $set 'scheduled' without a history entry.
+    const metaLead = booking({
+      bookingStatus: 'scheduled',
+      statusHistory: [{ status: 'not-scheduled', changedAt: BEFORE_START }],
+    });
+    assert.equal(statusAtStart(metaLead, START.getTime()), 'scheduled');
+    // Cancel then rebook the same slot: the cancel was saved, the rebook merge was not.
+    const rebooked = booking({
+      bookingStatus: 'scheduled',
+      statusHistory: [
+        { status: 'scheduled', changedAt: BEFORE_START },
+        { status: 'canceled', previousStatus: 'scheduled', changedAt: BEFORE_START },
+      ],
+    });
+    assert.equal(statusAtStart(rebooked, START.getTime()), 'scheduled');
+  });
+
+  it('never repairs toward dead: a live history with a dead current status keeps the history answer', () => {
+    // The client canceled after the start; history and status agree, so the meeting was live at start.
+    const lateCancel = booking({
+      bookingStatus: 'canceled',
+      statusHistory: [
+        { status: 'scheduled', changedAt: BEFORE_START },
+        { status: 'canceled', previousStatus: 'scheduled', changedAt: AFTER_START },
+      ],
+    });
+    assert.equal(statusAtStart(lateCancel, START.getTime()), 'scheduled');
   });
 
   it('uses previousStatus, else the default, when every change came after the start', () => {

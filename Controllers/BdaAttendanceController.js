@@ -1047,14 +1047,20 @@ export async function reportJoin(req, res) {
     }
 
     if (notifyJoin) {
+      // On time / early / late against the scheduled start (the Mark Present window closes 1 min after it).
+      const deltaMin = Math.round((joinDate.getTime() - new Date(booking.scheduledEventStartTime).getTime()) / 60000);
+      const punctuality = isRejoin ? '' : deltaMin > 1 ? ` (${deltaMin} min late)` : deltaMin < -1 ? ` (${-deltaMin} min early)` : ' (on time)';
+      // The room link without ?authuser=0 and other per-person query noise.
+      const cleanLink = meetLink ? String(meetLink).split(/[?#]/)[0] : null;
       const message =
         (isRejoin ? `🔁 **BDA Rejoined Meeting**\n` : `✅ **BDA Joined Meeting**\n`) +
         `**BDA:** ${name} (${emailNorm})\n` +
         `**Client:** ${booking.clientName}\n` +
         `**Meeting:** ${formatIST(booking.scheduledEventStartTime)}\n` +
-        `**Meet Link:** ${meetLink || 'N/A'}\n` +
-        `**Joined At:** ${formatIST(joinDate)}\n` +
-        `_Source: extension (live detection) — final times verified from Google Meet records after the meeting_`;
+        `**Joined At:** ${formatIST(joinDate)}${punctuality}\n` +
+        `**Device:** 💻 PC (attendance extension)\n` +
+        `**Meet Link:** ${cleanLink || 'N/A'}\n` +
+        `_Live detection from the extension. Google Meet records confirm the final times after the meeting._`;
 
       // Not awaited: the join is already saved. Discord (with its retries) must not hold up the extension's
       // response, so the alert goes out the instant the join is detected and the API answers immediately.

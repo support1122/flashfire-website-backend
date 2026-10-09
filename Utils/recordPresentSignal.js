@@ -34,11 +34,43 @@ export function windowFor(startMs) {
   return { opensAtMs: startMs - WINDOW_OPENS_BEFORE_MS, closesAtMs: startMs + WINDOW_CLOSES_AFTER_MS };
 }
 
-/** Signals that count toward the verdict: event time at or before the window closes. */
-export function countedSignals(signals, startMs) {
-  const closes = startMs + WINDOW_CLOSES_AFTER_MS;
+/** extension_join times come from the BDA's machine; anything older than this before receipt is clamped. */
+export const MAX_JOIN_BACKDATE_MS = 2 * 60 * 1000;
+
+/**
+ * Was the BDA still in the call when the window opened? Used for join evidence that STARTED before the window
+ * (joined at -25 min). Google's sessions are exact when we have them; otherwise the attendance row's last segment:
+ * an open segment (joinedAt set, leftAt null) that started in time, or a closed one that ended after the window
+ * opened. Joined at -25 and left at -20 never counts; joined at -8 and stayed always does.
+ */
+function stillInCallAtWindow(row, kind, opensAtMs, closesAtMs) {
+  if (!row) return false;
+  const sessions = Array.isArray(row.sessions) ? row.sessions.filter((x) => x?.startTime) : [];
+  if (kind === 'google_meet' && sessions.length) {
+    return sessions.some((x) => toMs(x.startTime) <= closesAtMs && (!x.endTime || toMs(x.endTime) >= opensAtMs));
+  }
+  if (row.joinedAt && !row.leftAt) return toMs(row.joinedAt) <= closesAtMs;
+  if (row.leftAt) return toMs(row.leftAt) >= opensAtMs;
+  return false;
+}
+
+/**
+ * One signal counts toward the verdict when its event time is at or before the window closes AND, for join
+ * evidence that started before the window opened, the BDA was still in the call at the window (plan 2.2).
+ * Buttons are only ever accepted inside the window, so their time alone decides.
+ */
+export function signalCounts(signal, startMs, row = null) {
+  const t = signal?.eventAt ? toMs(signal.eventAt) : NaN;
+  const { opensAtMs, closesAtMs } = windowFor(startMs);
+  if (!Number.isFinite(t) || t > closesAtMs) return false;
+  if (isButtonKind(signal.kind) || t >= opensAtMs) return true;
+  return stillInCallAtWindow(row, signal.kind, opensAtMs, closesAtMs);
+}
+
+/** Signals that count toward the verdict (see signalCounts), earliest first. Pass the row for join evidence. */
+export function countedSignals(signals, startMs, row = null) {
   return (Array.isArray(signals) ? signals : [])
-    .filter((s) => s?.eventAt && toMs(s.eventAt) <= closes)
+    .filter((s) => signalCounts(s, startMs, row))
     .sort((a, b) => toMs(a.eventAt) - toMs(b.eventAt));
 }
 
@@ -84,6 +116,13 @@ export async function recordPresentSignal(input, deps = {}) {
   // Join evidence can be earlier than now, never later. A client that sends a future time would otherwise look "in
   // time" for a window that has not happened yet (a few seconds of clock skew are tolerated).
   if (eventAt.getTime() > receivedAt.getTime() + 5000) eventAt = receivedAt;
+  // ...and the extension's time cannot reach far into the past either. A report-join posted at +10 min with
+  // joinedAt = start - 1 min would otherwise flip an absent and void the fine. Real joins arrive within seconds
+  // (3 s dwell); a join delayed longer (offline, queued) still lands as attendance data, and Google's stable-ID
+  // record is what corrects a verdict that late.
+  if (kind === 'extension_join' && eventAt.getTime() < receivedAt.getTime() - MAX_JOIN_BACKDATE_MS) {
+    eventAt = new Date(receivedAt.getTime() - MAX_JOIN_BACKDATE_MS);
+  }
 
   const existing = await BdaAttendanceModel.findOne({ bookingId, bdaEmail }).lean();
   const profile = await getBdaProfile(bdaEmail);
@@ -119,12 +158,11 @@ export async function recordPresentSignal(input, deps = {}) {
     // Only a stable-ID match (Directory email or Google user ID) may decide a verdict. A name match is display only.
     const stable = (input.matchedBy ?? existing?.matchedBy) === 'stable_id';
     if (!stable) return { ok: true, marked: false, counted: false, duplicate: false, ignored: 'not_stable_id', markedPresentAt: existing?.markedPresentAt ?? null, correction: null };
-    if ((existing?.signals || []).some((s) => s.kind === kind)) {
-      return { ok: true, marked: true, counted: toMs(existing.signals.find((s) => s.kind === kind).eventAt) <= closesAtMs, duplicate: true, markedPresentAt: existing.markedPresentAt ?? null, correction: null, attendanceId: existing.attendanceId };
-    }
+    if ((existing?.signals || []).some((s) => s.kind === kind)) return duplicateJoin(existing, kind, booking, profile, startMs, deps, nowDate);
   } else if ((existing?.signals || []).some((s) => s.kind === kind)) {
-    // extension_join repeats on every rejoin; the first one is the evidence, later ones change nothing.
-    return { ok: true, marked: true, counted: toMs(existing.signals.find((s) => s.kind === kind).eventAt) <= closesAtMs, duplicate: true, markedPresentAt: existing.markedPresentAt ?? null, correction: null, attendanceId: existing.attendanceId };
+    // extension_join repeats on every rejoin; the first one is the evidence. It can still be what corrects an absent
+    // verdict that was written in the moment between this signal's first push and the verdict job's write.
+    return duplicateJoin(existing, kind, booking, profile, startMs, deps, nowDate);
   }
 
   // Make sure the BDA's own row exists. Another request may create it first; that duplicate-key error is fine.
@@ -162,7 +200,7 @@ export async function recordPresentSignal(input, deps = {}) {
   if (!row) return fail(500, 'row_missing', 'Attendance row could not be created');
   const duplicate = !pushed;
 
-  const counted = eventAt.getTime() <= closesAtMs;
+  const counted = signalCounts(signal, startMs, row);
 
   // A button click on an unmarked placeholder row turns it into a real mark. Legacy readers key on status.
   if (isButton && row.status === 'unmarked') {
@@ -171,7 +209,7 @@ export async function recordPresentSignal(input, deps = {}) {
 
   // markedPresentAt is the earliest signal time that counted toward the window. A conditional write keeps it
   // correct when two signals race.
-  const firstCounted = countedSignals([...(row.signals || [])], startMs)[0];
+  const firstCounted = countedSignals([...(row.signals || [])], startMs, row)[0];
   if (firstCounted) {
     await BdaAttendanceModel.updateOne(
       { _id: row._id, $or: [{ markedPresentAt: null }, { markedPresentAt: { $gt: firstCounted.eventAt } }] },
@@ -195,6 +233,17 @@ export async function recordPresentSignal(input, deps = {}) {
     correction,
     attendanceId: fresh?.attendanceId ?? row.attendanceId,
   };
+}
+
+/** A repeated join kind. Same answer as the first time, plus the late correction if a stale absent is in the way. */
+async function duplicateJoin(existing, kind, booking, profile, startMs, deps, now) {
+  const stored = existing.signals.find((s) => s.kind === kind);
+  const counted = signalCounts(stored, startMs, existing);
+  let correction = null;
+  if (counted && existing.verdict === 'absent') {
+    correction = await applyLateCorrection({ row: existing, booking, profile, kind, startMs, deps, now });
+  }
+  return { ok: true, marked: true, counted, duplicate: true, markedPresentAt: existing.markedPresentAt ?? null, correction, attendanceId: existing.attendanceId };
 }
 
 /**

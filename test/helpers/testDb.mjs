@@ -53,7 +53,11 @@ export async function disconnectTestDb() {
 
 /** Keep tests off the network: no Discord posts, no Google calls. Call at the top of every test file. */
 export function isolateExternalServices() {
-  for (const k of Object.keys(process.env)) if (k.startsWith('DISCORD_')) delete process.env[k];
+  // Blank, never delete: several modules call dotenv.config() when they are first imported, and a module loaded
+  // later (await import(...)) would re-inject a deleted key from .env and post to the live Discord channel.
+  // dotenv never overwrites a key that already exists, so an empty string stays empty. Covers keys only in .env too.
+  const fromFile = Object.keys(dotenv.parse(readFileSync(new URL('../../.env', import.meta.url))));
+  for (const k of new Set([...Object.keys(process.env), ...fromFile])) if (k.startsWith('DISCORD_')) process.env[k] = '';
   process.env.MEET_API_ATTENDANCE_ENABLED = 'false';
   process.env.DISABLE_REDIS = 'true';
 }
