@@ -12,12 +12,25 @@ import { normalizePhoneForMatching } from './normalizePhoneForMatching.js';
  * (The old ZoomPhone.normalizePhone kept all digits for non-US numbers, so "+91 98765 43210" became
  * "919876543210" on the call and "9876543210" on the booking and never matched.)
  */
-export const normalizeLeadPhone = (raw) => normalizePhoneForMatching(raw);
+const KEY_RE = /^\d{10}$/;
 
-/** Phone key of a booking. Falls back to clientPhone because bookings written without save() have no stored key. */
+export function normalizeLeadPhone(raw) {
+  if (!raw) return null;
+  // Drop an extension ("x123", "ext. 22", "#5") first. It is not part of the number, and left in, it corrupts the last 10
+  // digits ("+1 415 555 0100 x123" became "550100x123"), a key nothing can ever match.
+  const withoutExtension = String(raw).replace(/\s*(?:x|ext\.?|extension|#)\s*\d+\s*$/i, '');
+  const key = normalizePhoneForMatching(withoutExtension);
+  return key && KEY_RE.test(key) ? key : null; // only a real 10 digit key; anything else cannot link
+}
+
+/**
+ * Phone key of a booking. A stored key is trusted only when it is a real 10 digit key: older bookings can hold a
+ * corrupted one, so those are recomputed from clientPhone. Bookings written without save() have no stored key at all.
+ */
 export function bookingPhoneKey(booking) {
   if (!booking) return null;
-  return booking.normalizedClientPhone || normalizeLeadPhone(booking.clientPhone) || null;
+  if (KEY_RE.test(String(booking.normalizedClientPhone || ''))) return booking.normalizedClientPhone;
+  return normalizeLeadPhone(booking.clientPhone) || null;
 }
 
 const toMs = (d) => {

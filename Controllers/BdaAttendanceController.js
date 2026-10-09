@@ -305,7 +305,9 @@ async function closeBdaAttendanceSession({
       `**Left At:** ${formatIST(leaveTime)}\n` +
       `_Source: extension (live detection) — final times verified from Google Meet records after the meeting_`;
 
-    await sendDurationDiscord(message);
+    // Not awaited: the leave is already saved, and a slow or retrying Discord call must not delay the response
+    // (the extension closes its session on it) or the SSE update below. Failures are logged, never swallowed.
+    sendDurationDiscord(message).catch((e) => console.error('[BdaAttendance] leave alert failed:', e?.message || e));
   }
 
   const durationMin = Math.round(attendance.cumulativeDurationMs / 60000);
@@ -756,17 +758,34 @@ export async function getMyMeetings(req, res) {
     const horizonPast = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const horizonFuture = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
 
-    // Show ALL scheduled meetings to ALL BDAs (not filtered by claimedBy)
-    const bookings = await CampaignBookingModel.find({
-      bookingStatus: { $in: ['paid', 'scheduled', 'completed'] },
-      scheduledEventStartTime: { $gte: horizonPast, $lte: horizonFuture },
-    })
-      .sort({ scheduledEventStartTime: 1 })
-      .select(
-        'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy calendlyHost attendanceAssignee'
-      )
-      .limit(100)
-      .lean();
+    // Show ALL scheduled meetings to ALL BDAs (not filtered by claimedBy).
+    //
+    // Two queries on purpose. This used to be ONE query over [now - 7 d, now + 14 d] sorted oldest first with
+    // .limit(100). Once the past week alone held 100 bookings, the limit was spent on past meetings and every
+    // upcoming meeting was cut off, so BDAs saw an empty "Upcoming Meetings" list even though they were logged in.
+    // Each side now has its own limit: soonest 100 upcoming, newest 100 past.
+    const selectFields =
+      'bookingId clientName clientEmail scheduledEventStartTime scheduledEventEndTime googleMeetUrl googleMeetCode calendlyMeetLink claimedBy calendlyHost attendanceAssignee';
+    const statusFilter = { $in: ['paid', 'scheduled', 'completed'] };
+    const [upcomingBookings, pastBookings] = await Promise.all([
+      CampaignBookingModel.find({
+        bookingStatus: statusFilter,
+        scheduledEventStartTime: { $gte: now, $lte: horizonFuture },
+      })
+        .sort({ scheduledEventStartTime: 1 })
+        .select(selectFields)
+        .limit(100)
+        .lean(),
+      CampaignBookingModel.find({
+        bookingStatus: statusFilter,
+        scheduledEventStartTime: { $gte: horizonPast, $lt: now },
+      })
+        .sort({ scheduledEventStartTime: -1 })
+        .select(selectFields)
+        .limit(100)
+        .lean(),
+    ]);
+    const bookings = [...upcomingBookings, ...pastBookings];
 
     // Backfill missing meet codes (Calendly bookings only carry a redirect
     // URL). Fire-and-forget, capped — the extension polls this endpoint, so
@@ -1037,7 +1056,9 @@ export async function reportJoin(req, res) {
         `**Joined At:** ${formatIST(joinDate)}\n` +
         `_Source: extension (live detection) — final times verified from Google Meet records after the meeting_`;
 
-      await sendPresentDiscord(message);
+      // Not awaited: the join is already saved. Discord (with its retries) must not hold up the extension's
+      // response, so the alert goes out the instant the join is detected and the API answers immediately.
+      sendPresentDiscord(message).catch((e) => console.error('[BdaAttendance] join alert failed:', e?.message || e));
       await BdaAttendanceModel.updateOne({ _id: doc._id }, { discordNotified: true });
     }
 
@@ -1215,6 +1236,15 @@ export async function manualMark(req, res) {
       { upsert: true, new: true }
     );
 
+    // Extensions older than v2 still mark present through this endpoint. Record it as a present signal too, so a mark
+    // made inside the window counts for the server's verdict. The window and assignment rules live in
+    // recordPresentSignal; a mark outside them is simply not counted (this endpoint still saves its own row).
+    try {
+      await recordPresentSignal({ bookingId, bdaEmail: emailNorm, bdaName: name, kind: 'button_meet' });
+    } catch (signalError) {
+      console.error('[BdaAttendance] could not record legacy manual mark as a signal:', signalError?.message || signalError);
+    }
+
     // Discord notification
     const resolvedMeetLink = meetLink || booking.googleMeetUrl || 'N/A';
     const message =
@@ -1225,7 +1255,8 @@ export async function manualMark(req, res) {
       `**Meet Link:** ${resolvedMeetLink}\n` +
       `_Note: Auto-detection did not trigger; BDA manually confirmed attendance._`;
 
-    await sendPresentDiscord(message);
+    // Not awaited, like the join alert: the mark is saved, Discord must not delay the response.
+    sendPresentDiscord(message).catch((e) => console.error('[BdaAttendance] manual mark alert failed:', e?.message || e));
     await BdaAttendanceModel.updateOne(
       { _id: attendance._id },
       { discordNotified: true }

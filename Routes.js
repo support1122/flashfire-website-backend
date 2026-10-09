@@ -239,6 +239,12 @@ import {
 
 import express from 'express';
 
+// BDA attendance v2 route groups (plan sections 5.3, 8.3 and 2.8). Each registers its own paths.
+import { registerAttendanceRoutes } from "./Routes/attendanceRoutes.js";
+import { registerDeductionRoutes } from "./Routes/deductionRoutes.js";
+import { registerBdaProfileRoutes } from "./Routes/bdaProfileRoutes.js";
+import { registerAttendanceSetupRoutes } from "./Routes/attendanceSetupRoutes.js";
+
 export default function Routes(app) {
 
   //login routes and registration routes :
@@ -450,6 +456,16 @@ export default function Routes(app) {
   app.get('/api/bda-attendance/by-booking/:bookingId', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceByBooking);
   app.get('/api/bda-attendance/bulk', requireCrmUser, requireCrmPermission('meeting_links'), getAttendanceBulk);
   app.get('/api/bda-attendance/missed-logs', requireCrmUser, requireCrmPermission('meeting_links'), getMissedMeetingLogs);
+
+  // BDA attendance v2: mark-present, heartbeat, my-window, my-month, admin queues and health.
+  // Registered AFTER the legacy routes above so the old mark-absent and warn-absent stay as no-ops.
+  registerAttendanceRoutes(app);
+  // Deductions ledger, waive and activate, payroll pull. Inert while DEDUCTIONS_MODE is unset or off.
+  registerDeductionRoutes(app);
+  // BDA registry admin (aliases, leave days, tracked flag).
+  registerBdaProfileRoutes(app);
+  // One-call setup (seed the registry, audit and re-link calls, status checklist). Dry run unless apply is sent.
+  registerAttendanceSetupRoutes(app);
 
   // Email Template Routes
   app.post('/api/email-templates', saveEmailTemplate);

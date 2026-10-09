@@ -83,6 +83,16 @@ export function countableReason(booking, profile, nowMs = Date.now()) {
 }
 
 /**
+ * True when the meeting started after tracking began for this BDA. Judging earlier meetings would call every meeting
+ * the old system recorded (no signals) absent. Uses trackedSince, else createdAt; no profile date means no limit.
+ */
+export function isAfterGoLive(profile, startMs) {
+  const from = profile?.trackedSince || profile?.createdAt;
+  if (!from) return true;
+  return startMs >= new Date(from).getTime();
+}
+
+/**
  * Plan 2.1: is this meeting countable for its assigned BDA? Async because the BDA comes from the registry.
  * `now` is a Date or epoch ms. Pass { profile } to skip the registry lookup when judging many meetings.
  */

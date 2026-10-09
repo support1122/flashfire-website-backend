@@ -1,3 +1,4 @@
+import { bookingPhoneKey } from './CallLinking.js';
 import { DateTime } from 'luxon';
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { BdaDeductionDigestModel } from '../Schema_Models/BdaDeductionDigest.js';
@@ -174,8 +175,10 @@ export function judgeNoShowNotCalled({ booking, profile, summary, nowMs }) {
   const startMs = toMs(booking.scheduledEventStartTime);
   if (nowMs < startMs + p.noShowNotCalled.healthWindowMs) return { fine: false, reason: 'too_early' };
   if (nowMs > startMs + p.rejudgeWindowMs) return { fine: false, reason: 'outside_rejudge_window' };
-  if (!String(booking.normalizedClientPhone || booking.clientPhone || '').trim()) {
-    return { fine: false, reason: 'no_client_phone' }; // a missing number never produces a fine
+  // The fine needs a number a call could actually be linked to. "N/A", "12345" or a local number without a country
+  // code has no usable key on either side, so even a call the BDA really made could never link: no fine.
+  if (!bookingPhoneKey(booking)) {
+    return { fine: false, reason: 'no_callable_phone' };
   }
   if (!summary) return { fine: false, reason: 'call_data_unknown' };
   if (summary.calledWithin30Min) return { fine: false, reason: 'called_in_time' };

@@ -55,6 +55,9 @@ export const DiscordConnect = async (url, message, usePrefix = true) => {
         },
         body: JSON.stringify({
           content: content,
+          // User mentions stay (the heartbeat alert pings a BDA on purpose). @everyone, @here and role pings do not:
+          // a client can type those into the public booking form and they would end up in this text.
+          allowed_mentions: { parse: ['users'] },
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });

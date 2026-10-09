@@ -181,6 +181,15 @@ const BdaAttendanceSchema = new mongoose.Schema(
       default: null,
     },
 
+    // Discord de-duplication for the Google-verified posts (see MeetAttendanceScheduler.processBooking):
+    // the recap and its duration (so a rejoin that moves the total sends one update), and the verified-absent post.
+    verifiedRecapSentAt: { type: Date, default: null },
+    verifiedRecapDurationMs: { type: Number, default: null },
+    verifiedAbsentNotifiedAt: { type: Date, default: null },
+    // True from the moment an absent verdict is written until its Discord alert is actually delivered. If Discord was
+    // down at start + 90 s the verdict job retries the alert, instead of the verdict existing with nobody told.
+    verdictAlertPending: { type: Boolean, default: false },
+
     // ---- Server-decided attendance (plan sections 2.2 and 5.2) ----
 
     /** Every present signal, append-only. One row per kind (repeats are idempotent). */

@@ -1,3 +1,4 @@
+import { finesAreLive } from './deductionPolicy.js';
 import { DateTime } from 'luxon';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
@@ -80,6 +81,9 @@ export async function recordPresentSignal(input, deps = {}) {
   // Button clicks are timed by the server, whatever the client says. Join evidence carries its own event time.
   let eventAt = isButton ? receivedAt : input.eventAt ? new Date(input.eventAt) : receivedAt;
   if (!Number.isFinite(eventAt.getTime())) eventAt = receivedAt;
+  // Join evidence can be earlier than now, never later. A client that sends a future time would otherwise look "in
+  // time" for a window that has not happened yet (a few seconds of clock skew are tolerated).
+  if (eventAt.getTime() > receivedAt.getTime() + 5000) eventAt = receivedAt;
 
   const existing = await BdaAttendanceModel.findOne({ bookingId, bdaEmail }).lean();
   const profile = await getBdaProfile(bdaEmail);
@@ -215,7 +219,7 @@ async function applyLateCorrection({ row, booking, profile, kind, startMs, deps,
   const who = profile?.displayName || row.bdaName || row.bdaEmail;
   const message =
     `✅ **Correction:** ${who} was in the call for ${booking.clientName || 'the client'} on time after all. ` +
-    `The ${kind.replace('_', ' ')} record reached us late, so the absent verdict for the ${formatIstTime(startMs)} meeting is reversed and any fine is voided.`;
+    `The ${kind.replace('_', ' ')} record reached us late, so the absent verdict for the ${formatIstTime(startMs)} meeting is reversed${finesAreLive() ? ' and any fine is voided' : ''}.`;
   const poster = deps.postCorrection || postAbsentChannel;
   try {
     await poster(message);

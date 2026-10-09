@@ -402,7 +402,10 @@ describe('POST /api/crm/admin/attendance/:bookingId/convert-to-miss', () => {
 
 describe('POST /api/payroll/pull-deductions', () => {
   async function seed() {
-    await BdaProfileModel.create({ email: SID, displayName: 'Sid', firstName: NAME_KEY, lastName: 'basaveni', tracked: true });
+    await BdaProfileModel.create([
+      { email: SID, displayName: 'Sid', firstName: NAME_KEY, lastName: 'basaveni', tracked: true },
+      { email: KAL, displayName: 'Kal', firstName: `${NAME_KEY}kal`, lastName: 'other', tracked: true },
+    ]);
     invalidateRegistryCache();
     await BdaDeductionModel.create([
       row({ tierIndex: 1 }), row({ tierIndex: 2 }),
@@ -436,7 +439,7 @@ describe('POST /api/payroll/pull-deductions', () => {
 
   it('apply true pre-fills deduction, stores the breakdown, and the admin can still edit the number', async () => {
     const rec = await seed();
-    const res = await call('POST', '/api/payroll/pull-deductions', { token: payrollToken(), body: { payrollId: String(rec._id), apply: true } });
+    const res = await call('POST', '/api/payroll/pull-deductions', { token: payrollToken(), body: { payrollId: String(rec._id), apply: true, overwrite: true } });
     assert.equal(res.status, 200);
     assert.equal(res.body.dryRun, false);
     assert.equal(res.body.applied, true);
@@ -458,6 +461,30 @@ describe('POST /api/payroll/pull-deductions', () => {
     assert.equal(res.status, 200);
     assert.equal(res.body.bdaEmail, KAL);
     assert.equal(res.body.deduction, 500);
+  });
+
+  it('apply refuses to replace a hand-typed deduction without overwrite, and refuses a paid record', async () => {
+    const rec = await seed();
+    const body = { payrollId: String(rec._id), apply: true };
+    const blocked = await call('POST', '/api/payroll/pull-deductions', { token: payrollToken(), body });
+    assert.equal(blocked.status, 409);
+    assert.equal(blocked.body.error.code, 'deduction_already_set');
+    assert.equal((await PayrollModel.findById(rec._id).lean()).deduction, 250, 'nothing written');
+    await PayrollModel.updateOne({ _id: rec._id }, { $set: { isPaid: true } });
+    const paid = await call('POST', '/api/payroll/pull-deductions', { token: payrollToken(), body: { ...body, overwrite: true } });
+    assert.equal(paid.status, 409);
+    assert.equal(paid.body.error.code, 'payroll_already_paid');
+  });
+
+  it('a first-name-only payroll match and an email outside the registry are refused', async () => {
+    await seed();
+    const firstOnly = await PayrollModel.create({ month: MONTH, employeeName: NAME_KEY, teamName: 'BDA' });
+    const weak = await call('POST', '/api/payroll/pull-deductions', { token: payrollToken(), body: { payrollId: String(firstOnly._id) } });
+    assert.equal(weak.status, 422);
+    assert.equal(weak.body.error.code, 'bda_not_resolved');
+    const outside = await call('POST', '/api/payroll/pull-deductions', { token: payrollToken(), body: { payrollId: String(firstOnly._id), bdaEmail: 'someone.else@example.com' } });
+    assert.equal(outside.status, 422);
+    assert.equal(outside.body.error.code, 'bda_not_in_registry');
   });
 
   it('refuses a name that matches no BDA, a bad id, a missing record, and callers without the payroll permission', async () => {

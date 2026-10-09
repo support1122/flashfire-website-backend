@@ -50,6 +50,13 @@ async function closeStaleOpenSessions() {
     });
 
     for (const attendance of staleSessions) {
+      // Google's records already finalized this row with the exact times (plan 2.3: Google wins). Only drop the dangling
+      // open session; do not replace Google's duration and leave time with an estimate, and do not post "auto-closed".
+      if (attendance.meetApiFinalizedAt) {
+        attendance.joinedAt = null;
+        await attendance.save();
+        continue;
+      }
       // No leave signal ever arrived, so the real leave time is unknown. Close
       // at the scheduled end (or now, if the session started after it) instead
       // of "now": closing at poll time credited a full hour or more.

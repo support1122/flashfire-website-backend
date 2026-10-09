@@ -17,7 +17,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { crmMe } from '../Controllers/CrmAuthController.js';
-import { markAbsent, reportJoin, warnAbsent, getMyMeetings } from '../Controllers/BdaAttendanceController.js';
+import { markAbsent, reportJoin, warnAbsent, getMyMeetings, manualMark } from '../Controllers/BdaAttendanceController.js';
 import { registerAttendanceRoutes, markPresentRateLimit } from '../Routes/attendanceRoutes.js';
 import { EVENTS, attendanceEvents } from '../Utils/attendanceEvents.js';
 import {
@@ -103,6 +103,8 @@ function mkDeps(extra = {}) {
     meetVerifier: async () => {},
     bookingFilter: FILTER,
     health: fakeHealth(),
+    // The fixtures create their profiles right before their (past) bookings; the go-live rule has its own tests.
+    ignoreGoLive: true,
     ...extra,
   };
   return { posts, admin, attendance, deps };
@@ -224,7 +226,10 @@ describe('mark window and verdict (plan 2.2, 5.6)', () => {
     await runVerdictPass(new Date(start + 95 * 1000), deps);
     assert.equal((await rowOf(bookingId)).verdict, 'absent');
     assert.equal(posts.length, 1);
-    assert.match(posts[0], /^❌ Absent: Siddhartha did not mark present by \d{1,2}:\d{2} [AP]M for Client \d+\. Fine applies per policy\.$/);
+    assert.match(posts[0], /^🚫 \*\*BDA Absent\*\*\n\*\*BDA:\*\* Siddhartha \(/);
+    assert.match(posts[0], /\*\*Client:\*\* Client \d+\n/);
+    assert.match(posts[0], /\*\*Not marked present by:\*\* \d{1,2}:\d{2} [AP]M\n/);
+    assert.ok(!posts[0].includes('A fine applies'), 'no fine promise while DEDUCTIONS_MODE is not live');
     assert.ok(!posts[0].includes('—'), 'no em dash');
   });
 
@@ -1228,5 +1233,149 @@ describe('getAttendanceRowFields contract', () => {
     const map = await getAttendanceRowFields(bookings, { email: SID }, { DeductionModel: null });
     assert.equal(map.get(id).attendance, null);
     assert.equal((await getAttendanceRowFields([], {})).size, 0);
+  });
+});
+
+describe('rollout safety', () => {
+  const rowFor = (bookingId) => BdaAttendanceModel.findOne({ bookingId, bdaEmail: SID }).lean();
+
+  it('does not judge meetings that started before the BDA was put in the registry (no burst of false absent alerts)', async () => {
+    // Started 10 min ago, but the profile was created just now: this is the meeting the OLD system handled.
+    const start = Date.now() - 10 * MIN;
+    const bookingId = await mkBooking({ start });
+    const { deps, posts } = mkDeps({ ignoreGoLive: false });
+    const result = await runVerdictPass(new Date(), deps);
+    assert.deepEqual(result.verdicts.filter((v) => v.bookingId === bookingId), []);
+    assert.equal((await rowFor(bookingId))?.verdict ?? null, null, 'no verdict written');
+    assert.deepEqual(posts, [], 'and nothing posted');
+  });
+
+  it('judges a meeting that started after the BDA was registered', async () => {
+    // Backdate the profile to before the meeting started, bypassing the timestamps plugin.
+    const start = Date.now() - 10 * MIN;
+    await BdaProfileModel.collection.updateOne({ email: SID }, { $set: { createdAt: new Date(start - 60 * MIN) } });
+    invalidateRegistryCache();
+    const bookingId = await mkBooking({ start });
+    const { deps, posts } = mkDeps({ ignoreGoLive: false });
+    await runVerdictPass(new Date(), deps);
+    assert.equal((await rowFor(bookingId)).verdict, 'absent');
+    assert.equal(posts.length, 1);
+  });
+});
+
+describe('legacy manual-mark (extensions older than v2)', () => {
+  function fakeRes() {
+    return {
+      statusCode: 200,
+      body: null,
+      status(c) {
+        this.statusCode = c;
+        return this;
+      },
+      json(b) {
+        this.body = b;
+        return this;
+      },
+    };
+  }
+  const mark = async (bookingId) => {
+    const res = fakeRes();
+    await manualMark({ bdaUser: { email: SID, name: 'Siddhartha' }, body: { bookingId, meetLink: 'https://meet.google.com/abc-defg-hij' } }, res);
+    return res;
+  };
+
+  it('a mark inside the window also counts as a present signal, so the verdict is present', async () => {
+    const start = Date.now() - 20 * 1000; // 20 s after the start, window still open
+    const bookingId = await mkBooking({ start });
+    const res = await mark(bookingId);
+    assert.equal(res.statusCode, 200);
+    const row = await BdaAttendanceModel.findOne({ bookingId, bdaEmail: SID }).lean();
+    assert.deepEqual(row.signals.map((x) => x.kind), ['button_meet']);
+
+    const { deps, posts } = mkDeps();
+    await runVerdictPass(new Date(start + 95 * 1000), deps);
+    assert.equal((await rowOf(bookingId)).verdict, 'present');
+    assert.deepEqual(posts, [], 'present means no absent alert');
+  });
+
+  it('a mark after the window still saves the old row but is not counted, so the verdict stays absent', async () => {
+    const start = Date.now() - 5 * MIN;
+    const bookingId = await mkBooking({ start });
+    const res = await mark(bookingId);
+    assert.equal(res.statusCode, 200);
+    const row = await BdaAttendanceModel.findOne({ bookingId, bdaEmail: SID }).lean();
+    assert.equal(row.status, 'manual');
+    assert.deepEqual(row.signals, []);
+  });
+});
+
+describe('review fixes: alert delivery, go-live clock, forged times', () => {
+  const rowFor = (bookingId) => BdaAttendanceModel.findOne({ bookingId, bdaEmail: SID }).lean();
+
+  it('an absent alert that Discord refused is retried on the next pass, and only then cleared', async () => {
+    const start = Date.now() - 10 * MIN;
+    const bookingId = await mkBooking({ start });
+    const down = mkDeps();
+    down.deps.poster = async (m) => (down.posts.push(m), false); // Discord is down
+    await runVerdictPass(new Date(start + 95 * 1000), down.deps);
+    let row = await rowFor(bookingId);
+    assert.equal(row.verdict, 'absent');
+    assert.equal(row.verdictAlertPending, true, 'the verdict exists but nobody has been told yet');
+
+    const up = mkDeps();
+    await runVerdictPass(new Date(), up.deps); // the next pass
+    assert.equal(up.posts.length, 1, 'the alert is delivered now');
+    assert.match(up.posts[0], /^🚫 \*\*BDA Absent\*\*/);
+    row = await rowFor(bookingId);
+    assert.equal(row.verdictAlertPending, false);
+
+    const again = mkDeps();
+    await runVerdictPass(new Date(), again.deps);
+    assert.deepEqual(again.posts, [], 'and never repeated');
+  });
+
+  it('tracking switched on later starts a new go-live clock (an old createdAt does not reopen the last 24 hours)', async () => {
+    const start = Date.now() - 10 * MIN;
+    // The profile was created long ago but only switched to tracked just now.
+    await BdaProfileModel.collection.updateOne({ email: SID }, { $set: { createdAt: new Date(start - 24 * 60 * MIN), trackedSince: new Date() } });
+    invalidateRegistryCache();
+    const bookingId = await mkBooking({ start });
+    const { deps, posts } = mkDeps({ ignoreGoLive: false });
+    await runVerdictPass(new Date(), deps);
+    assert.equal((await rowFor(bookingId))?.verdict ?? null, null);
+    assert.deepEqual(posts, []);
+  });
+
+  it('a join time in the future is clamped to now, so it cannot fake an in-window signal', async () => {
+    const start = Date.now() - 10 * MIN; // the window closed 9 minutes ago
+    const bookingId = await mkBooking({ start });
+    const r = await recordPresentSignal({
+      bookingId,
+      bdaEmail: SID,
+      kind: 'extension_join',
+      eventAt: new Date(start + 10 * 1000), // claims to be in the window, but this is the past: stored as sent
+    });
+    assert.equal(r.ok, true);
+    const forged = await mkBooking({ start });
+    const f = await recordPresentSignal({ bookingId: forged, bdaEmail: SID, kind: 'extension_join', eventAt: new Date(Date.now() + 60 * MIN) });
+    assert.equal(f.ok, true);
+    const row = await rowFor(forged);
+    assert.ok(new Date(row.signals[0].eventAt).getTime() <= Date.now() + 6000, 'clamped to receipt time');
+    assert.equal(f.counted, false, 'receipt time is after the window, so it does not count');
+  });
+
+  it('the correction message does not mention a fine while fines are off', async () => {
+    const start = Date.now() - 10 * MIN;
+    const bookingId = await mkBooking({ start });
+    const { deps } = mkDeps();
+    await runVerdictPass(new Date(start + 95 * 1000), deps); // absent
+    const posts = [];
+    const r = await recordPresentSignal(
+      { bookingId, bdaEmail: SID, kind: 'extension_join', eventAt: new Date(start + 20 * 1000) },
+      { postCorrection: async (m) => posts.push(m) }
+    );
+    assert.equal(r.correction ? true : r.ok, true);
+    assert.equal(posts.length, 1);
+    assert.ok(!/fine/i.test(posts[0]), posts[0]);
   });
 });
