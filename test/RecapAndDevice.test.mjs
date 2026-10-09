@@ -10,6 +10,7 @@ isolateExternalServices();
 
 import { getCrmJwtSecret } from '../Middlewares/CrmAuth.js';
 import { CalendlyRecapModel } from '../Schema_Models/CalendlyRecap.js';
+import { IntegrationKeyModel } from '../Schema_Models/IntegrationKey.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
 import { registerCalendlyRecapRoutes } from '../Routes/calendlyRecapRoutes.js';
@@ -188,6 +189,27 @@ describe('POST /api/integrations/calendly-recap', () => {
     assert.equal((await call('POST', '/api/integrations/calendly-recap', { body })).status, 401);
     assert.equal((await call('POST', '/api/integrations/calendly-recap', { body, secret: 'wrong' })).status, 401);
     assert.equal(await CalendlyRecapModel.countDocuments({ messageId: body.messageId }), 0);
+  });
+
+  it('without the env var, the first 32+ character key is enrolled (hash only) and is then the only key accepted', async () => {
+    const saved = process.env.CALENDLY_RECAP_INGEST_SECRET;
+    delete process.env.CALENDLY_RECAP_INGEST_SECRET;
+    await IntegrationKeyModel.deleteMany({ name: 'calendly_recap_ingest' });
+    try {
+      const keyA = `A${RUN}`.padEnd(40, 'a');
+      const keyB = `B${RUN}`.padEnd(40, 'b');
+      assert.equal((await call('POST', '/api/integrations/calendly-recap', { body: recapBody(), secret: 'too-short' })).status, 401);
+      assert.equal(await IntegrationKeyModel.countDocuments({ name: 'calendly_recap_ingest' }), 0, 'a short key never enrolls');
+      const first = await call('POST', '/api/integrations/calendly-recap', { body: recapBody(), secret: keyA });
+      assert.equal(first.status, 201);
+      const doc = await IntegrationKeyModel.findOne({ name: 'calendly_recap_ingest' }).lean();
+      assert.ok(doc && doc.keyHash.length === 64 && !doc.keyHash.includes(keyA), 'only a SHA-256 hash is stored');
+      assert.equal((await call('POST', '/api/integrations/calendly-recap', { body: recapBody(), secret: keyB })).status, 401);
+      assert.equal((await call('POST', '/api/integrations/calendly-recap', { body: recapBody(), secret: keyA })).status, 201);
+    } finally {
+      await IntegrationKeyModel.deleteMany({ name: 'calendly_recap_ingest' });
+      process.env.CALENDLY_RECAP_INGEST_SECRET = saved;
+    }
   });
 
   it('validates the body (422)', async () => {

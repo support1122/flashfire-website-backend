@@ -4,6 +4,7 @@ import { DateTime } from 'luxon';
 import { requireCrmAnyPermission, requireCrmUser } from '../Middlewares/CrmAuth.js';
 import { createUserRateLimiter } from '../Middlewares/perUserRateLimit.js';
 import { CalendlyRecapModel } from '../Schema_Models/CalendlyRecap.js';
+import { IntegrationKeyModel } from '../Schema_Models/IntegrationKey.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from '../Utils/DiscordConnect.js';
 import { getAssignedBdaEmail } from '../Utils/BdaAssignment.js';
@@ -18,9 +19,11 @@ import { requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
 //   GET  /api/crm/admin/calendly-recaps?status=      admin: unmatched / ambiguous recaps to link by hand
 //   POST /api/crm/admin/calendly-recaps/:messageId/link   admin: link a recap to a booking
 //
-// The ingest endpoint is called by a script, not a person, so it authenticates with a shared secret in the
-// X-Recap-Secret header (env CALENDLY_RECAP_INGEST_SECRET, at least 24 characters). Errors use the shared shape
-// { success: false, error: { code, message } }.
+// The ingest endpoint is called by a script, not a person, so it authenticates with a key in the X-Recap-Secret
+// header. No env var is needed (bsc's call): the first key of 32+ characters the script presents is enrolled and
+// only its SHA-256 hash is stored (collection integrationkeys); after that only that key is accepted. The key is
+// never in this public repo. If env CALENDLY_RECAP_INGEST_SECRET is set, it wins over the enrolled key.
+// Errors use the shared shape { success: false, error: { code, message } }.
 
 const fail = (res, status, code, message) => res.status(status).json({ success: false, error: { code, message } });
 
@@ -28,12 +31,28 @@ const MAX_BODY_CHARS = 90_000;
 const MAX_LINKS = 200;
 const DISCORD_CHUNK = 1900;
 
-function secretOk(given) {
-  const expected = process.env.CALENDLY_RECAP_INGEST_SECRET || '';
-  if (expected.length < 24 || typeof given !== 'string') return false;
-  const a = crypto.createHash('sha256').update(given).digest();
-  const b = crypto.createHash('sha256').update(expected).digest();
-  return crypto.timingSafeEqual(a, b);
+const KEY_NAME = 'calendly_recap_ingest';
+const MIN_KEY_CHARS = 32;
+const sha256 = (v) => crypto.createHash('sha256').update(String(v)).digest();
+
+/** true when the key is accepted. Env wins; otherwise the enrolled key; with none enrolled, this key is enrolled. */
+async function keyOk(given) {
+  if (typeof given !== 'string' || given.length < MIN_KEY_CHARS) return false;
+  const fromEnv = process.env.CALENDLY_RECAP_INGEST_SECRET || '';
+  if (fromEnv) return crypto.timingSafeEqual(sha256(given), sha256(fromEnv));
+
+  let doc = await IntegrationKeyModel.findOne({ name: KEY_NAME }).lean();
+  if (!doc) {
+    try {
+      await IntegrationKeyModel.create({ name: KEY_NAME, keyHash: sha256(given).toString('hex') });
+      console.log('[calendlyRecap] enrolled the Apps Script key (first use)');
+      return true;
+    } catch (err) {
+      if (err?.code !== 11000) throw err;
+      doc = await IntegrationKeyModel.findOne({ name: KEY_NAME }).lean(); // a parallel first call enrolled it
+    }
+  }
+  return crypto.timingSafeEqual(sha256(given), Buffer.from(doc.keyHash, 'hex'));
 }
 
 // One script, a few calls a minute at most; a leaked secret in a loop is the case this exists for.
@@ -59,7 +78,11 @@ function chunks(text, size) {
   return out;
 }
 
-/** The forward the old Apps Script did, now with who and which meeting. Never throws. */
+/**
+ * Optional server-side Discord post with the client, time and BDA added. Off unless
+ * DISCORD_CALENDLY_RECAP_WEBHOOK_URL is set. The Apps Script already posts each recap to Discord itself, so leave
+ * this unset unless that post is removed from the script, or every recap appears twice. Never throws.
+ */
 async function postRecapToDiscord(recap, booking) {
   const url = process.env.DISCORD_CALENDLY_RECAP_WEBHOOK_URL || null;
   if (!url) return false;
@@ -87,10 +110,7 @@ async function postRecapToDiscord(recap, booking) {
 
 async function ingest(req, res) {
   try {
-    if (!process.env.CALENDLY_RECAP_INGEST_SECRET) {
-      return fail(res, 503, 'not_configured', 'CALENDLY_RECAP_INGEST_SECRET is not set on the server');
-    }
-    if (!secretOk(req.get('x-recap-secret'))) return fail(res, 401, 'bad_secret', 'Missing or wrong X-Recap-Secret');
+    if (!(await keyOk(req.get('x-recap-secret')))) return fail(res, 401, 'bad_secret', 'Missing or wrong X-Recap-Secret');
     const problem = validate(req.body);
     if (problem) return fail(res, 422, 'invalid_recap', problem);
 
