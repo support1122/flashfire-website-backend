@@ -163,6 +163,7 @@ function applyBookedDateRange(matchQuery, bookedFromDate, bookedToDate) {
 
 import { logReminderError } from '../Schema_Models/ReminderError.js';
 import { validatePostMeetingBookingStatus } from '../Utils/meetingStatusEligibility.js';
+import { checkBdaStatusAllowed, parseIgnoreReason, formatIgnoreReason } from '../Utils/bdaStatusRules.js';
 import { SYSTEM_ACTOR, statusChangeSet, statusHistoryPush } from '../Utils/statusHistoryOps.js';
 
 const PHONE_REGEX = /^\+?[1-9]\d{9,14}$/;
@@ -762,6 +763,7 @@ export const getAllBookingsPaginated = async (req, res) => {
         statusChangedAt: 1,
         statusChangeSource: 1,
         statusHistory: 1,
+        ignoreReason: 1,
         originalBda: 1,
         calendlyHost: 1,
         claimedBy: 1
@@ -850,6 +852,7 @@ export const getMeetingsBookedToday = async (req, res) => {
         statusChangedAt: 1,
         statusChangeSource: 1,
         statusHistory: 1,
+        ignoreReason: 1,
         originalBda: 1,
         calendlyHost: 1,
         claimedBy: 1
@@ -938,6 +941,7 @@ export const getMeetingsByDate = async (req, res) => {
         statusChangedAt: 1,
         statusChangeSource: 1,
         statusHistory: 1,
+        ignoreReason: 1,
         originalBda: 1,
         calendlyHost: 1,
         claimedBy: 1
@@ -1218,8 +1222,10 @@ export const updateBookingStatus = async (req, res) => {
     // not in the token). Admins may override any lock.
     let isAdminActor = false;
     if (authedEmail) {
-      const actorRecord = await CrmUserModel.findOne({ email: authedEmail }).select('role name').lean();
-      isAdminActor = actorRecord?.role === 'admin';
+      // A crm_admin token (the /admin/analysis login) is an admin by construction, even
+      // when that email has no CrmUser row. Otherwise use the shared rule: role 'admin'
+      // or the isAdmin flag (some admins have role 'bda' with isAdmin: true).
+      isAdminActor = req.crmUser.role === 'crm_admin' || (await isCrmAdmin(req.crmUser));
     }
 
     let actorEmail;
@@ -1263,6 +1269,30 @@ export const updateBookingStatus = async (req, res) => {
       });
     }
 
+    // BDAs only record meeting outcomes; everything else is Calendly, automations or an admin.
+    const bdaRule = checkBdaStatusAllowed({ status, statusSource });
+    if (!bdaRule.ok) {
+      return res.status(403).json({
+        success: false,
+        code: 'STATUS_NOT_ALLOWED_FOR_BDA',
+        message: bdaRule.message,
+      });
+    }
+
+    // Ignoring a lead needs a reason from a BDA (admins may add one, automations never do).
+    let ignoreReason = null;
+    if (status === 'ignored') {
+      const parsed = parseIgnoreReason(req.body.ignoreReason, { required: statusSource === 'bda' });
+      if (!parsed.ok) {
+        return res.status(400).json({
+          success: false,
+          code: 'IGNORE_REASON_INVALID',
+          message: parsed.message,
+        });
+      }
+      ignoreReason = parsed.value;
+    }
+
     const updatePayload = {
       bookingStatus: status,
       statusChangedAt,
@@ -1270,6 +1300,18 @@ export const updateBookingStatus = async (req, res) => {
       statusChangedBy: actorEmail,
       statusChangedByName: actorName,
     };
+
+    if (ignoreReason) {
+      updatePayload.ignoreReason = {
+        ...ignoreReason,
+        setByEmail: actorEmail,
+        setByName: actorName,
+        setAt: statusChangedAt,
+      };
+    } else if (status !== 'ignored' && existingBooking.ignoreReason) {
+      // The lead left Ignored; the reason stays in statusHistory, not on the live record.
+      updatePayload.ignoreReason = null;
+    }
 
     if (paymentPlanUpdate) {
       updatePayload.paymentPlan = paymentPlanUpdate;
@@ -1310,6 +1352,7 @@ export const updateBookingStatus = async (req, res) => {
           changedByName: actorName,
           source: statusSource,
           changedAt: statusChangedAt,
+          reason: formatIgnoreReason(ignoreReason),
         },
       };
     }
