@@ -240,8 +240,23 @@ export const CampaignBookingSchema = new mongoose.Schema({
       enum: ['admin', 'calendly', 'system', 'bda', 'microservice'],
       default: null
     },
-    changedAt: { type: Date, default: Date.now }
+    changedAt: { type: Date, default: Date.now },
+    // Why the lead was ignored ("Duplicate lead: booked twice"). Only set on 'ignored' entries.
+    reason: { type: String, default: null }
   }],
+  // Set when a lead is marked Ignored, cleared when it leaves Ignored. Codes come from
+  // Utils/bdaStatusRules.js IGNORE_REASONS; the label is copied so old records stay readable.
+  ignoreReason: {
+    type: {
+      code: { type: String, required: true },
+      label: { type: String, required: true },
+      note: { type: String, default: null },
+      setByEmail: { type: String, default: null },
+      setByName: { type: String, default: null },
+      setAt: { type: Date, default: null }
+    },
+    default: null
+  },
   paymentPlan: {
     name: {
       type: String,
