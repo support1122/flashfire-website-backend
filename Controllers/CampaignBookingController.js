@@ -1009,7 +1009,8 @@ export const getAllBookings = async (req, res) => {
         paymentPlan: 1,
         meetingNotes: 1,
         anythingToKnow: 1,
-        firefliesTranscriptId: 1
+        firefliesTranscriptId: 1,
+        ignoreReason: 1
       })
       .sort({ scheduledEventStartTime: -1, bookingCreatedAt: -1 })
       .limit(5000)
