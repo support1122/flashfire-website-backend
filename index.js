@@ -1134,6 +1134,25 @@ app.listen(PORT || 4001, async () => {
     console.warn('⚠️ [Server] Failed to schedule Call Leads daily summary:', error.message);
   }
 
+  // Twilio daily cost report: yesterday's (UTC) spend, per-country split, balance and runway,
+  // posted at 00:10 UTC (5:40 AM IST) to the twilio-automated-call Discord channel.
+  try {
+    const cronModule = await import('node-cron');
+    const { sendTwilioDailyCostReport } = await import('./Utils/TwilioDailyCostReport.js');
+    cronModule.default.schedule('10 0 * * *', async () => {
+      try {
+        const r = await sendTwilioDailyCostReport();
+        if (r?.skipped) console.log(`ℹ️ [TwilioCost] ${r.skipped} for ${r.day}`);
+        else if (!r?.ok) console.warn('⚠️ [TwilioCost] daily report not sent:', r?.error);
+      } catch (error) {
+        console.warn('⚠️ [TwilioCost] daily report failed:', error.message);
+      }
+    }, { scheduled: true, timezone: 'UTC' });
+    console.log('✅ [Server] Twilio daily cost report scheduled (00:10 UTC)');
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to schedule Twilio daily cost report:', error.message);
+  }
+
   // One-time backfill: existing CRM users with a view permission get the matching
   // `_edit` permission so behavior does not regress when per-module view/edit ships.
   // Idempotent — only adds missing edit keys.
