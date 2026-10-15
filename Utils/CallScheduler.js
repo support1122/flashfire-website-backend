@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import { ScheduledCallModel } from '../Schema_Models/ScheduledCall.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
+import { skippedCallPrefixFor } from './CallPolicy.js';
 import { Logger } from './Logger.js';
 import { scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
 import { normalizeTimezoneLabel, buildMeetingDisplay } from './MeetingReminderUtils.js';
@@ -117,6 +118,12 @@ export async function scheduleCall({
 
     const callId = buildCallId(phoneNumber, meetingStart.getTime());
 
+    // Blocked destinations (e.g. Germany, too expensive) get a 'skipped' row: no call, no timer,
+    // no Discord noise, but the WhatsApp reminders below still get scheduled.
+    const blockedPrefix = skippedCallPrefixFor(phoneNumber);
+    const initialStatus = blockedPrefix ? 'skipped' : 'pending';
+    const initialError = blockedPrefix ? `Skipped: calls to ${blockedPrefix} numbers are disabled` : null;
+
     // Check if call already exists. If cancelled (cancel+rebook), revive it; else skip.
     const existingCall = await ScheduledCallModel.findOne({ callId });
     if (existingCall && existingCall.status !== 'cancelled') {
@@ -129,9 +136,9 @@ export async function scheduleCall({
         { _id: existingCall._id },
         {
           $set: {
-            status: 'pending',
+            status: initialStatus,
             attempts: 0,
-            errorMessage: null,
+            errorMessage: initialError,
             processedAt: null,
             completedAt: null,
             twilioCallSid: null,
@@ -158,16 +165,24 @@ export async function scheduleCall({
         inviteeName,
         inviteeEmail,
         source,
-        metadata
+        metadata,
+        status: initialStatus,
+        errorMessage: initialError,
       });
     }
 
+    if (blockedPrefix) {
+      console.log(`⏭️ [CallScheduler] Call skipped (${blockedPrefix} disabled): ${callId}`);
+    }
+
     // Register precision timer with UnifiedScheduler
-    try {
-      const { getScheduler } = await import('./UnifiedScheduler.js');
-      const scheduler = getScheduler();
-      if (scheduler) scheduler.scheduleTimer('call', callId, callTime);
-    } catch {}
+    if (!blockedPrefix) {
+      try {
+        const { getScheduler } = await import('./UnifiedScheduler.js');
+        const scheduler = getScheduler();
+        if (scheduler) scheduler.scheduleTimer('call', callId, callTime);
+      } catch {}
+    }
 
     const delayMinutes = Math.round((callTime - new Date()) / 60000);
 
@@ -179,7 +194,7 @@ export async function scheduleCall({
       delayMinutes
     });
 
-    if (DISCORD_WEBHOOK) {
+    if (DISCORD_WEBHOOK && !blockedPrefix) {
       await DiscordConnect(DISCORD_WEBHOOK, 
         `📅 **Call Scheduled (MongoDB)**\n` +
         `📞 Phone: ${phoneNumber}\n` +
@@ -501,6 +516,16 @@ export async function processDueCalls() {
         ).lean();
 
         if (!call) {
+          continue;
+        }
+
+        const blockedPrefix = skippedCallPrefixFor(call.phoneNumber);
+        if (blockedPrefix) {
+          await ScheduledCallModel.updateOne(
+            { _id: call._id },
+            { status: 'skipped', errorMessage: `Skipped: calls to ${blockedPrefix} numbers are disabled` }
+          );
+          console.log(`⏭️ [CallScheduler] Call skipped (${blockedPrefix} disabled):`, call.callId);
           continue;
         }
 
