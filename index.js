@@ -1068,6 +1068,10 @@ app.listen(PORT || 4001, async () => {
   // rows and bookings are claimed atomically, so each reminder is sent only once.
   const { startDiscordMeetReminderScheduler } = await import('./Utils/DiscordMeetReminderScheduler.js');
   startDiscordMeetReminderScheduler();
+
+  // Sales Lead Allocation call reminders (5 min before each allocated call). Claims rows atomically.
+  const { startSalesAllocationReminders } = await import('./Utils/SalesAllocationReminder.js');
+  startSalesAllocationReminders();
   
   try {
     await watiService.refreshTemplatesCache();
