@@ -18,6 +18,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from './DiscordConnect.js';
 import { logReminderDrift } from './MeetingReminderUtils.js';
 import { makeCall, scheduleCall } from './CallScheduler.js';
+import { skippedCallPrefixFor } from './CallPolicy.js';
 import { sendWhatsAppMessage, scheduleAllWhatsAppReminders } from './WhatsAppReminderScheduler.js';
 import { normalizeTimezoneLabel, buildMeetingDisplay } from './MeetingReminderUtils.js';
 import { formatMeetingWallTime, headlineForSendTime, scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
@@ -405,6 +406,17 @@ export class UnifiedScheduler {
           { status: 'cancelled', errorMessage: `Cancelled: ${guard.reason}` }
         );
         console.log(`[UnifiedScheduler] Call blocked (${guard.reason}): ${call.callId}`);
+        return;
+      }
+
+      // Blocked destination (e.g. Germany): never place the call and never stamp bdaCallPlacedAt.
+      const blockedPrefix = skippedCallPrefixFor(call.phoneNumber);
+      if (blockedPrefix) {
+        await ScheduledCallModel.updateOne(
+          { _id: call._id },
+          { status: 'skipped', errorMessage: `Skipped: calls to ${blockedPrefix} numbers are disabled` }
+        );
+        console.log(`[UnifiedScheduler] Call skipped (${blockedPrefix} disabled): ${call.callId}`);
         return;
       }
 
