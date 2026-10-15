@@ -20,7 +20,7 @@ const COUNTRY_PREFIXES = [
   ['+639', 'Philippines'], ['+971', 'UAE'],
 ];
 
-function countryOf(number) {
+export function countryOf(number) {
   const to = String(number || '');
   let best = null;
   for (const [prefix, name] of COUNTRY_PREFIXES) {

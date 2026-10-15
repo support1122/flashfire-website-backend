@@ -1153,6 +1153,25 @@ app.listen(PORT || 4001, async () => {
     console.warn('⚠️ [Server] Failed to schedule Twilio daily cost report:', error.message);
   }
 
+  // WATI daily cost report: yesterday's (UTC) template-message count and estimated Meta charge,
+  // posted at 00:12 UTC to the same Discord channel as the Twilio report.
+  try {
+    const cronModule = await import('node-cron');
+    const { sendWatiDailyCostReport } = await import('./Utils/WatiDailyCostReport.js');
+    cronModule.default.schedule('12 0 * * *', async () => {
+      try {
+        const r = await sendWatiDailyCostReport();
+        if (r?.skipped) console.log(`ℹ️ [WatiCost] ${r.skipped} for ${r.day}`);
+        else if (!r?.ok) console.warn('⚠️ [WatiCost] daily report not sent:', r?.error);
+      } catch (error) {
+        console.warn('⚠️ [WatiCost] daily report failed:', error.message);
+      }
+    }, { scheduled: true, timezone: 'UTC' });
+    console.log('✅ [Server] WATI daily cost report scheduled (00:12 UTC)');
+  } catch (error) {
+    console.warn('⚠️ [Server] Failed to schedule WATI daily cost report:', error.message);
+  }
+
   // One-time backfill: existing CRM users with a view permission get the matching
   // `_edit` permission so behavior does not regress when per-module view/edit ships.
   // Idempotent — only adds missing edit keys.

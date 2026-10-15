@@ -298,7 +298,9 @@ class WatiService {
    */
   async sendTemplateMessage(params) {
     const result = await this._sendTemplateMessage(params);
-    if (!result?.success) {
+    if (result?.success) {
+      this._logSend(params);
+    } else {
       try {
         const { reportWatiFailureRealtime } = await import('./WhatsAppFailureAlert.js');
         reportWatiFailureRealtime({
@@ -313,6 +315,17 @@ class WatiService {
       }
     }
     return result;
+  }
+
+  /** Fire-and-forget row for the daily WATI cost report. Must never affect the send result. */
+  _logSend(params) {
+    import('../Schema_Models/WatiSendLog.js')
+      .then(({ WatiSendLogModel }) => WatiSendLogModel.create({
+        to: String(params?.mobileNumber || '').replace(/\D/g, ''),
+        templateName: params?.templateName || this.templateIdToName.get(params?.templateId) || null,
+        source: params?.campaignId ? 'campaign/workflow' : 'reminder',
+      }))
+      .catch((err) => console.warn('⚠️ [WatiService] send log failed:', err?.message ?? err));
   }
 
   async _sendTemplateMessage({ mobileNumber, templateName, templateId, parameters = [], campaignId }) {
