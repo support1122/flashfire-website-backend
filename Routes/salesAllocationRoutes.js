@@ -260,6 +260,7 @@ export function registerSalesAllocationRoutes(app) {
 
       // The new BDA still needs their reminder unless one already went out for this call.
       const now = new Date();
+      const earlyCutoff = new Date(now.getTime() + 5 * 60 * 1000);
       const updated = await SalesLeadAllocationModel.findOneAndUpdate(
         { allocationId: id, status: 'scheduled' },
         [
@@ -273,6 +274,11 @@ export function registerSalesAllocationRoutes(app) {
                   'pending',
                   '$reminderState',
                 ],
+              },
+              // The new BDA also needs the 30-minute heads-up, even if the previous BDA already got it, as long as
+              // the call is still more than 5 minutes away (inside that, only the final reminder applies).
+              earlyReminderState: {
+                $cond: [{ $gt: ['$callAt', earlyCutoff] }, 'pending', '$earlyReminderState'],
               },
             },
           },
@@ -292,7 +298,7 @@ export function registerSalesAllocationRoutes(app) {
       const id = String(req.params.id);
       const updated = await SalesLeadAllocationModel.findOneAndUpdate(
         { allocationId: id, status: 'scheduled' },
-        { $set: { status: 'cancelled', reminderState: 'skipped' } },
+        { $set: { status: 'cancelled', reminderState: 'skipped', earlyReminderState: 'skipped' } },
         { new: true }
       ).lean();
       if (updated) return res.status(200).json({ success: true, allocation: toRow(updated) });
@@ -325,7 +331,7 @@ export function registerSalesAllocationRoutes(app) {
 
       const updated = await SalesLeadAllocationModel.findOneAndUpdate(
         { allocationId: id, status: 'scheduled' },
-        { $set: { status, outcomeNote: note, reminderState: current.reminderState === 'sent' ? 'sent' : 'skipped' } },
+        { $set: { status, outcomeNote: note, reminderState: current.reminderState === 'sent' ? 'sent' : 'skipped', earlyReminderState: current.earlyReminderState === 'sent' ? 'sent' : 'skipped' } },
         { new: true }
       ).lean();
       if (!updated) return fail(res, 409, 'not_scheduled', 'Allocation is no longer scheduled');

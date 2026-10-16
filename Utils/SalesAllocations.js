@@ -159,6 +159,26 @@ export function validateAllocationInput(body, now = new Date()) {
   return { value: { clientName, phone, email, timezone, callAt, bdaEmail, notes } };
 }
 
+/** The heads-up sent about 30 minutes ahead. Same facts as the final reminder, framed as time to prepare. */
+export function buildEarlyReminderMessage(a) {
+  const bdaName = a.bdaName || String(a.bdaEmail || '').split('@')[0] || 'BDA';
+  const url = a.crmUrl || crmLinkFor(a.allocationId);
+  return [
+    '⏳ **Call coming up in ~30 minutes**',
+    '',
+    `**Client:** ${a.clientName}`,
+    `**Phone:** ${a.phone || 'n/a'}`,
+    `**Email:** ${a.email || 'n/a'}`,
+    `**Time (Client):** ${formatInZone(a.callAt, a.timezone)} (${a.timezone})`,
+    `**Time (India):** ${formatInZone(a.callAt, IST_ZONE)}`,
+    `**Assigned BDA:** ${bdaName}`,
+    ...(a.notes ? [`**Notes:** ${a.notes}`] : []),
+    `**Open in CRM:** ${url}`,
+    '',
+    `${bdaName}, this call is yours. Review the lead now so you are ready. You will get one more reminder 5 minutes before.`,
+  ].join('\n');
+}
+
 export function buildReminderMessage(a) {
   const bdaName = a.bdaName || String(a.bdaEmail || '').split('@')[0] || 'BDA';
   const url = a.crmUrl || crmLinkFor(a.allocationId);
