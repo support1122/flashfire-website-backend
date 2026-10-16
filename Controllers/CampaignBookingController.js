@@ -3296,6 +3296,16 @@ export const getLeadsAnalytics = async (req, res) => {
       ],
     };
 
+    // source|medium pairs tracked by the "Direct leads → meetings" graph.
+    const DIRECT_MEETING_PAIRS = [
+      'direct|(none)',
+      'WEBSITE|Hero_Section',
+      'WEBSITE|Navigation_Navbar_Button',
+      'webpage_visit|website',
+      'direct|paid',
+      'WEBSITE|Result_Stats_Section',
+    ];
+
     // Run all aggregation pipelines concurrently for max performance
     const [
       funnelResult,
@@ -3330,7 +3340,8 @@ export const getLeadsAnalytics = async (req, res) => {
       noShowMonthlyResult,
       noShowDailyResult,
       noShowCallsResult,
-      noShowCallsDailyResult
+      noShowCallsDailyResult,
+      directMeetingsMonthlyResult
     ] = await Promise.all([
 
       // 1. FUNNEL: MQL → SQL → Converted counts (deduplicated by client, same as table)
@@ -4194,6 +4205,28 @@ export const getLeadsAnalytics = async (req, res) => {
         { $sort: { _id: -1 } },
         { $limit: 10 },
         { $sort: { _id: 1 } }
+      ]),
+
+      // 33. DIRECT-TRAFFIC MEETINGS MONTHLY — meetings (any booking with a scheduled time,
+      // any status) for a fixed set of direct/organic utmSource + utmMedium pairs, bucketed
+      // by meeting month (US Eastern). Not deduped: one row = one meeting.
+      CampaignBookingModel.aggregate([
+        { $match: { ...matchQuery, scheduledEventStartTime: { $ne: null } } },
+        { $addFields: {
+            scheduledEventStartTime: { $toDate: '$scheduledEventStartTime' },
+            src: { $ifNull: ['$utmSource', 'direct'] },
+            med: { $cond: [{ $in: [{ $ifNull: ['$utmMedium', ''] }, ['']] }, '(none)', '$utmMedium'] }
+        } },
+        { $match: { $expr: { $in: [{ $concat: ['$src', '|', '$med'] }, DIRECT_MEETING_PAIRS] } } },
+        { $group: {
+          _id: {
+            month: { $dateToString: { format: '%Y-%m', date: '$scheduledEventStartTime', timezone: 'America/New_York' } },
+            source: '$src',
+            medium: '$med'
+          },
+          count: { $sum: 1 }
+        }},
+        { $sort: { '_id.month': 1 } }
       ])
     ]);
 
@@ -4475,7 +4508,13 @@ export const getLeadsAnalytics = async (req, res) => {
         noShowMonthly,
         noShowDaily,
         noShowCalls,
-        noShowCallsDaily
+        noShowCallsDaily,
+        directMeetingsMonthly: directMeetingsMonthlyResult.map(r => ({
+          month: r._id.month,
+          source: r._id.source,
+          medium: r._id.medium,
+          count: r.count
+        }))
       }
     });
 
