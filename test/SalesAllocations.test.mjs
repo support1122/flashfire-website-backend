@@ -190,3 +190,33 @@ describe('reminder window', () => {
     assert.equal(d.log.posts.length, 0);
   });
 });
+
+import { guessTimezoneFromPhone, phoneBookingFilter } from '../Utils/SalesAllocations.js';
+
+describe('phone lookup helpers', () => {
+  it('guesses the zone from the country code', () => {
+    assert.equal(guessTimezoneFromPhone('+41772452623'), 'Europe/Zurich');
+    assert.equal(guessTimezoneFromPhone('+971501234567'), 'Asia/Dubai');
+    assert.equal(guessTimezoneFromPhone('+447700900123'), 'Europe/London');
+  });
+
+  it('uses the injected area-code lookup for +1 numbers and returns null when it cannot tell', () => {
+    assert.equal(guessTimezoneFromPhone('+14155550142', () => 'PT'), 'America/Los_Angeles');
+    assert.equal(guessTimezoneFromPhone('+14155550142', () => 'ET'), 'America/New_York');
+    assert.equal(guessTimezoneFromPhone('+14155550142'), null);
+    assert.equal(guessTimezoneFromPhone('4155550142'), null);
+    assert.equal(guessTimezoneFromPhone(null), null);
+  });
+
+  it('matches a number typed with its country code against the stored last-10 key', () => {
+    const f = phoneBookingFilter('41772452623');
+    const exact = f.$or.find((c) => typeof c.normalizedClientPhone === 'string');
+    assert.equal(exact.normalizedClientPhone, '1772452623');
+    assert.ok(f.$or.some((c) => c.clientPhone instanceof RegExp && c.clientPhone.test('+41772452623')));
+  });
+
+  it('does not add the last-10 key for short fragments', () => {
+    const f = phoneBookingFilter('4177');
+    assert.equal(f.$or.some((c) => typeof c.normalizedClientPhone === 'string'), false);
+  });
+});

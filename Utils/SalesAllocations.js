@@ -37,6 +37,52 @@ export function normalizeEmail(raw) {
 export const escapeRegex = (s) => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** The IST calendar date ('YYYY-MM-DD') of an instant. Leave days are stored in this form. */
+// Longest calling code first, so +971 is never read as +9 and +1 numbers fall through to the area-code lookup.
+const COUNTRY_ZONE = [
+  ['971', 'Asia/Dubai'], ['966', 'Asia/Riyadh'], ['974', 'Asia/Qatar'], ['880', 'Asia/Dhaka'], ['852', 'Asia/Hong_Kong'],
+  ['353', 'Europe/Dublin'], ['234', 'Africa/Lagos'], ['254', 'Africa/Nairobi'],
+  ['91', 'Asia/Kolkata'], ['92', 'Asia/Karachi'], ['65', 'Asia/Singapore'], ['81', 'Asia/Tokyo'], ['82', 'Asia/Seoul'],
+  ['63', 'Asia/Manila'], ['61', 'Australia/Sydney'], ['64', 'Pacific/Auckland'], ['44', 'Europe/London'],
+  ['33', 'Europe/Paris'], ['49', 'Europe/Berlin'], ['34', 'Europe/Madrid'], ['39', 'Europe/Rome'], ['31', 'Europe/Amsterdam'],
+  ['41', 'Europe/Zurich'], ['46', 'Europe/Stockholm'], ['30', 'Europe/Athens'], ['27', 'Africa/Johannesburg'],
+  ['20', 'Africa/Cairo'], ['52', 'America/Mexico_City'], ['55', 'America/Sao_Paulo'], ['57', 'America/Bogota'],
+  ['54', 'America/Argentina/Buenos_Aires'],
+];
+const NANP_ZONE = {
+  ET: 'America/New_York', EST: 'America/New_York', CT: 'America/Chicago', CST: 'America/Chicago',
+  MT: 'America/Denver', MST: 'America/Denver', PT: 'America/Los_Angeles', PST: 'America/Los_Angeles',
+};
+
+/**
+ * Best-effort client zone from an international phone number, for leads with no saved zone. Returns null when the
+ * number has no country code (we cannot tell) or the code is not one we map. The admin can always change the zone.
+ */
+export function guessTimezoneFromPhone(phone, detectNanpZone = null) {
+  const raw = String(phone ?? '').trim();
+  if (!raw.startsWith('+')) return null;
+  const digits = raw.replace(/\D/g, '');
+  if (digits.startsWith('1') && digits.length === 11) {
+    const abbr = detectNanpZone ? detectNanpZone(raw) : null;
+    return (abbr && NANP_ZONE[String(abbr).toUpperCase()]) || null;
+  }
+  const hit = COUNTRY_ZONE.find(([code]) => digits.startsWith(code));
+  return hit ? hit[1] : null;
+}
+
+/**
+ * The booking collection stores only the last 10 digits (normalizedClientPhone), so a number typed with its country
+ * code ("41772452623") never prefix-matches "1772452623". Match the typed digits as a prefix, plus their last 10
+ * digits as an exact key, plus the raw clientPhone with an optional leading +.
+ */
+export function phoneBookingFilter(digits) {
+  const or = [
+    { normalizedClientPhone: new RegExp(`^${escapeRegex(digits)}`) },
+    { clientPhone: new RegExp(`^\\+?${escapeRegex(digits)}`) },
+  ];
+  if (digits.length >= 10) or.push({ normalizedClientPhone: digits.slice(-10) });
+  return { $or: or };
+}
+
 export function istDayOf(instant) {
   const dt = instant instanceof Date ? DateTime.fromJSDate(instant) : DateTime.fromISO(String(instant));
   if (!dt.isValid) return null;

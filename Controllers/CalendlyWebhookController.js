@@ -1448,13 +1448,20 @@ async function handleRescheduledEvent(req, res, payload) {
     // Correct Booking Lookup
     let bookingRecord = null;
     try {
+      // Event URI first (unique), for the same reason as the cancel handler: the invitee email can differ from the
+      // email on the booking row, and an email-only match then falls through to the wrong record.
+      const oldEventUri = old_invitee?.scheduled_event?.uri || null;
+      if (oldEventUri) {
+        bookingRecord = await CampaignBookingModel.findOne({ calendlyEventUri: oldEventUri });
+      }
+
       const query = { clientEmail: clientEmail };
 
       // Try to find exact match by old start time first
       // Because we want to find the meeting that WAS at oldStartTime
       query.scheduledEventStartTime = oldStartTime;
 
-      bookingRecord = await CampaignBookingModel.findOne(query);
+      if (!bookingRecord) bookingRecord = await CampaignBookingModel.findOne(query);
 
       if (!bookingRecord) {
         Logger.warn('Could not find booking with exact start time, falling back to latest booking', { clientEmail, oldStartTime });
@@ -1784,6 +1791,13 @@ async function handleCanceledEvent(req, res, payload) {
     let bookingRecord = null;
     let staleCancelForRebookedEvent = false;
     try {
+      // The event URI is unique per Calendly event, the invitee email is not: a lead can fill our form with one
+      // address and book with another (or reschedule under a different one). Matching on email alone left the
+      // original booking 'scheduled' after the client cancelled, and the BDA was fined for a meeting that never ran.
+      if (calendlyEventUri) {
+        bookingRecord = await CampaignBookingModel.findOne({ calendlyEventUri });
+      }
+
       const query = { clientEmail: clientEmail };
 
       if (calendlyEventUri) {
@@ -1793,7 +1807,7 @@ async function handleCanceledEvent(req, res, payload) {
       }
 
       // If we have specific criteria, use it
-      if (query.calendlyEventUri || query.scheduledEventStartTime) {
+      if (!bookingRecord && (query.calendlyEventUri || query.scheduledEventStartTime)) {
         bookingRecord = await CampaignBookingModel.findOne(query);
       }
 
