@@ -120,7 +120,7 @@ export async function scheduleCall({
 
     // Blocked destinations (e.g. Germany, too expensive) get a 'skipped' row: no call, no timer,
     // no Discord noise, but the WhatsApp reminders below still get scheduled.
-    const blockedPrefix = skippedCallPrefixFor(phoneNumber);
+    const blockedPrefix = skippedCallPrefixFor(phoneNumber, callTime);
     const initialStatus = blockedPrefix ? 'skipped' : 'pending';
     const initialError = blockedPrefix ? `Skipped: calls to ${blockedPrefix} numbers are disabled` : null;
 
@@ -519,7 +519,7 @@ export async function processDueCalls() {
           continue;
         }
 
-        const blockedPrefix = skippedCallPrefixFor(call.phoneNumber);
+        const blockedPrefix = skippedCallPrefixFor(call.phoneNumber, call.scheduledFor);
         if (blockedPrefix) {
           await ScheduledCallModel.updateOne(
             { _id: call._id },

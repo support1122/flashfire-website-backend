@@ -3,9 +3,12 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { getBdaProfile, getTrackedBdas } from '../Utils/BdaRegistry.js';
 import { actorOf, requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
+import { detectTimezoneFromPhone } from '../Utils/PhoneTimezoneDetector.js';
 import {
   crmLinkFor,
   escapeRegex,
+  guessTimezoneFromPhone,
+  phoneBookingFilter,
   isOnLeaveAt,
   istDayBounds,
   istDayOf,
@@ -135,10 +138,9 @@ export function registerSalesAllocationRoutes(app) {
         bookingFilter = { clientEmail: re };
         allocFilter = { email: re };
       } else {
-        // normalizedClientPhone has no country code; the allocation phone may carry a leading +.
-        const bookingRe = new RegExp(`^${escapeRegex(parsed.digits)}`);
-        bookingFilter = { normalizedClientPhone: bookingRe };
-        allocFilter = { phone: new RegExp(`^\\+?${escapeRegex(parsed.digits)}`) };
+        bookingFilter = phoneBookingFilter(parsed.digits);
+        const tail = parsed.digits.length >= 10 ? `|${escapeRegex(parsed.digits.slice(-10))}$` : '';
+        allocFilter = { phone: new RegExp(`^\\+?${escapeRegex(parsed.digits)}${tail}`) };
       }
 
       const [bookings, allocs] = await Promise.all([
@@ -167,7 +169,7 @@ export function registerSalesAllocationRoutes(app) {
           clientName: b.clientName,
           email: b.clientEmail || null,
           phone: b.clientPhone || null,
-          timezone: b.inviteeTimezone || null,
+          timezone: b.inviteeTimezone || guessTimezoneFromPhone(b.clientPhone, detectTimezoneFromPhone),
           source: 'booking',
         });
       }

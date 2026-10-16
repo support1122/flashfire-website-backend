@@ -410,7 +410,7 @@ export class UnifiedScheduler {
       }
 
       // Blocked destination (e.g. Germany): never place the call and never stamp bdaCallPlacedAt.
-      const blockedPrefix = skippedCallPrefixFor(call.phoneNumber);
+      const blockedPrefix = skippedCallPrefixFor(call.phoneNumber, call.scheduledFor);
       if (blockedPrefix) {
         await ScheduledCallModel.updateOne(
           { _id: call._id },
