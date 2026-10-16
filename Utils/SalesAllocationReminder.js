@@ -1,7 +1,7 @@
 import dotenv from 'dotenv';
 import { DiscordConnect } from './DiscordConnect.js';
 import { SalesLeadAllocationModel } from '../Schema_Models/SalesLeadAllocation.js';
-import { buildReminderMessage, crmLinkFor } from './SalesAllocations.js';
+import { buildEarlyReminderMessage, buildReminderMessage, crmLinkFor } from './SalesAllocations.js';
 
 dotenv.config();
 
@@ -11,6 +11,7 @@ dotenv.config();
 
 const POLL_INTERVAL_MS = 30 * 1000;
 const LEAD_MS = 5 * 60 * 1000; // remind this long before the call
+const EARLY_LEAD_MS = 30 * 60 * 1000; // the heads-up goes out this long before the call
 const GRACE_MS = 10 * 60 * 1000; // still remind up to this long after the call time (late start)
 const STUCK_SENDING_MS = 3 * 60 * 1000;
 const BATCH = 20;
@@ -30,6 +31,21 @@ export function reminderWindow(now) {
 export function isInReminderWindow(callAt, now) {
   const t = new Date(callAt).getTime();
   const { from, to } = reminderWindow(now);
+  return Number.isFinite(t) && t >= from.getTime() && t <= to.getTime();
+}
+
+/**
+ * Calls whose 30-minute heads-up is due: between 5 and 30 minutes away. A call booked with less than 5 minutes of
+ * notice skips the heads-up, because the final reminder is already due and two pings back to back would be noise.
+ */
+export function earlyWindow(now) {
+  const t = now.getTime();
+  return { from: new Date(t + LEAD_MS), to: new Date(t + EARLY_LEAD_MS) };
+}
+
+export function isInEarlyWindow(callAt, now) {
+  const t = new Date(callAt).getTime();
+  const { from, to } = earlyWindow(now);
   return Number.isFinite(t) && t >= from.getTime() && t <= to.getTime();
 }
 
@@ -73,8 +89,8 @@ export function mongoDeps(webhookUrl = resolveWebhookUrl()) {
   };
 }
 
-/** One poll pass. Returns counts so tests (and logs) can see what happened. Never throws. */
-export async function tick(now = new Date(), deps = mongoDeps()) {
+/** Shared poll loop. Returns counts so tests (and logs) can see what happened. Never throws. */
+async function runTick(label, now, deps, build) {
   const out = { reset: 0, sent: 0, failed: 0, skipped: 0 };
   try {
     out.reset = (await deps.resetStuck(now)) || 0;
@@ -86,22 +102,70 @@ export async function tick(now = new Date(), deps = mongoDeps()) {
         continue;
       }
       try {
-        const content = buildReminderMessage({ ...row, crmUrl: crmLinkFor(row.allocationId) });
+        const content = build({ ...row, crmUrl: crmLinkFor(row.allocationId) });
         const res = await deps.send(content);
         if (!res?.ok) throw new Error(res?.error || 'unknown');
         await deps.markSent(row, new Date());
         out.sent += 1;
       } catch (err) {
-        console.error('[SalesAllocationReminder] send failed for', row.allocationId, err?.message);
+        console.error(`[SalesAllocationReminder] ${label} send failed for`, row.allocationId, err?.message);
         await deps.markFailed(row);
         out.failed += 1;
       }
     }
   } catch (err) {
-    console.error('[SalesAllocationReminder] tick failed:', err?.message);
+    console.error(`[SalesAllocationReminder] ${label} tick failed:`, err?.message);
   }
   return out;
 }
+
+/** One pass of the 5-minute reminder. */
+export const tick = (now = new Date(), deps = mongoDeps()) => runTick('final', now, deps, buildReminderMessage);
+
+/** Real dependencies for the 30-minute heads-up. Same shape as mongoDeps, different state fields and window. */
+export function mongoEarlyDeps(webhookUrl = resolveWebhookUrl()) {
+  const M = SalesLeadAllocationModel;
+  // A row written before these fields existed has no earlyReminderState; null matches a missing field.
+  const pending = { $in: ['pending', null] };
+  return {
+    webhookUrl,
+    async resetStuck(now) {
+      const res = await M.updateMany(
+        { earlyReminderState: 'sending', earlyReminderClaimedAt: { $lt: new Date(now.getTime() - STUCK_SENDING_MS) } },
+        { $set: { earlyReminderState: 'pending' } }
+      );
+      return res.modifiedCount || 0;
+    },
+    async findDue(now) {
+      const { from, to } = earlyWindow(now);
+      return M.find({ status: 'scheduled', earlyReminderState: pending, callAt: { $gte: from, $lte: to } })
+        .sort({ callAt: 1 })
+        .limit(BATCH)
+        .lean();
+    },
+    async claim(row, now) {
+      const { from, to } = earlyWindow(now);
+      return M.findOneAndUpdate(
+        { allocationId: row.allocationId, status: 'scheduled', earlyReminderState: pending, callAt: { $gte: from, $lte: to } },
+        { $set: { earlyReminderState: 'sending', earlyReminderClaimedAt: now } },
+        { new: true }
+      ).lean();
+    },
+    async markSent(row, now) {
+      await M.updateOne(
+        { allocationId: row.allocationId, earlyReminderState: 'sending' },
+        { $set: { earlyReminderState: 'sent', earlyReminderSentAt: now } }
+      );
+    },
+    async markFailed(row) {
+      await M.updateOne({ allocationId: row.allocationId, earlyReminderState: 'sending' }, { $set: { earlyReminderState: 'failed' } });
+    },
+    send: (content) => DiscordConnect(webhookUrl, content, false),
+  };
+}
+
+/** One pass of the 30-minute heads-up. */
+export const tickEarly = (now = new Date(), deps = mongoEarlyDeps()) => runTick('early', now, deps, buildEarlyReminderMessage);
 
 let timer = null;
 let running = false;
@@ -116,12 +180,14 @@ export function startSalesAllocationReminders() {
     if (running) return;
     running = true;
     try {
-      await tick(new Date());
+      const now = new Date();
+      await tickEarly(now);
+      await tick(now);
     } finally {
       running = false;
     }
   };
-  console.log(`🚀 [SalesAllocationReminder] Polling every ${POLL_INTERVAL_MS / 1000}s, ${LEAD_MS / 60000} min before each call`);
+  console.log(`🚀 [SalesAllocationReminder] Polling every ${POLL_INTERVAL_MS / 1000}s, heads-up ${EARLY_LEAD_MS / 60000} min and reminder ${LEAD_MS / 60000} min before each call`);
   run();
   timer = setInterval(run, POLL_INTERVAL_MS);
 }

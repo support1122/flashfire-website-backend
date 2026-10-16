@@ -220,3 +220,79 @@ describe('phone lookup helpers', () => {
     assert.equal(f.$or.some((c) => typeof c.normalizedClientPhone === 'string'), false);
   });
 });
+
+import { buildEarlyReminderMessage } from '../Utils/SalesAllocations.js';
+import { earlyWindow, isInEarlyWindow, tickEarly } from '../Utils/SalesAllocationReminder.js';
+
+describe('30-minute heads-up', () => {
+  const min = (n) => new Date(NOW.getTime() + n * 60000);
+
+  it('covers calls 5 to 30 minutes away, and nothing outside that', () => {
+    assert.equal(isInEarlyWindow(min(30), NOW), true);
+    assert.equal(isInEarlyWindow(min(30.1), NOW), false);
+    assert.equal(isInEarlyWindow(min(5), NOW), true);
+    assert.equal(isInEarlyWindow(min(4.9), NOW), false); // the final reminder owns this range
+    assert.equal(isInEarlyWindow(min(-1), NOW), false);
+    assert.deepEqual(Object.keys(earlyWindow(NOW)), ['from', 'to']);
+  });
+
+  it('builds a message with the facts, the notes, the link and the follow-up promise', () => {
+    const m = buildEarlyReminderMessage({
+      allocationId: 'alloc_2_xyz',
+      clientName: 'Jane Doe',
+      phone: '+14155550142',
+      email: null,
+      timezone: 'America/Los_Angeles',
+      callAt: new Date('2026-10-17T17:30:00Z'),
+      bdaName: 'Siddhartha',
+      notes: 'Asked about Premium',
+    });
+    assert.match(m, /Call coming up in ~30 minutes/);
+    assert.match(m, /\*\*Phone:\*\* \+14155550142/);
+    assert.match(m, /\*\*Email:\*\* n\/a/);
+    assert.match(m, /10:30 AM PDT/);
+    assert.match(m, /11:00 PM IST/);
+    assert.match(m, /\*\*Notes:\*\* Asked about Premium/);
+    assert.ok(m.includes('https://flashfire-crm.vercel.app/?tab=sales_allocation&id=alloc_2_xyz'));
+    assert.match(m, /one more reminder 5 minutes before/);
+    assert.ok(!m.includes('—'));
+  });
+
+  it('leaves the notes line out when there are none', () => {
+    const m = buildEarlyReminderMessage({ allocationId: 'a', clientName: 'X', timezone: 'Asia/Kolkata', callAt: new Date(), bdaName: 'S' });
+    assert.ok(!m.includes('**Notes:**'));
+  });
+
+  const rows = [
+    { allocationId: 'in20', callAt: min(20), clientName: 'A', timezone: 'Asia/Kolkata', bdaName: 'X' },
+    { allocationId: 'in3', callAt: min(3), clientName: 'B', timezone: 'Asia/Kolkata', bdaName: 'X' },
+    { allocationId: 'in90', callAt: min(90), clientName: 'C', timezone: 'Asia/Kolkata', bdaName: 'X' },
+  ];
+  const deps = ({ sendOk = true } = {}) => {
+    const log = { marked: [], failed: [], posts: [] };
+    return {
+      log,
+      resetStuck: async () => 0,
+      findDue: async (now) => rows.filter((r) => isInEarlyWindow(r.callAt, now)),
+      claim: async (row) => row,
+      send: async (c) => (log.posts.push(c), sendOk ? { ok: true } : { ok: false, error: 'boom' }),
+      markSent: async (r) => log.marked.push(r.allocationId),
+      markFailed: async (r) => log.failed.push(r.allocationId),
+    };
+  };
+
+  it('posts the heads-up only for the call inside the window', async () => {
+    const d = deps();
+    const out = await tickEarly(NOW, d);
+    assert.deepEqual(out, { reset: 0, sent: 1, failed: 0, skipped: 0 });
+    assert.deepEqual(d.log.marked, ['in20']);
+    assert.match(d.log.posts[0], /Call coming up in ~30 minutes/);
+  });
+
+  it('marks failed when Discord rejects', async () => {
+    const d = deps({ sendOk: false });
+    const out = await tickEarly(NOW, d);
+    assert.equal(out.failed, 1);
+    assert.deepEqual(d.log.failed, ['in20']);
+  });
+});

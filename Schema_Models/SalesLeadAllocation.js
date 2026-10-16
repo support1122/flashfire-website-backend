@@ -31,6 +31,11 @@ const SalesLeadAllocationSchema = new mongoose.Schema(
     reminderSentAt: { type: Date, default: null },
     // Set when the reminder poller claims a row, so a row stuck in `sending` can be reset.
     reminderClaimedAt: { type: Date, default: null },
+    // The earlier "30 minutes to go" heads-up. Tracked apart from the 5-minute reminder above so neither can block
+    // or double-fire the other. Rows created before this field existed have no value and count as pending.
+    earlyReminderState: { type: String, enum: REMINDER_STATES, default: 'pending' },
+    earlyReminderSentAt: { type: Date, default: null },
+    earlyReminderClaimedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
