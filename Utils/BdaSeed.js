@@ -19,6 +19,13 @@ export const SEED_PROFILES = Object.freeze([
     lastName: 'samal',
     aliases: ['kalpataru s', 'kalpataru samal'],
   },
+  {
+    email: 'ritika@flashfirehq.com',
+    displayName: 'Ritika',
+    firstName: 'ritika',
+    lastName: 'dwivedi',
+    aliases: ['ritika d', 'ritika dwivedi'],
+  },
 ]);
 
 /**
