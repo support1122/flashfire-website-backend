@@ -87,6 +87,20 @@ function toRow(d, nameByEmail) {
     bdaName: nameByEmail.get(d.bdaEmail) || d.bdaEmail.split('@')[0],
     bookingId: d.bookingId,
     clientName: ev.clientName ?? '',
+    // Where the fine came from: the automatic engine or a person (admin mark, or an approved BDA report), and
+    // whether the call was a Calendly meeting or a Lead Allocation call.
+    origin: ev.manualAbsent ? 'manual' : 'auto',
+    source: ev.manualAbsent?.kind === 'allocation' ? 'allocation' : 'booking',
+    manualAbsent: ev.manualAbsent
+      ? {
+          kind: ev.manualAbsent.kind ?? null,
+          reason: ev.manualAbsent.reason ?? null,
+          markedBy: ev.manualAbsent.markedBy ?? null,
+          markedByName: ev.manualAbsent.markedByName ?? null,
+          at: iso(ev.manualAbsent.at),
+          requestId: ev.manualAbsent.requestId ?? null,
+        }
+      : null,
     rule: d.rule,
     month: d.month,
     amountInr: d.amountInr,

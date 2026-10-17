@@ -246,6 +246,7 @@ import { registerDeductionRoutes } from "./Routes/deductionRoutes.js";
 import { registerBdaProfileRoutes } from "./Routes/bdaProfileRoutes.js";
 import { registerLeaveRoutes } from "./Routes/leaveRoutes.js";
 import { registerSalesAllocationRoutes } from "./Routes/salesAllocationRoutes.js";
+import { registerAbsenceRoutes } from "./Routes/absenceRoutes.js";
 import { registerCalendlyRecapRoutes } from "./Routes/calendlyRecapRoutes.js";
 import { registerAttendanceSetupRoutes } from "./Routes/attendanceSetupRoutes.js";
 
@@ -472,6 +473,7 @@ export default function Routes(app) {
   registerLeaveRoutes(app);
   // Sales Lead Allocation: admins hand calls to BDAs, BDAs see their own, Discord reminder 5 min before.
   registerSalesAllocationRoutes(app);
+registerAbsenceRoutes(app);
   // Calendly Notetaker recaps sent by the Gmail Apps Script, and the CRM views of them.
   registerCalendlyRecapRoutes(app);
   // One-call setup (seed the registry, audit and re-link calls, status checklist). Dry run unless apply is sent.

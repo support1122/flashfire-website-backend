@@ -305,6 +305,11 @@ function messageFor(row, name, client) {
     return `${inr(row.amountInr)} deduction, ${name}: status for ${who} (${at}) still scheduled past the update deadline.`;
   }
   const tier = row.tierIndex ? ` (miss ${row.tierIndex} this month)` : '';
+  const manual = row.evidence?.manualAbsent;
+  if (manual) {
+    const what = manual.kind === 'allocation' ? 'the allocated call' : 'the meeting';
+    return `${inr(row.amountInr)} deduction, ${name}: marked absent for ${what} with ${who} at ${at}${tier}. Marked by ${manual.markedByName || manual.markedBy || 'an admin'}.`;
+  }
   return `${inr(row.amountInr)} deduction, ${name}: missed the meeting with ${who} at ${at}, not marked present in time${tier}.`;
 }
 
@@ -763,6 +768,66 @@ export async function waiveDeduction(deductionId, actor, reason, { now = new Dat
   if (!row) return missingOrResolved(deductionId);
   if (row.rule === 'missed_meeting') await repriceMonth(row.bdaEmail, row.month);
   return { ok: true, deduction: await BdaDeductionModel.findOne({ deductionId }).lean() };
+}
+
+/**
+ * A fine written by a person, not by the verdict job: an admin marking a call absent, or an admin approving a BDA's
+ * own report. It is a normal missed_meeting row, so the monthly tiers, waivers, payroll and Discord all treat it like
+ * any other miss. It obeys the same gates as the automatic fines: fines off writes nothing, shadow writes a shadow
+ * row, and a call before the go-live date or before the BDA was tracked is never fined.
+ *
+ * `refId` is the booking id for a Calendly meeting or the allocation id for a Lead Allocation call; the unique
+ * {bookingId, bdaEmail, rule} index makes a second mark of the same call a no-op that reports `already_fined`.
+ */
+export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientName = null, actor, reason, requestId = null }, opts = {}) {
+  const ctx = makeContext(opts);
+  const email = norm(bdaEmail);
+  if (ctx.mode === 'off') return fail(409, 'fines_off', 'Fines are switched off, so nothing can be recorded');
+  if (!canWrite(ctx)) return fail(409, 'fines_not_started', 'Fines have no go-live date yet, so nothing can be recorded');
+  if (!Number.isFinite(startMs)) return fail(422, 'no_start_time', 'This call has no start time');
+  if (!startAllowed(ctx, startMs)) return fail(409, 'before_live_from', 'This call started before fines went live');
+  const profile = await profileOf(ctx, email);
+  if (!profile || profile.active === false || profile.tracked !== true) {
+    return fail(409, 'not_tracked', 'This person is not a tracked BDA');
+  }
+  if (!isAfterGoLive(profile, startMs)) return fail(409, 'before_tracking', 'This call started before the BDA was tracked');
+
+  const existing = await BdaDeductionModel.findOne({ bookingId: refId, bdaEmail: email, rule: 'missed_meeting' }).select('status').lean();
+  if (existing) return fail(409, 'already_fined', `This call already has a fine (${existing.status})`);
+
+  const now = new Date(ctx.nowMs);
+  const row = await createAndAnnounce(
+    ctx,
+    {
+      bookingId: refId,
+      bdaEmail: email,
+      rule: 'missed_meeting',
+      startMs,
+      status: ctx.mode === 'shadow' ? 'shadow' : 'active',
+      amountInr: DEDUCTION_POLICY.missedMeeting.baseAmountInr,
+      evidence: {
+        scheduledStart: new Date(startMs),
+        windowClosedAt: new Date(startMs),
+        signals: [],
+        bookingStatus: null,
+        callSummary: null,
+        clientName,
+        healthy: true,
+        manualAbsent: {
+          kind,
+          reason,
+          requestId,
+          markedBy: actor?.email || 'admin',
+          markedByName: actor?.name || null,
+          at: now,
+        },
+      },
+    },
+    profile,
+    null
+  );
+  if (!row) return fail(409, 'already_fined', 'This call already has a fine');
+  return { ok: true, deduction: row };
 }
 
 async function missingOrResolved(deductionId) {

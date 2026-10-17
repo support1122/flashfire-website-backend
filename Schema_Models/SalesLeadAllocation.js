@@ -4,7 +4,7 @@ import mongoose from 'mongoose';
 // timezone is the client's IANA zone, kept so the reminder can show the client's wall-clock time.
 // Rows are never deleted: cancel and outcome change `status` and keep the trail.
 
-export const ALLOCATION_STATUSES = Object.freeze(['scheduled', 'completed', 'no_answer', 'cancelled']);
+export const ALLOCATION_STATUSES = Object.freeze(['scheduled', 'completed', 'no_answer', 'cancelled', 'absent']);
 export const REMINDER_STATES = Object.freeze(['pending', 'sending', 'sent', 'failed', 'skipped']);
 
 const SalesLeadAllocationSchema = new mongoose.Schema(
