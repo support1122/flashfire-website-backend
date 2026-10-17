@@ -159,6 +159,11 @@ export function validateAllocationInput(body, now = new Date()) {
   return { value: { clientName, phone, email, timezone, callAt, bdaEmail, notes } };
 }
 
+/** Rule the team asked to show on every allocation reminder. Quoted nearly verbatim from the team's wording. */
+function importantNote(bdaName) {
+  return `**Important:** The client requested a callback at the above mentioned date and time in their local time zone (Time (Client)). ${bdaName}, please make the call via Zoom only before Time (India). Otherwise, it will be marked as absent.`;
+}
+
 /** The heads-up sent about 30 minutes ahead. Same facts as the final reminder, framed as time to prepare. */
 export function buildEarlyReminderMessage(a) {
   const bdaName = a.bdaName || String(a.bdaEmail || '').split('@')[0] || 'BDA';
@@ -174,6 +179,8 @@ export function buildEarlyReminderMessage(a) {
     `**Assigned BDA:** ${bdaName}`,
     ...(a.notes ? [`**Notes:** ${a.notes}`] : []),
     `**Open in CRM:** ${url}`,
+    '',
+    importantNote(bdaName),
     '',
     `${bdaName}, this call is yours. Review the lead now so you are ready. You will get one more reminder 5 minutes before.`,
   ].join('\n');
@@ -192,6 +199,8 @@ export function buildReminderMessage(a) {
     `**Time (India):** ${formatInZone(a.callAt, IST_ZONE)}`,
     `**Assigned BDA:** ${bdaName}`,
     `**Open in CRM:** ${url}`,
+    '',
+    importantNote(bdaName),
     '',
     `${bdaName}, this call is yours. Open the link above and make the call.`,
   ].join('\n');

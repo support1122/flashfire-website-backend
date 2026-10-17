@@ -14,6 +14,8 @@ const EvidenceSchema = new mongoose.Schema(
     clientName: { type: String, default: null },
     // Extras beyond plan 8.1, kept inside the frozen snapshot:
     healthy: { type: Boolean, default: null }, // false when a source was unhealthy (plan 2.7), also on shadow rows
+    // Set when a person wrote the fine: an admin marked a call absent, or approved a BDA's own report.
+    manualAbsent: { type: mongoose.Schema.Types.Mixed, default: null },
     convertedFromFlag: {
       // set when an admin turned a "marked present, never joined" flag into a miss (decision D10)
       type: new mongoose.Schema(

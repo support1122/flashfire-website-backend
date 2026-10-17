@@ -296,3 +296,14 @@ describe('30-minute heads-up', () => {
     assert.deepEqual(d.log.failed, ['in20']);
   });
 });
+
+describe('reminder Important note', () => {
+  const a = { allocationId: 'alloc_x', clientName: 'Leslie', timezone: 'America/Chicago', callAt: new Date('2026-10-16T15:45:00Z'), bdaName: 'Siddhartha', bdaEmail: 's@x.com' };
+  for (const [label, build] of [['final', buildReminderMessage], ['early', buildEarlyReminderMessage]]) {
+    it(`${label} reminder tells the BDA to call via Zoom before India time`, () => {
+      const msg = build(a);
+      assert.match(msg, /\*\*Important:\*\* The client requested a callback at the above mentioned date and time/);
+      assert.match(msg, /Siddhartha, please make the call via Zoom only before Time \(India\)\. Otherwise, it will be marked as absent\./);
+    });
+  }
+});

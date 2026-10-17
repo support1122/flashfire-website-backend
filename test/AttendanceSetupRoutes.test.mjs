@@ -97,15 +97,15 @@ describe('seed-profiles', () => {
     const first = await call('POST', `${BASE}/seed-profiles`, { body: { apply: true, confirmDatabase: TEST_DB_NAME } });
     assert.equal(first.status, 200);
     assert.equal(first.body.mode, 'applied');
-    assert.deepEqual(first.body.results.map((r) => r.action), ['created', 'created']);
+    assert.deepEqual(first.body.results.map((r) => r.action), SEED_EMAILS.map(() => 'created'));
     const profiles = await BdaProfileModel.find({ email: { $in: SEED_EMAILS } }).lean();
-    assert.equal(profiles.length, 2);
+    assert.equal(profiles.length, SEED_EMAILS.length);
     assert.ok(profiles.every((p) => p.tracked && p.active));
     assert.ok(profiles.find((p) => p.email === 'siddhartha@flashfirehq.com').aliases.includes('siddhartha b'));
 
     const second = await call('POST', `${BASE}/seed-profiles`, { body: { apply: true, confirmDatabase: TEST_DB_NAME } });
-    assert.deepEqual(second.body.results.map((r) => r.action), ['unchanged', 'unchanged']);
-    assert.equal(await seededCount(), 2, 'no duplicates');
+    assert.deepEqual(second.body.results.map((r) => r.action), SEED_EMAILS.map(() => 'unchanged'));
+    assert.equal(await seededCount(), SEED_EMAILS.length, 'no duplicates');
     assert.equal(await AttendanceSetupRunModel.countDocuments({ byEmail: 'admin@setup.test', action: 'seed-profiles' }), 2, 'each write is logged with who ran it');
   });
 
@@ -227,13 +227,13 @@ describe('GET /script/seed/bda (the one-click shortcut)', () => {
     return { status: res.status, body: await res.json() };
   };
 
-  it('works with no token: seeds both BDAs and says alerts are active', async () => {
+  it('works with no token: seeds every BDA and says alerts are active', async () => {
     const r = await get('/script/seed/bda');
     assert.equal(r.status, 200);
     assert.equal(r.body.success, true);
     assert.match(r.body.message, /Absent alerts are now active/);
-    assert.deepEqual(r.body.profiles.map((p) => [p.name, p.action]), [['Siddhartha', 'created'], ['Kalpataru', 'created']]);
-    assert.equal(await seededCount(), 2);
+    assert.deepEqual(r.body.profiles.map((p) => [p.name, p.action]), SEED_PROFILES.map((p) => [p.displayName, 'created']));
+    assert.equal(await seededCount(), SEED_EMAILS.length);
     const rows = await BdaProfileModel.find({ email: { $in: SEED_EMAILS } }).lean();
     assert.ok(rows.every((p) => p.tracked && p.active));
   });
@@ -241,7 +241,7 @@ describe('GET /script/seed/bda (the one-click shortcut)', () => {
   it('the dba spelling is the same route', async () => {
     const r = await get('/script/seed/dba');
     assert.equal(r.status, 200);
-    assert.equal(await seededCount(), 2);
+    assert.equal(await seededCount(), SEED_EMAILS.length);
   });
 
   it('a second call changes nothing, says so, and does not log a run', async () => {
@@ -250,9 +250,9 @@ describe('GET /script/seed/bda (the one-click shortcut)', () => {
     const again = await get('/script/seed/bda');
     assert.equal(again.status, 200);
     assert.match(again.body.message, /Already set up/);
-    assert.deepEqual(again.body.profiles.map((p) => p.action), ['unchanged', 'unchanged']);
+    assert.deepEqual(again.body.profiles.map((p) => p.action), SEED_EMAILS.map(() => 'unchanged'));
     assert.equal(await AttendanceSetupRunModel.countDocuments({ byName: 'public seed route' }) >= 1, true);
-    assert.equal(await seededCount(), 2, 'no duplicates');
+    assert.equal(await seededCount(), SEED_EMAILS.length, 'no duplicates');
   });
 
   it('never overwrites what an admin changed', async () => {

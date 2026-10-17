@@ -157,10 +157,13 @@ describe('GET /api/crm/deductions', () => {
 
     const first = mine.body.rows.find((r) => r.rule === 'missed_meeting');
     assert.deepEqual(Object.keys(first).sort(), [
-      'amountInr', 'bdaEmail', 'bdaName', 'bookingId', 'clientName', 'createdAt', 'deductionId', 'evidence', 'month',
-      'reviewReason', 'reviewedAt', 'reviewedBy', 'reviewedByName', 'rule', 'status', 'tierIndex', 'voidReason',
-      'voidedAt', 'waivedAt', 'waivedBy', 'waivedByName', 'waiverReason',
+      'amountInr', 'bdaEmail', 'bdaName', 'bookingId', 'clientName', 'createdAt', 'deductionId', 'evidence', 'manualAbsent',
+      'month', 'origin', 'reviewReason', 'reviewedAt', 'reviewedBy', 'reviewedByName', 'rule', 'source', 'status', 'tierIndex',
+      'voidReason', 'voidedAt', 'waivedAt', 'waivedBy', 'waivedByName', 'waiverReason',
     ]);
+    assert.equal(first.origin, 'auto', 'an engine fine is automatic');
+    assert.equal(first.source, 'booking');
+    assert.equal(first.manualAbsent, null);
     assert.equal(first.clientName.startsWith('Client'), true);
     assert.equal(typeof first.evidence.scheduledStart, 'string');
     assert.deepEqual(first.evidence.callSummary, {});
