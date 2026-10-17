@@ -21,6 +21,7 @@ const iso = (d) => (d ? new Date(d).toISOString() : null);
 
 const LIST_CAP = 300;
 const CANDIDATE_CAP = 60;
+const BATCH_MAX = 50;
 
 async function requestIsAdmin(req) {
   if (req.crmAdmin) return true;
@@ -61,6 +62,16 @@ async function tellAdmins(text) {
   }
 }
 
+/** One calendar day in IST as { start, end } (end is the next midnight), or null when it is not a real date. */
+function istDay(text) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const start = new Date(`${text}T00:00:00+05:30`);
+  if (Number.isNaN(start.getTime())) return null;
+  const back = new Date(start.getTime() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+  if (back !== text) return null; // 2026-02-31 style dates roll over; reject them
+  return { start, end: new Date(start.getTime() + 24 * 3600 * 1000) };
+}
+
 const istTime = (d) =>
   new Date(d).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true }) + ' IST';
 
@@ -83,11 +94,21 @@ export function registerAbsenceRoutes(app) {
       const q = String(req.query.q ?? '').trim().slice(0, 80);
       const nowMs = Date.now();
       const now = new Date(nowMs);
-      const since = new Date(nowMs - LOOKBACK_MS);
+      let since = new Date(nowMs - LOOKBACK_MS);
+      let until = now;
+      // Optional day range (YYYY-MM-DD, IST), always inside the 30 day window and never in the future.
+      for (const [name, edge] of [['from', 'start'], ['to', 'end']]) {
+        const raw = String(req.query[name] ?? '').trim();
+        if (!raw) continue;
+        const day = istDay(raw);
+        if (!day) return fail(res, 422, 'invalid_date', `${name} must look like 2026-10-17`);
+        if (edge === 'start') since = new Date(Math.max(since.getTime(), day.start.getTime()));
+        else until = new Date(Math.min(nowMs, day.end.getTime()));
+      }
 
       let calls = [];
       if (kind === 'allocation') {
-        const filter = { status: 'scheduled', callAt: { $lt: now, $gte: since } };
+        const filter = { status: 'scheduled', callAt: { $lt: until, $gte: since } };
         if (bdaEmail) filter.bdaEmail = bdaEmail;
         if (q) {
           const rx = new RegExp(escapeRegex(q), 'i');
@@ -96,7 +117,7 @@ export function registerAbsenceRoutes(app) {
         const docs = await SalesLeadAllocationModel.find(filter).sort({ callAt: -1 }).limit(CANDIDATE_CAP).lean();
         calls = docs.map((a) => ({ kind, refId: a.allocationId, bdaEmail: a.bdaEmail, bdaName: a.bdaName, clientName: a.clientName, callStart: a.callAt, detail: [a.phone, a.email].filter(Boolean).join(' · ') }));
       } else {
-        const filter = { scheduledEventStartTime: { $lt: now, $gte: since }, bookingStatus: { $nin: ['canceled', 'rescheduled', 'not-scheduled'] } };
+        const filter = { scheduledEventStartTime: { $lt: until, $gte: since }, bookingStatus: { $nin: ['canceled', 'rescheduled', 'not-scheduled'] } };
         if (bdaEmail) {
           filter.$or = [{ 'attendanceAssignee.email': bdaEmail }, { 'calendlyHost.email': bdaEmail }, { 'claimedBy.email': bdaEmail }];
         }
@@ -174,45 +195,51 @@ export function registerAbsenceRoutes(app) {
     }
   });
 
-  app.post(BASE, requireCrmUserOrAdmin, async (req, res) => {
+  const out = (status, json, notice = null) => ({ status, json, notice });
+  const refuse = (status, code, message) => out(status, { success: false, error: { code, message } });
+
+  /**
+   * Mark one call absent (admin: the fine is written now) or report it (BDA: a pending report). Returns
+   * { status, json, notice } and never throws, so the single and the batch route share one set of rules.
+   * `notice` is the admin-channel text for a BDA report; the caller posts it, so a batch can post one summary.
+   */
+  async function processOne(req, admin, actor, input) {
     try {
-      const parsed = validateReportInput(req.body);
-      if (parsed.error) return fail(res, parsed.error.status, parsed.error.code, parsed.error.message);
+      const parsed = validateReportInput(input);
+      if (parsed.error) return refuse(parsed.error.status, parsed.error.code, parsed.error.message);
       const { kind, refId, reason } = parsed.value;
 
-      const admin = await requestIsAdmin(req);
-      const actor = actorOf(req);
       const call = await loadCall(kind, refId);
-      if (!call) return fail(res, 404, 'call_not_found', 'No such call');
-      if (!call.bdaEmail) return fail(res, 409, 'no_bda', 'This call has no assigned BDA');
+      if (!call) return refuse(404, 'call_not_found', 'No such call');
+      if (!call.bdaEmail) return refuse(409, 'no_bda', 'This call has no assigned BDA');
       const eligible = checkEligible(call);
-      if (!eligible.ok) return fail(res, eligible.status, eligible.code, eligible.message);
+      if (!eligible.ok) return refuse(eligible.status, eligible.code, eligible.message);
 
       const profile = await getBdaProfile(call.bdaEmail);
       const bdaName = profile?.displayName || call.bdaEmail.split('@')[0];
       if (!profile || profile.active === false || profile.tracked !== true) {
-        return fail(res, 409, 'not_tracked', `${bdaName} is not a tracked BDA`);
+        return refuse(409, 'not_tracked', `${bdaName} is not a tracked BDA`);
       }
 
       const open = await BdaAbsenceReportModel.findOne({ kind, refId, bdaEmail: call.bdaEmail, status: { $in: ['pending', 'approved'] } }).lean();
 
       if (!admin) {
-        if (!actor.email || actor.email !== call.bdaEmail) return fail(res, 403, 'forbidden', 'You can only report your own calls');
-        if (getDeductionsMode() === 'off') return fail(res, 409, 'fines_off', 'Fines are switched off right now');
-        if (open) return fail(res, 409, 'already_reported', open.status === 'pending' ? 'This call already has a pending report' : 'This call was already marked absent');
+        if (!actor.email || actor.email !== call.bdaEmail) return refuse(403, 'forbidden', 'You can only report your own calls');
+        if (getDeductionsMode() === 'off') return refuse(409, 'fines_off', 'Fines are switched off right now');
+        if (open) return refuse(409, 'already_reported', open.status === 'pending' ? 'This call already has a pending report' : 'This call was already marked absent');
         const created = await BdaAbsenceReportModel.create({
           kind, refId, bdaEmail: call.bdaEmail, bdaName, clientName: call.clientName, callStart: new Date(call.startMs), reason,
           raisedBy: 'bda', raisedByEmail: actor.email, raisedByName: actor.name || bdaName, status: 'pending',
         });
-        await tellAdmins(`📝 **Absence report to review**\n${bdaName} reports a missed ${kind === 'allocation' ? 'allocated call' : 'meeting'} with ${call.clientName || 'a client'} (${istTime(call.startMs)}).\nReason: ${reason}\nOpen the Deductions tab in the CRM to approve or reject.`);
-        return res.status(201).json({ success: true, report: toRow(created.toObject()) });
+        const line = `${kind === 'allocation' ? 'allocated call' : 'meeting'} with ${call.clientName || 'a client'} (${istTime(call.startMs)})`;
+        return out(201, { success: true, report: toRow(created.toObject()) }, { bdaName, line, reason });
       }
 
       // Admin: mark absent now. A pending report from the BDA for the same call is settled by this action.
-      if (open?.status === 'approved') return fail(res, 409, 'already_reported', 'This call was already marked absent');
+      if (open?.status === 'approved') return refuse(409, 'already_reported', 'This call was already marked absent');
       const reportId = open?.reportId || `abs_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
       const result = await applyAbsence(call, { actor, reason, requestId: reportId });
-      if (!result.ok) return fail(res, result.status, result.code, result.message);
+      if (!result.ok) return refuse(result.status, result.code, result.message);
       const decided = { status: 'approved', decidedBy: actor.email || 'admin', decidedByName: actor.name || null, decidedAt: new Date(), decisionNote: reason, deductionId: result.deduction.deductionId };
       let report;
       if (open) {
@@ -223,12 +250,62 @@ export function registerAbsenceRoutes(app) {
           raisedBy: 'admin', raisedByEmail: actor.email, raisedByName: actor.name, ...decided,
         })).toObject();
       }
-      return res.status(201).json({ success: true, report: report ? toRow(report) : null, deductionId: result.deduction.deductionId });
+      return out(201, { success: true, report: report ? toRow(report) : null, deductionId: result.deduction.deductionId });
     } catch (err) {
-      if (err?.code === 11000) return fail(res, 409, 'already_reported', 'This call already has a report');
+      if (err?.code === 11000) return refuse(409, 'already_reported', 'This call already has a report');
       console.error('[absenceRoutes] create failed:', err?.message);
-      return fail(res, 500, 'internal_error', 'Could not record the absence');
+      return refuse(500, 'internal_error', 'Could not record the absence');
     }
+  }
+
+  app.post(BASE, requireCrmUserOrAdmin, async (req, res) => {
+    const done = await processOne(req, await requestIsAdmin(req), actorOf(req), req.body);
+    if (done.notice) {
+      await tellAdmins(`📝 **Absence report to review**\n${done.notice.bdaName} reports a missed ${done.notice.line}.\nReason: ${done.notice.reason}\nOpen the Deductions tab in the CRM to approve or reject.`);
+    }
+    return res.status(done.status).json(done.json);
+  });
+
+  /**
+   * Several calls, one reason. Each call is judged on its own (one already fined does not block the rest), oldest
+   * first so the monthly tiers fall in the order the calls happened. Answers 200 with a result per call.
+   */
+  app.post(`${BASE}/batch`, requireCrmUserOrAdmin, async (req, res) => {
+    const items = Array.isArray(req.body?.items) ? req.body.items : null;
+    if (!items || items.length === 0) return fail(res, 422, 'no_items', 'Choose at least one call');
+    if (items.length > BATCH_MAX) return fail(res, 422, 'too_many_items', `Choose at most ${BATCH_MAX} calls at a time`);
+    const checked = cleanReason(req.body?.reason);
+    if (checked.error) return fail(res, checked.error.status, checked.error.code, checked.error.message);
+
+    const seen = new Set();
+    const unique = [];
+    for (const it of items) {
+      const key = `${it?.kind}|${it?.refId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      unique.push({ kind: it?.kind, refId: it?.refId });
+    }
+    // Oldest call first. Calls that cannot be loaded sort last and are refused one by one below.
+    const starts = await Promise.all(unique.map(async (it) => ((await loadCall(it?.kind, String(it?.refId ?? '')).catch(() => null))?.startMs ?? Infinity)));
+    const order = unique.map((it, i) => ({ it, at: starts[i] })).sort((a, b) => a.at - b.at).map((x) => x.it);
+
+    const admin = await requestIsAdmin(req);
+    const actor = actorOf(req);
+    const results = [];
+    const notices = [];
+    for (const it of order) {
+      const done = await processOne(req, admin, actor, { ...it, reason: checked.reason });
+      if (done.notice) notices.push(done.notice);
+      results.push(done.json.success
+        ? { kind: it.kind, refId: it.refId, ok: true, report: done.json.report }
+        : { kind: it.kind, refId: it.refId, ok: false, error: done.json.error });
+    }
+    if (notices.length) {
+      const lines = notices.map((n) => `• ${n.bdaName}: ${n.line}`).join('\n');
+      await tellAdmins(`📝 **${notices.length} absence ${notices.length === 1 ? 'report' : 'reports'} to review**\n${lines}\nReason: ${checked.reason}\nOpen the Deductions tab in the CRM to approve or reject.`);
+    }
+    const succeeded = results.filter((r) => r.ok).length;
+    return res.status(200).json({ success: true, results, succeeded, failed: results.length - succeeded });
   });
 
   app.post(`${BASE}/:id/approve`, requireCrmUserOrAdmin, async (req, res) => {

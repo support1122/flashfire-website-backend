@@ -254,3 +254,81 @@ describe('lists and candidates', () => {
     assert.equal((await call('GET', `${BASE}/candidates?kind=nope`)).status, 422);
   });
 });
+
+describe('several calls at once', () => {
+  const BATCH = `${BASE}/batch`;
+
+  it('an admin marks many calls absent: one fine each, tiers in call order', async () => {
+    const newer = await makeAllocation({ callAt: new Date(Date.now() - 2 * HOUR) });
+    const older = await makeAllocation({ callAt: new Date(Date.now() - 5 * HOUR) });
+    const r = await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: newer.allocationId }, { kind: 'allocation', refId: older.allocationId }], reason: 'Never called the clients' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.succeeded, 2);
+    assert.equal(r.body.failed, 0);
+    assert.deepEqual(r.body.results.map((x) => x.refId), [older.allocationId, newer.allocationId], 'oldest first');
+    const fines = await BdaDeductionModel.find({ bdaEmail: BDA }).lean();
+    assert.equal(fines.length, 2);
+    for (const a of [newer, older]) assert.equal((await SalesLeadAllocationModel.findOne({ allocationId: a.allocationId }).lean()).status, 'absent');
+  });
+
+  it('one bad call does not block the others, and says why', async () => {
+    const good = await makeAllocation();
+    const done = await makeAllocation();
+    await call('POST', BASE, { body: { kind: 'allocation', refId: done.allocationId, reason: 'Already handled earlier' } });
+    const future = await makeAllocation({ callAt: new Date(Date.now() + HOUR) });
+    const r = await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: done.allocationId }, { kind: 'allocation', refId: future.allocationId }, { kind: 'allocation', refId: good.allocationId }, { kind: 'allocation', refId: 'nope' }], reason: 'Missed all of these' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.succeeded, 1);
+    assert.equal(r.body.failed, 3);
+    const byRef = Object.fromEntries(r.body.results.map((x) => [x.refId, x]));
+    assert.equal(byRef[good.allocationId].ok, true);
+    assert.equal(byRef[done.allocationId].error.code, 'not_scheduled');
+    assert.equal(byRef[future.allocationId].error.code, 'call_not_over');
+    assert.equal(byRef.nope.error.code, 'call_not_found');
+  });
+
+  it('a BDA files pending reports for their own calls only, and no fine exists yet', async () => {
+    const mine1 = await makeAllocation();
+    const mine2 = await makeAllocation();
+    const theirs = await makeAllocation({ bdaEmail: OTHER, bdaName: 'Other Bda' });
+    const r = await call('POST', BATCH, { token: bdaToken(), body: { items: [mine1, mine2, theirs].map((a) => ({ kind: 'allocation', refId: a.allocationId })), reason: 'My phone was off' } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.succeeded, 2);
+    assert.equal(r.body.results.find((x) => x.refId === theirs.allocationId).error.code, 'forbidden');
+    assert.equal(await BdaAbsenceReportModel.countDocuments({ bdaEmail: BDA, status: 'pending' }), 2);
+    assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA }), 0);
+  });
+
+  it('validates the request and ignores duplicates', async () => {
+    const a = await makeAllocation();
+    assert.equal((await call('POST', BATCH, { body: { items: [], reason: 'Some reason' } })).body.error.code, 'no_items');
+    assert.equal((await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: a.allocationId }] } })).body.error.code, 'reason_required');
+    const many = Array.from({ length: 51 }, (_, i) => ({ kind: 'allocation', refId: `x${i}` }));
+    assert.equal((await call('POST', BATCH, { body: { items: many, reason: 'Some reason' } })).body.error.code, 'too_many_items');
+    const dup = await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: a.allocationId }, { kind: 'allocation', refId: a.allocationId }], reason: 'Some reason' } });
+    assert.equal(dup.body.results.length, 1);
+    assert.equal(dup.body.succeeded, 1);
+    assert.equal((await call('POST', BATCH, { token: null, body: {} })).status, 401);
+  });
+});
+
+describe('candidates date range', () => {
+  const istDay = (ms) => new Date(ms + 5.5 * HOUR).toISOString().slice(0, 10);
+
+  it('narrows by from and to (IST days), stays inside the 30 day window and rejects bad dates', async () => {
+    const recent = await makeAllocation({ callAt: new Date(Date.now() - 2 * HOUR) });
+    const threeDays = await makeAllocation({ callAt: new Date(Date.now() - 72 * HOUR) });
+    const twentyDays = await makeAllocation({ callAt: new Date(Date.now() - 20 * 24 * HOUR) });
+    const refs = async (qs) => (await call('GET', `${BASE}/candidates?kind=allocation${qs}`)).body.candidates.map((c) => c.refId).sort();
+
+    const today = istDay(Date.now());
+    assert.deepEqual(await refs(''), [recent.allocationId, threeDays.allocationId, twentyDays.allocationId].sort());
+    assert.deepEqual(await refs(`&from=${istDay(Date.now() - 4 * 24 * HOUR)}`), [recent.allocationId, threeDays.allocationId].sort());
+    assert.deepEqual(await refs(`&from=${istDay(Date.now() - 25 * 24 * HOUR)}&to=${istDay(Date.now() - 10 * 24 * HOUR)}`), [twentyDays.allocationId]);
+    assert.deepEqual(await refs(`&to=${istDay(Date.now() - 10 * 24 * HOUR)}`), [twentyDays.allocationId]);
+    assert.deepEqual(await refs(`&from=2020-01-01&to=2020-01-31`), [], 'older than 30 days stays out');
+    assert.deepEqual(await refs(`&from=${today}&to=${today}`).then((r) => r.includes(threeDays.allocationId)), false);
+    assert.equal((await call('GET', `${BASE}/candidates?kind=allocation&from=soon`)).body.error.code, 'invalid_date');
+    assert.equal((await call('GET', `${BASE}/candidates?kind=allocation&to=2026-02-31`)).body.error.code, 'invalid_date');
+  });
+});
