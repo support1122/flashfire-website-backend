@@ -9,6 +9,7 @@ import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
 import { escapeRegex } from '../Utils/SalesAllocations.js';
 import { LOOKBACK_MS, applyAbsence, checkEligible, cleanReason, loadCall, validateReportInput } from '../Utils/AbsenceReports.js';
+import { getAllocationCallChecksSafe } from '../Utils/AllocationCallCheck.js';
 import { actorOf, requireCrmUserOrAdmin } from './deductionRoutes.js';
 
 // "Mark absent" API. Admins mark a call absent directly (the fine is written at once). A BDA can only report a miss
@@ -115,7 +116,8 @@ export function registerAbsenceRoutes(app) {
           filter.$or = [{ clientName: rx }, { phone: rx }, { email: rx }];
         }
         const docs = await SalesLeadAllocationModel.find(filter).sort({ callAt: -1 }).limit(CANDIDATE_CAP).lean();
-        calls = docs.map((a) => ({ kind, refId: a.allocationId, bdaEmail: a.bdaEmail, bdaName: a.bdaName, clientName: a.clientName, callStart: a.callAt, detail: [a.phone, a.email].filter(Boolean).join(' · ') }));
+        const checks = await getAllocationCallChecksSafe(docs, undefined, nowMs);
+        calls = docs.map((a) => ({ kind, refId: a.allocationId, bdaEmail: a.bdaEmail, bdaName: a.bdaName, clientName: a.clientName, callStart: a.callAt, detail: [a.phone, a.email].filter(Boolean).join(' · '), callCheck: checks.get(a.allocationId) ?? null }));
       } else {
         const filter = { scheduledEventStartTime: { $lt: until, $gte: since }, bookingStatus: { $nin: ['canceled', 'rescheduled', 'not-scheduled'] } };
         if (bdaEmail) {
@@ -227,6 +229,9 @@ export function registerAbsenceRoutes(app) {
         if (!actor.email || actor.email !== call.bdaEmail) return refuse(403, 'forbidden', 'You can only report your own calls');
         if (getDeductionsMode() === 'off') return refuse(409, 'fines_off', 'Fines are switched off right now');
         if (open) return refuse(409, 'already_reported', open.status === 'pending' ? 'This call already has a pending report' : 'This call was already marked absent');
+        // A fine in any state (even waived) means an admin could never approve this report, so do not queue it.
+        const fined = await BdaDeductionModel.findOne({ bookingId: refId, bdaEmail: call.bdaEmail, rule: 'missed_meeting' }).select('status').lean();
+        if (fined) return refuse(409, 'already_fined', `This call already has a fine (${fined.status})`);
         const created = await BdaAbsenceReportModel.create({
           kind, refId, bdaEmail: call.bdaEmail, bdaName, clientName: call.clientName, callStart: new Date(call.startMs), reason,
           raisedBy: 'bda', raisedByEmail: actor.email, raisedByName: actor.name || bdaName, status: 'pending',
@@ -286,8 +291,9 @@ export function registerAbsenceRoutes(app) {
       unique.push({ kind: it?.kind, refId: it?.refId });
     }
     // Oldest call first. Calls that cannot be loaded sort last and are refused one by one below.
+    // Compare, never subtract: Infinity - Infinity is NaN.
     const starts = await Promise.all(unique.map(async (it) => ((await loadCall(it?.kind, String(it?.refId ?? '')).catch(() => null))?.startMs ?? Infinity)));
-    const order = unique.map((it, i) => ({ it, at: starts[i] })).sort((a, b) => a.at - b.at).map((x) => x.it);
+    const order = unique.map((it, i) => ({ it, at: starts[i] })).sort((a, b) => (a.at === b.at ? 0 : a.at < b.at ? -1 : 1)).map((x) => x.it);
 
     const admin = await requestIsAdmin(req);
     const actor = actorOf(req);

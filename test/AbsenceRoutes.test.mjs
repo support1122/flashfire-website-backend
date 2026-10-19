@@ -17,6 +17,8 @@ import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { BdaAbsenceReportModel } from '../Schema_Models/BdaAbsenceReport.js';
 import { invalidateRegistryCache } from '../Utils/BdaRegistry.js';
 import { registerAbsenceRoutes } from '../Routes/absenceRoutes.js';
+import { registerSalesAllocationRoutes } from '../Routes/salesAllocationRoutes.js';
+import { CallLogModel } from '../Schema_Models/CallLog.js';
 
 const BDA = 'absent-bda@test.local';
 const OTHER = 'absent-other@test.local';
@@ -60,6 +62,7 @@ const wipe = async () => {
   await SalesLeadAllocationModel.deleteMany({ allocationId: /^alloc_abs_/ });
   await BdaDeductionModel.deleteMany({ bdaEmail: { $in: [BDA, OTHER] } });
   await BdaAbsenceReportModel.deleteMany({ bdaEmail: { $in: [BDA, OTHER] } });
+  await CallLogModel.deleteMany({ callId: /^abs_call_/ });
   invalidateRegistryCache();
 };
 
@@ -69,6 +72,7 @@ before(async () => {
   const app = express();
   app.use(express.json());
   registerAbsenceRoutes(app);
+  registerSalesAllocationRoutes(app);
   await new Promise((resolve) => (server = app.listen(0, resolve)));
   baseUrl = `http://127.0.0.1:${server.address().port}`;
 });
@@ -150,6 +154,15 @@ describe('BDA reports a missed call', () => {
     const future = await makeAllocation({ callAt: new Date(Date.now() + HOUR) });
     const early = await call('POST', BASE, { token: bdaToken(), body: { kind: 'allocation', refId: future.allocationId, reason: 'too early to say' } });
     assert.equal(early.body.error.code, 'call_not_over');
+  });
+
+  it('refuses a report for a call that already carries a fine, even a waived one', async () => {
+    const a = await makeAllocation();
+    await BdaDeductionModel.create({ bookingId: a.allocationId, bdaEmail: BDA, rule: 'missed_meeting', month: '2026-10', amountInr: 500, status: 'waived' });
+    const r = await call('POST', BASE, { token: bdaToken(), body: { kind: 'allocation', refId: a.allocationId, reason: 'I missed this one' } });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error.code, 'already_fined');
+    assert.equal(await BdaAbsenceReportModel.countDocuments({ bdaEmail: BDA }), 0, 'no report is queued');
   });
 
   it('a BDA can withdraw their own pending report, not someone else\'s', async () => {
@@ -330,5 +343,34 @@ describe('candidates date range', () => {
     assert.deepEqual(await refs(`&from=${today}&to=${today}`).then((r) => r.includes(threeDays.allocationId)), false);
     assert.equal((await call('GET', `${BASE}/candidates?kind=allocation&from=soon`)).body.error.code, 'invalid_date');
     assert.equal((await call('GET', `${BASE}/candidates?kind=allocation&to=2026-02-31`)).body.error.code, 'invalid_date');
+  });
+});
+
+describe('did the BDA call the client', () => {
+  const PHONE = '+1 415 555 0188';
+  const KEY = '4155550188';
+
+  it('the allocation list and the absence picker show what the Zoom call log says', async () => {
+    const called = await makeAllocation({ phone: PHONE, clientName: 'Called Client', callAt: new Date(Date.now() - 3 * HOUR), createdAt: new Date(Date.now() - 10 * HOUR) });
+    const silent = await makeAllocation({ phone: '+1 415 555 0199', clientName: 'Silent Client', callAt: new Date(Date.now() - 3 * HOUR) });
+    await CallLogModel.create({
+      callId: `abs_call_${Date.now()}`, direction: 'outbound', salesEmail: BDA, leadNumber: PHONE, leadNumberNormalized: KEY,
+      startedAt: new Date(Date.now() - 3 * HOUR - 4 * 60000), durationSec: 75, callResult: 'connected',
+    });
+
+    const list = await call('GET', '/api/crm/sales-allocations?scope=past');
+    assert.equal(list.status, 200);
+    const byId = Object.fromEntries(list.body.allocations.map((a) => [a.allocationId, a]));
+    assert.equal(byId[called.allocationId].callCheck.verdict, 'called_in_time');
+    assert.equal(byId[called.allocationId].callCheck.firstCallOffsetMin, -4);
+    assert.equal(byId[silent.allocationId].callCheck.verdict, 'not_called');
+
+    const mine = await call('GET', '/api/crm/sales-allocations?scope=past', { token: bdaToken() });
+    assert.equal(mine.body.allocations.find((a) => a.allocationId === silent.allocationId).callCheck.verdict, 'not_called');
+
+    const picker = await call('GET', `${BASE}/candidates?kind=allocation`);
+    const cand = Object.fromEntries(picker.body.candidates.map((c) => [c.refId, c]));
+    assert.equal(cand[called.allocationId].callCheck.verdict, 'called_in_time');
+    assert.equal(cand[silent.allocationId].callCheck.verdict, 'not_called');
   });
 });

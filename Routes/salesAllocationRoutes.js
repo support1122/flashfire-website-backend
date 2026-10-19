@@ -3,6 +3,7 @@ import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { getBdaProfile, getTrackedBdas } from '../Utils/BdaRegistry.js';
 import { actorOf, requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
+import { getAllocationCallChecksSafe } from '../Utils/AllocationCallCheck.js';
 import { detectTimezoneFromPhone } from '../Utils/PhoneTimezoneDetector.js';
 import {
   crmLinkFor,
@@ -119,7 +120,10 @@ export function registerSalesAllocationRoutes(app) {
         .sort({ callAt: scope === 'upcoming' ? 1 : -1 })
         .limit(LIST_CAP)
         .lean();
-      return res.status(200).json({ success: true, isAdmin: admin, allocations: docs.map(toRow) });
+      // What the Zoom call log says about each call. A failure only blanks callCheck, never the list.
+      const checks = await getAllocationCallChecksSafe(docs, undefined, now);
+      const allocations = docs.map((a) => ({ ...toRow(a), callCheck: checks.get(a.allocationId) ?? null }));
+      return res.status(200).json({ success: true, isAdmin: admin, allocations });
     } catch (err) {
       console.error('[salesAllocationRoutes] list failed:', err?.message);
       return fail(res, 500, 'internal_error', 'Could not load allocations');
