@@ -156,6 +156,15 @@ describe('BDA reports a missed call', () => {
     assert.equal(early.body.error.code, 'call_not_over');
   });
 
+  it('refuses a report for a call that already carries a fine, even a waived one', async () => {
+    const a = await makeAllocation();
+    await BdaDeductionModel.create({ bookingId: a.allocationId, bdaEmail: BDA, rule: 'missed_meeting', month: '2026-10', amountInr: 500, status: 'waived' });
+    const r = await call('POST', BASE, { token: bdaToken(), body: { kind: 'allocation', refId: a.allocationId, reason: 'I missed this one' } });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.error.code, 'already_fined');
+    assert.equal(await BdaAbsenceReportModel.countDocuments({ bdaEmail: BDA }), 0, 'no report is queued');
+  });
+
   it('a BDA can withdraw their own pending report, not someone else\'s', async () => {
     const a = await makeAllocation();
     const mk = await call('POST', BASE, { token: bdaToken(), body: { kind: 'allocation', refId: a.allocationId, reason: 'My phone died' } });
