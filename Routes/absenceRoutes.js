@@ -9,6 +9,7 @@ import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
 import { escapeRegex } from '../Utils/SalesAllocations.js';
 import { LOOKBACK_MS, applyAbsence, checkEligible, cleanReason, loadCall, validateReportInput } from '../Utils/AbsenceReports.js';
+import { getAllocationCallChecksSafe } from '../Utils/AllocationCallCheck.js';
 import { actorOf, requireCrmUserOrAdmin } from './deductionRoutes.js';
 
 // "Mark absent" API. Admins mark a call absent directly (the fine is written at once). A BDA can only report a miss
@@ -115,7 +116,8 @@ export function registerAbsenceRoutes(app) {
           filter.$or = [{ clientName: rx }, { phone: rx }, { email: rx }];
         }
         const docs = await SalesLeadAllocationModel.find(filter).sort({ callAt: -1 }).limit(CANDIDATE_CAP).lean();
-        calls = docs.map((a) => ({ kind, refId: a.allocationId, bdaEmail: a.bdaEmail, bdaName: a.bdaName, clientName: a.clientName, callStart: a.callAt, detail: [a.phone, a.email].filter(Boolean).join(' · ') }));
+        const checks = await getAllocationCallChecksSafe(docs, undefined, nowMs);
+        calls = docs.map((a) => ({ kind, refId: a.allocationId, bdaEmail: a.bdaEmail, bdaName: a.bdaName, clientName: a.clientName, callStart: a.callAt, detail: [a.phone, a.email].filter(Boolean).join(' · '), callCheck: checks.get(a.allocationId) ?? null }));
       } else {
         const filter = { scheduledEventStartTime: { $lt: until, $gte: since }, bookingStatus: { $nin: ['canceled', 'rescheduled', 'not-scheduled'] } };
         if (bdaEmail) {
