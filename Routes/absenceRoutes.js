@@ -3,7 +3,7 @@ import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { SalesLeadAllocationModel } from '../Schema_Models/SalesLeadAllocation.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { getAllBdaProfiles, getBdaProfile, getTrackedBdas } from '../Utils/BdaRegistry.js';
-import { getAssignedBdaEmail } from '../Utils/BdaAssignment.js';
+import { getAssignedBdaEmail, istDate } from '../Utils/BdaAssignment.js';
 import { getDeductionsMode, monthBoundsIST } from '../Utils/deductionPolicy.js';
 import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
@@ -149,8 +149,10 @@ export function registerAbsenceRoutes(app) {
       ]);
       const taken = new Set([...fined.map((d) => `${d.bookingId}|${d.bdaEmail}`), ...reported.map((r) => `${r.refId}|${r.bdaEmail}`)]);
       const names = new Map(profiles.map((p) => [p.email, p.displayName]));
+      const leaveOf = new Map(profiles.map((p) => [p.email, new Set(p.leaveDays || [])]));
       const out = calls
         .filter((c) => !taken.has(`${c.refId}|${c.bdaEmail}`))
+        .filter((c) => !leaveOf.get(c.bdaEmail)?.has(istDate(new Date(c.callStart).getTime()))) // a leave day can never be marked
         .map((c) => ({ ...c, bdaName: c.bdaName || names.get(c.bdaEmail) || c.bdaEmail.split('@')[0], callStart: iso(c.callStart) }));
       return res.status(200).json({ success: true, kind, candidates: out });
     } catch (err) {
@@ -221,6 +223,10 @@ export function registerAbsenceRoutes(app) {
       const bdaName = profile?.displayName || call.bdaEmail.split('@')[0];
       if (!profile || profile.active === false || profile.tracked !== true) {
         return refuse(409, 'not_tracked', `${bdaName} is not a tracked BDA`);
+      }
+
+      if ((profile.leaveDays || []).includes(istDate(call.startMs))) {
+        return refuse(409, 'on_leave', `${bdaName} is on approved leave on ${istDate(call.startMs)}, so this call cannot be marked absent`);
       }
 
       const open = await BdaAbsenceReportModel.findOne({ kind, refId, bdaEmail: call.bdaEmail, status: { $in: ['pending', 'approved'] } }).lean();
