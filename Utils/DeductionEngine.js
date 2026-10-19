@@ -8,7 +8,7 @@ import { BdaDeductionDigestModel } from '../Schema_Models/BdaDeductionDigest.js'
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { attendanceEvents, EVENTS } from './attendanceEvents.js';
-import { countableReason, getAssignedBdaEmail, isAfterGoLive, statusAtStart } from './BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail, isAfterGoLive, istDate, statusAtStart } from './BdaAssignment.js';
 import { getBdaProfile, getTrackedBdas } from './BdaRegistry.js';
 import { getCallSummaries } from './BookingCallSummary.js';
 import { SYNC_LIMITS_MS, syncOkBetween, wasSourceHealthy } from './SyncHealth.js';
@@ -791,6 +791,10 @@ export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientN
     return fail(409, 'not_tracked', 'This person is not a tracked BDA');
   }
   if (!isAfterGoLive(profile, startMs)) return fail(409, 'before_tracking', 'This call started before the BDA was tracked');
+  // The automatic rules skip approved leave days, so a person marking by hand must not fine one either.
+  if ((profile.leaveDays || []).includes(istDate(startMs))) {
+    return fail(409, 'on_leave', `This call is on ${istDate(startMs)}, an approved leave day, so it cannot be marked absent`);
+  }
 
   const existing = await BdaDeductionModel.findOne({ bookingId: refId, bdaEmail: email, rule: 'missed_meeting' }).select('status').lean();
   if (existing) return fail(409, 'already_fined', `This call already has a fine (${existing.status})`);

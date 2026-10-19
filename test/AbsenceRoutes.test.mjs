@@ -16,6 +16,7 @@ import { SalesLeadAllocationModel } from '../Schema_Models/SalesLeadAllocation.j
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { BdaAbsenceReportModel } from '../Schema_Models/BdaAbsenceReport.js';
 import { invalidateRegistryCache } from '../Utils/BdaRegistry.js';
+import { istDate } from '../Utils/BdaAssignment.js';
 import { registerAbsenceRoutes } from '../Routes/absenceRoutes.js';
 import { registerSalesAllocationRoutes } from '../Routes/salesAllocationRoutes.js';
 import { CallLogModel } from '../Schema_Models/CallLog.js';
@@ -163,6 +164,37 @@ describe('BDA reports a missed call', () => {
     assert.equal(r.status, 409);
     assert.equal(r.body.error.code, 'already_fined');
     assert.equal(await BdaAbsenceReportModel.countDocuments({ bdaEmail: BDA }), 0, 'no report is queued');
+  });
+
+  it('nobody can mark or report a call on an approved leave day, by any route', async () => {
+    const a = await makeAllocation();
+    const day = istDate(new Date(a.callAt).getTime());
+    await BdaProfileModel.updateOne({ email: BDA }, { $set: { leaveDays: [day] } });
+    invalidateRegistryCache();
+    const body = { kind: 'allocation', refId: a.allocationId, reason: 'marked by mistake' };
+
+    const admin = await call('POST', BASE, { body });
+    assert.equal(admin.status, 409);
+    assert.equal(admin.body.error.code, 'on_leave');
+    const own = await call('POST', BASE, { token: bdaToken(), body });
+    assert.equal(own.body.error.code, 'on_leave', 'a BDA cannot report a leave day either');
+    const batch = await call('POST', `${BASE}/batch`, { body: { items: [{ kind: 'allocation', refId: a.allocationId }], reason: 'marked by mistake' } });
+    assert.equal(batch.body.results[0].error.code, 'on_leave');
+    assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA }), 0, 'no fine was written');
+    assert.equal((await SalesLeadAllocationModel.findOne({ allocationId: a.allocationId }).lean()).status, 'scheduled', 'the call was not closed');
+
+    const list = await call('GET', `${BASE}/candidates?kind=allocation`);
+    assert.equal(list.body.candidates.some((c) => c.refId === a.allocationId), false, 'a leave day is not offered');
+
+    // The engine refuses it too, so a future route that skips the checks above is still safe.
+    const { createManualMiss } = await import('../Utils/DeductionEngine.js');
+    const direct = await createManualMiss({ kind: 'allocation', refId: a.allocationId, bdaEmail: BDA, startMs: new Date(a.callAt).getTime(), actor: { email: ADMIN }, reason: 'direct call' });
+    assert.equal(direct.code, 'on_leave');
+
+    // Take the leave away and the same call can be marked again.
+    await BdaProfileModel.updateOne({ email: BDA }, { $set: { leaveDays: [] } });
+    invalidateRegistryCache();
+    assert.equal((await call('POST', BASE, { body })).status, 201);
   });
 
   it('a BDA can withdraw their own pending report, not someone else\'s', async () => {
