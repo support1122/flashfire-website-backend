@@ -219,7 +219,70 @@ export async function resolveCalendlyHostByEventUri(eventUri) {
   }
 }
 
+const isRealMeetLink = (v) => {
+  const s = String(v ?? '').trim();
+  return !!s && !/^(not provided|n\/a|null|undefined)$/i.test(s);
+};
+
+/**
+ * Current Google Meet / join URL of a Calendly scheduled event.
+ *
+ * The webhook snapshot is taken at booking time. When a host (a newly added BDA) has
+ * no Meet connected then, location.join_url is empty and Calendly sends no event when
+ * the host adds it later, so the stored link stays "Not Provided" forever. Asking the
+ * API at send time picks up the link added afterwards.
+ *
+ * @param {string} eventUri - Calendly scheduled_event URI
+ * @returns {Promise<string|null>}
+ */
+export async function fetchMeetLinkByEventUri(eventUri) {
+  if (!eventUri || !CALENDLY_API_TOKEN) return null;
+  try {
+    const res = await fetch(eventUri, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${CALENDLY_API_TOKEN}`, 'Content-Type': 'application/json' }
+    });
+    if (!res.ok) {
+      Logger.warn('[CalendlyAPIHelper] Failed to fetch scheduled event for meet link', { eventUri, status: res.status });
+      return null;
+    }
+    const data = await res.json();
+    const url = data?.resource?.location?.join_url;
+    return isRealMeetLink(url) ? String(url).trim() : null;
+  } catch (error) {
+    Logger.warn('[CalendlyAPIHelper] Error fetching meet link', { eventUri, error: error.message });
+    return null;
+  }
+}
+
+/**
+ * Return a usable meeting link for a booking, healing a missing one from Calendly and
+ * saving it so later reminders, calls and Discord pings reuse it.
+ *
+ * @param {{ bookingId?: string, calendlyMeetLink?: string, calendlyEventUri?: string }} booking
+ * @param {string|null} currentLink - link already on the reminder, if any
+ * @returns {Promise<string|null>}
+ */
+export async function resolveMeetLinkForBooking(booking, currentLink = null) {
+  if (isRealMeetLink(currentLink)) return String(currentLink).trim();
+  if (isRealMeetLink(booking?.calendlyMeetLink)) return String(booking.calendlyMeetLink).trim();
+
+  const fresh = await fetchMeetLinkByEventUri(booking?.calendlyEventUri);
+  if (fresh && booking?.bookingId) {
+    try {
+      const { CampaignBookingModel } = await import('../Schema_Models/CampaignBooking.js');
+      await CampaignBookingModel.updateOne({ bookingId: booking.bookingId }, { $set: { calendlyMeetLink: fresh } });
+      Logger.info('[CalendlyAPIHelper] Healed missing meet link from Calendly', { bookingId: booking.bookingId });
+    } catch (e) {
+      Logger.warn('[CalendlyAPIHelper] Fetched meet link but could not save it', { bookingId: booking.bookingId, error: e.message });
+    }
+  }
+  return fresh;
+}
+
 export default {
+  fetchMeetLinkByEventUri,
+  resolveMeetLinkForBooking,
   fetchRescheduleLinkFromCalendly,
   getRescheduleLinkForBooking,
   resolveCalendlyHost,

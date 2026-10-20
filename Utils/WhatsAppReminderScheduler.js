@@ -19,6 +19,7 @@ import {
 } from './MeetingReminderUtils.js';
 import { calendlyButtonTail, calendlyCancelTail } from './TemplateParameterBuilder.js';
 import { WatiTemplates, PRODUCT_DEMO_LINK } from '../config/watiTemplates.js';
+import { resolveMeetLinkForBooking } from './CalendlyAPIHelper.js';
 
 dotenv.config();
 
@@ -881,7 +882,21 @@ export async function sendWhatsAppMessage(scheduledReminder) {
     // {{6}} = "Reschedule" button URL tail (button base is https://calendly.com/, so we
     // send only the path after it). Only present on the _b template (3h / 1h / 5min).
     const finalRescheduleLink = rescheduleLink || DEFAULT_RESCHEDULE_LINK;
-    const finalMeetingLink = meetingLink || 'Not Provided';
+    // The link snapshotted at booking time is empty when the host had no Google Meet
+    // connected then (a newly added BDA). Ask Calendly now, since it was added later.
+    let liveMeetingLink = meetingLink;
+    if (!liveMeetingLink || /^not provided$/i.test(String(liveMeetingLink).trim())) {
+      try {
+        const bookingForLink = scheduledReminder.metadata?.bookingId
+          ? await CampaignBookingModel.findOne({ bookingId: scheduledReminder.metadata.bookingId })
+              .select('bookingId calendlyMeetLink calendlyEventUri').lean()
+          : null;
+        liveMeetingLink = await resolveMeetLinkForBooking(bookingForLink, meetingLink);
+      } catch (linkErr) {
+        Logger.warn('[WhatsAppReminderScheduler] Meet link refresh failed, sending without it', { reminderId, error: linkErr.message });
+      }
+    }
+    const finalMeetingLink = liveMeetingLink || 'Not Provided';
     const parameters = [
       clientName || 'Valued Client', // {{1}}
       resolvedMeetingDate || '', // {{2}}

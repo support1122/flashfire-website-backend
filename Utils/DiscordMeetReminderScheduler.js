@@ -3,6 +3,7 @@ import { DateTime, IANAZone } from 'luxon';
 import { DiscordConnect } from './DiscordConnect.js';
 import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
+import { resolveMeetLinkForBooking } from './CalendlyAPIHelper.js';
 import { parseMeetingStartToDate, logReminderDrift } from './MeetingReminderUtils.js';
 
 dotenv.config();
@@ -430,13 +431,16 @@ export async function processDueDiscordMeetReminders() {
           booking?.claimedBy?.email ||
           null;
 
+        // Heal a link that was empty at booking time (host added Google Meet to Calendly later).
+        const liveMeetingLink = await resolveMeetLinkForBooking(booking, reminder.meetingLink).catch(() => reminder.meetingLink);
+
         const messageLines = [
           headline,
           '',
           `**Client:** ${reminder.clientName}`,
           `**Time (Client):** ${meetingTimeClient}`,
           `**Time (India):** ${meetingTimeIST}`,
-          `**Link:** ${reminder.meetingLink || 'Not provided'}`,
+          `**Link:** ${liveMeetingLink || 'Not provided'}`,
           ...(claimedBda ? [`**Assigned BDA:** ${claimedBda}`] : []),
           '',
           "BDA team, confirm attendance by typing **\"I'm in.\"** Let's close this.",
