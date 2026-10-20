@@ -3,6 +3,7 @@ import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import jwt from 'jsonwebtoken';
 import { getCrmJwtSecret, requireCrmPermission, requireCrmUser } from '../Middlewares/CrmAuth.js';
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
+import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { pullDeductions } from '../Controllers/PayrollController.js';
 import { getAllBdaProfiles, getTrackedBdas } from '../Utils/BdaRegistry.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
@@ -79,7 +80,26 @@ export function actorOf(req) {
 
 const iso = (d) => (d ? new Date(d).toISOString() : null);
 
-function toRow(d, nameByEmail) {
+/**
+ * What the attendance row recorded for the meeting, so a BDA can see why the system did not count them present
+ * (for example they joined from a phone, where the extension cannot report). Display only. null when no row exists.
+ */
+function shapeAttendanceNote(row) {
+  if (!row) return null;
+  const joined = row.firstJoinedAt || row.joinedAt || null;
+  return {
+    status: row.status ?? null,
+    verdict: row.verdict ?? null,
+    joinDevice: row.joinDevice ?? null,
+    joinDeviceReason: row.joinDeviceReason ?? null,
+    joinedAt: iso(joined),
+    lateByMs: Number.isFinite(row.lateByMs) ? row.lateByMs : null,
+    timeSpentMs: row.durationMs ?? row.cumulativeDurationMs ?? 0,
+    verified: Boolean(row.source === 'meet_api' || row.meetApiFinalizedAt),
+  };
+}
+
+function toRow(d, nameByEmail, attendanceByBooking = new Map()) {
   const ev = d.evidence || {};
   return {
     deductionId: d.deductionId,
@@ -103,6 +123,7 @@ function toRow(d, nameByEmail) {
       : null,
     rule: d.rule,
     month: d.month,
+    attendance: shapeAttendanceNote(attendanceByBooking.get(`${d.bookingId}|${d.bdaEmail}`)),
     amountInr: d.amountInr,
     tierIndex: d.tierIndex ?? null,
     status: d.status,
@@ -209,13 +230,18 @@ export function registerDeductionRoutes(app) {
         BdaDeductionModel.find(filter).sort({ 'evidence.scheduledStart': -1, createdAt: -1 }).lean(),
         nameMap(),
       ]);
+      // One query for the whole page, keyed by booking and BDA (allocation calls have no attendance row).
+      const rows = docs.length
+        ? await BdaAttendanceModel.find({ bookingId: { $in: docs.map((d) => d.bookingId) } }).lean()
+        : [];
+      const attendanceByBooking = new Map(rows.map((r) => [`${r.bookingId}|${r.bdaEmail}`, r]));
       return res.status(200).json({
         success: true,
         month,
         mode: getDeductionsMode(),
         liveFrom: currentDeductionSettings().liveFrom,
         modeSource: currentDeductionSettings().source,
-        rows: docs.map((d) => toRow(d, names)),
+        rows: docs.map((d) => toRow(d, names, attendanceByBooking)),
         totals: buildTotals(docs), // active rows only, so needs_review ("Under review") never counts
       });
     } catch (err) {
