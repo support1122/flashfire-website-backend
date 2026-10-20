@@ -141,6 +141,30 @@ describe('GET /api/crm/deductions', () => {
     assert.equal(res.body.error.code, 'unauthorized');
   });
 
+  it('carries what the attendance row recorded, so a mobile join is visible on the fine', async () => {
+    const fined = row();
+    await BdaDeductionModel.create([fined, row()]);
+    await BdaAttendanceModel.create({
+      bookingId: fined.bookingId,
+      bdaEmail: SID,
+      bdaName: 'Sid',
+      meetingScheduledStart: fined.evidence.scheduledStart,
+      status: 'present',
+      joinDevice: 'mobile',
+      joinDeviceReason: 'Google saw the BDA, the extension did not',
+      firstJoinedAt: new Date(fined.evidence.scheduledStart.getTime() + 7 * 60000),
+      lateByMs: 7 * 60000,
+      source: 'meet_api',
+    });
+    const res = await call('GET', `/api/crm/deductions?month=${MONTH}`, { token: userToken(SID) });
+    assert.equal(res.status, 200);
+    const withRow = res.body.rows.find((r) => r.bookingId === fined.bookingId);
+    assert.equal(withRow.attendance.joinDevice, 'mobile');
+    assert.equal(withRow.attendance.lateByMs, 7 * 60000);
+    assert.equal(withRow.attendance.verified, true);
+    assert.equal(res.body.rows.find((r) => r.bookingId !== fined.bookingId).attendance, null);
+  });
+
   it('a BDA sees only their own rows, an admin sees everyone, and the response matches the contract', async () => {
     await BdaDeductionModel.create([row(), row({ rule: 'no_show_not_called', amountInr: 100, tierIndex: null }), row({ bdaEmail: KAL })]);
 
@@ -157,13 +181,14 @@ describe('GET /api/crm/deductions', () => {
 
     const first = mine.body.rows.find((r) => r.rule === 'missed_meeting');
     assert.deepEqual(Object.keys(first).sort(), [
-      'amountInr', 'bdaEmail', 'bdaName', 'bookingId', 'clientName', 'createdAt', 'deductionId', 'evidence', 'manualAbsent',
+      'amountInr', 'attendance', 'bdaEmail', 'bdaName', 'bookingId', 'clientName', 'createdAt', 'deductionId', 'evidence', 'manualAbsent',
       'month', 'origin', 'reviewReason', 'reviewedAt', 'reviewedBy', 'reviewedByName', 'rule', 'source', 'status', 'tierIndex',
       'voidReason', 'voidedAt', 'waivedAt', 'waivedBy', 'waivedByName', 'waiverReason',
     ]);
     assert.equal(first.origin, 'auto', 'an engine fine is automatic');
     assert.equal(first.source, 'booking');
     assert.equal(first.manualAbsent, null);
+    assert.equal(first.attendance, null, 'no attendance row means null, never a missing key');
     assert.equal(first.clientName.startsWith('Client'), true);
     assert.equal(typeof first.evidence.scheduledStart, 'string');
     assert.deepEqual(first.evidence.callSummary, {});
