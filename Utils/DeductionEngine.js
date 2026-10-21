@@ -113,6 +113,13 @@ export function makeContext(opts = {}) {
       opts.loadAttendance ??
       (async (bookingId, bdaEmail) =>
         BdaAttendanceModel.findOne({ bookingId, bdaEmail }).select('verdict verdictAt verdictCorrectedAt signals sessions joinedAt leftAt').lean()),
+    // Attendance rows of OTHER BDAs for the same meeting, to see whether a colleague covered it.
+    loadCover:
+      opts.loadCover ??
+      (async (bookingId, bdaEmail) =>
+        BdaAttendanceModel.find({ bookingId, bdaEmail: { $ne: bdaEmail } })
+          .select('bdaEmail bdaName status verdict signals firstJoinedAt joinedAt markedPresentAt durationMs cumulativeDurationMs joinDevice')
+          .lean()),
     _profiles: new Map(),
   };
 }
@@ -380,7 +387,36 @@ async function sweepVerdictHealthy(ctx, startMs, verdictAtMs) {
 }
 
 /**
- * Create the missed_meeting row for one absent verdict. `healthy` false makes it needs_review.
+ * Colleagues the attendance record shows in this meeting while the assigned BDA is not. Without a CRM reassignment the
+ * engine fines the assigned BDA, so a covered meeting looked like a miss: 20 of Kalpataru's October fines were this.
+ * Returns [] when nobody covered it, or when the lookup fails (never block a fine on a lookup error).
+ */
+async function coverFor(ctx, bookingId, email) {
+  try {
+    const rows = await ctx.loadCover(bookingId, email);
+    const out = [];
+    for (const row of rows ?? []) {
+      const seen = attendanceShowsPresent(row);
+      if (!seen) continue;
+      const who = norm(row.bdaEmail);
+      const profile = await profileOf(ctx, who);
+      out.push({
+        bdaEmail: who,
+        bdaName: profile?.displayName || row.bdaName || who.split('@')[0],
+        joinedAt: seen.joinedAt ? seen.joinedAt.toISOString() : null,
+        minutes: seen.minutes,
+      });
+    }
+    return out;
+  } catch (err) {
+    console.warn('[DeductionEngine] cover check failed:', err?.message);
+    return [];
+  }
+}
+
+/**
+ * Create the missed_meeting row for one absent verdict. `healthy` false, or a colleague who covered the meeting,
+ * makes it needs_review: it is written but does not count until an admin decides.
  * Returns { created, reason? }.
  */
 async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy }) {
@@ -399,9 +435,12 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
   // Belt and braces: never fine while in-time evidence sits on the row, whatever the verdict field says.
   if (att && countedSignals(att.signals, startMs, att).length > 0) return { created: false, reason: 'has_in_time_evidence' };
 
+  const coveredBy = await coverFor(ctx, booking.bookingId, email);
+
   const evidence = {
     scheduledStart: new Date(startMs),
     windowClosedAt: new Date(startMs + WINDOW_CLOSE_MS),
+    coveredBy: plainJson(coveredBy),
     signals: plainJson(signals ?? att?.signals ?? []),
     bookingStatus: booking.bookingStatus ?? null,
     callSummary: plainJson(await callSummaryFor(ctx, booking)),
@@ -417,7 +456,7 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
       bdaEmail: email,
       rule: 'missed_meeting',
       startMs,
-      status: statusForNew(ctx, healthy),
+      status: statusForNew(ctx, healthy && coveredBy.length === 0),
       amountInr: DEDUCTION_POLICY.missedMeeting.baseAmountInr,
       evidence,
     },

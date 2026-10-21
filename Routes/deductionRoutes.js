@@ -136,6 +136,7 @@ function toRow(d, nameByEmail, attendanceByBooking = new Map()) {
       clientName: ev.clientName ?? '',
       healthy: ev.healthy ?? null,
       convertedFromFlag: ev.convertedFromFlag ?? null,
+      coveredBy: ev.coveredBy ?? [],
     },
     waivedBy: d.waivedBy ?? null,
     waivedByName: d.waivedByName ?? null,
