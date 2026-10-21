@@ -113,6 +113,13 @@ export function makeContext(opts = {}) {
       opts.loadAttendance ??
       (async (bookingId, bdaEmail) =>
         BdaAttendanceModel.findOne({ bookingId, bdaEmail }).select('verdict verdictAt verdictCorrectedAt signals sessions joinedAt leftAt').lean()),
+    // Attendance rows of OTHER BDAs for the same meeting, to see whether a colleague covered it.
+    loadCover:
+      opts.loadCover ??
+      (async (bookingId, bdaEmail) =>
+        BdaAttendanceModel.find({ bookingId, bdaEmail: { $ne: bdaEmail } })
+          .select('bdaEmail bdaName status verdict signals firstJoinedAt joinedAt markedPresentAt durationMs cumulativeDurationMs joinDevice')
+          .lean()),
     _profiles: new Map(),
   };
 }
@@ -380,7 +387,36 @@ async function sweepVerdictHealthy(ctx, startMs, verdictAtMs) {
 }
 
 /**
- * Create the missed_meeting row for one absent verdict. `healthy` false makes it needs_review.
+ * Colleagues the attendance record shows in this meeting while the assigned BDA is not. Without a CRM reassignment the
+ * engine fines the assigned BDA, so a covered meeting looked like a miss: 20 of Kalpataru's October fines were this.
+ * Returns [] when nobody covered it, or when the lookup fails (never block a fine on a lookup error).
+ */
+async function coverFor(ctx, bookingId, email) {
+  try {
+    const rows = await ctx.loadCover(bookingId, email);
+    const out = [];
+    for (const row of rows ?? []) {
+      const seen = attendanceShowsPresent(row);
+      if (!seen) continue;
+      const who = norm(row.bdaEmail);
+      const profile = await profileOf(ctx, who);
+      out.push({
+        bdaEmail: who,
+        bdaName: profile?.displayName || row.bdaName || who.split('@')[0],
+        joinedAt: seen.joinedAt ? seen.joinedAt.toISOString() : null,
+        minutes: seen.minutes,
+      });
+    }
+    return out;
+  } catch (err) {
+    console.warn('[DeductionEngine] cover check failed:', err?.message);
+    return [];
+  }
+}
+
+/**
+ * Create the missed_meeting row for one absent verdict. `healthy` false, or a colleague who covered the meeting,
+ * makes it needs_review: it is written but does not count until an admin decides.
  * Returns { created, reason? }.
  */
 async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy }) {
@@ -399,9 +435,12 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
   // Belt and braces: never fine while in-time evidence sits on the row, whatever the verdict field says.
   if (att && countedSignals(att.signals, startMs, att).length > 0) return { created: false, reason: 'has_in_time_evidence' };
 
+  const coveredBy = await coverFor(ctx, booking.bookingId, email);
+
   const evidence = {
     scheduledStart: new Date(startMs),
     windowClosedAt: new Date(startMs + WINDOW_CLOSE_MS),
+    coveredBy: plainJson(coveredBy),
     signals: plainJson(signals ?? att?.signals ?? []),
     bookingStatus: booking.bookingStatus ?? null,
     callSummary: plainJson(await callSummaryFor(ctx, booking)),
@@ -417,7 +456,7 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
       bdaEmail: email,
       rule: 'missed_meeting',
       startMs,
-      status: statusForNew(ctx, healthy),
+      status: statusForNew(ctx, healthy && coveredBy.length === 0),
       amountInr: DEDUCTION_POLICY.missedMeeting.baseAmountInr,
       evidence,
     },
@@ -771,6 +810,26 @@ export async function waiveDeduction(deductionId, actor, reason, { now = new Dat
 }
 
 /**
+ * What the attendance row shows about this BDA in the meeting, or null when nothing shows them there. Any join, any
+ * counted signal, or a present verdict counts: a person marking a call absent has to be told when the record disagrees.
+ */
+export function attendanceShowsPresent(row) {
+  if (!row) return null;
+  const joinedAt = row.firstJoinedAt || row.joinedAt || null;
+  const present = row.verdict === 'present' || row.status === 'present' || row.status === 'manual' || Boolean(joinedAt) || Boolean(row.markedPresentAt) || (row.signals || []).length > 0;
+  if (!present) return null;
+  const ms = row.durationMs ?? row.cumulativeDurationMs ?? 0;
+  return {
+    status: row.status ?? null,
+    verdict: row.verdict ?? null,
+    joinedAt: joinedAt ? new Date(joinedAt) : null,
+    minutes: Math.round(ms / 60000),
+    signals: (row.signals || []).map((s) => s.kind),
+    joinDevice: row.joinDevice ?? null,
+  };
+}
+
+/**
  * A fine written by a person, not by the verdict job: an admin marking a call absent, or an admin approving a BDA's
  * own report. It is a normal missed_meeting row, so the monthly tiers, waivers, payroll and Discord all treat it like
  * any other miss. It obeys the same gates as the automatic fines: fines off writes nothing, shadow writes a shadow
@@ -779,7 +838,7 @@ export async function waiveDeduction(deductionId, actor, reason, { now = new Dat
  * `refId` is the booking id for a Calendly meeting or the allocation id for a Lead Allocation call; the unique
  * {bookingId, bdaEmail, rule} index makes a second mark of the same call a no-op that reports `already_fined`.
  */
-export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientName = null, actor, reason, requestId = null }, opts = {}) {
+export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientName = null, actor, reason, requestId = null, force = false }, opts = {}) {
   const ctx = makeContext(opts);
   const email = norm(bdaEmail);
   if (ctx.mode === 'off') return fail(409, 'fines_off', 'Fines are switched off, so nothing can be recorded');
@@ -798,6 +857,25 @@ export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientN
 
   const existing = await BdaDeductionModel.findOne({ bookingId: refId, bdaEmail: email, rule: 'missed_meeting' }).select('status').lean();
   if (existing) return fail(409, 'already_fined', `This call already has a fine (${existing.status})`);
+
+  // A person marking a call absent by hand must not fine someone the attendance record shows in the meeting. The
+  // automatic rule needs no signal to fine, so this is the only place a wrong fine can be stopped. An admin can
+  // still override on purpose; the override and what the record showed are kept on the fine.
+  const seen =
+    kind === 'booking'
+      ? attendanceShowsPresent(
+          await (opts.Attendance ?? BdaAttendanceModel)
+            .findOne({ bookingId: refId, bdaEmail: email })
+            .select('status verdict signals firstJoinedAt joinedAt markedPresentAt durationMs cumulativeDurationMs joinDevice')
+            .lean()
+        )
+      : null;
+  if (seen && !force) {
+    const when = seen.joinedAt
+      ? ` at ${new Date(seen.joinedAt).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' })} IST${seen.minutes > 0 ? ` for about ${seen.minutes} minutes` : ''}`
+      : '';
+    return fail(409, 'attendance_present', `Attendance shows ${profile.displayName || email} joined this meeting${when}, so marking them absent looks wrong. If you are sure, tick "Fine anyway" and try again.`);
+  }
 
   const now = new Date(ctx.nowMs);
   const row = await createAndAnnounce(
@@ -824,6 +902,9 @@ export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientN
           markedBy: actor?.email || 'admin',
           markedByName: actor?.name || null,
           at: now,
+          // Set only when an admin overrode the attendance check: what the record showed at that moment.
+          forced: Boolean(seen && force),
+          attendance: seen && force ? seen : null,
         },
       },
     },

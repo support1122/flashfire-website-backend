@@ -8,7 +8,7 @@ import { getDeductionsMode, monthBoundsIST } from '../Utils/deductionPolicy.js';
 import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
 import { escapeRegex } from '../Utils/SalesAllocations.js';
-import { LOOKBACK_MS, applyAbsence, checkEligible, cleanReason, loadCall, validateReportInput } from '../Utils/AbsenceReports.js';
+import { LOOKBACK_MS, UPCOMING_MS, applyAbsence, checkEligible, cleanAbsenceReason, cleanReason, loadCall, validateReportInput } from '../Utils/AbsenceReports.js';
 import { getAllocationCallChecksSafe } from '../Utils/AllocationCallCheck.js';
 import { actorOf, requireCrmUserOrAdmin } from './deductionRoutes.js';
 
@@ -96,15 +96,16 @@ export function registerAbsenceRoutes(app) {
       const nowMs = Date.now();
       const now = new Date(nowMs);
       let since = new Date(nowMs - LOOKBACK_MS);
-      let until = now;
-      // Optional day range (YYYY-MM-DD, IST), always inside the 30 day window and never in the future.
+      // An admin also sees the rest of today (calls not started yet) so they can be marked in advance.
+      let until = admin ? istDay(istDate(nowMs)).end : now;
+      // Optional day range (YYYY-MM-DD, IST), inside the 30 day window. A BDA never sees the future; an admin sees up to a week ahead.
       for (const [name, edge] of [['from', 'start'], ['to', 'end']]) {
         const raw = String(req.query[name] ?? '').trim();
         if (!raw) continue;
         const day = istDay(raw);
         if (!day) return fail(res, 422, 'invalid_date', `${name} must look like 2026-10-17`);
         if (edge === 'start') since = new Date(Math.max(since.getTime(), day.start.getTime()));
-        else until = new Date(Math.min(nowMs, day.end.getTime()));
+        else until = new Date(Math.min(admin ? nowMs + UPCOMING_MS : nowMs, day.end.getTime()));
       }
 
       let calls = [];
@@ -153,7 +154,12 @@ export function registerAbsenceRoutes(app) {
       const out = calls
         .filter((c) => !taken.has(`${c.refId}|${c.bdaEmail}`))
         .filter((c) => !leaveOf.get(c.bdaEmail)?.has(istDate(new Date(c.callStart).getTime()))) // a leave day can never be marked
-        .map((c) => ({ ...c, bdaName: c.bdaName || names.get(c.bdaEmail) || c.bdaEmail.split('@')[0], callStart: iso(c.callStart) }));
+        .map((c) => ({
+          ...c,
+          bdaName: c.bdaName || names.get(c.bdaEmail) || c.bdaEmail.split('@')[0],
+          upcoming: new Date(c.callStart).getTime() > nowMs,
+          callStart: iso(c.callStart),
+        }));
       return res.status(200).json({ success: true, kind, candidates: out });
     } catch (err) {
       console.error('[absenceRoutes] candidates failed:', err?.message);
@@ -216,7 +222,7 @@ export function registerAbsenceRoutes(app) {
       const call = await loadCall(kind, refId);
       if (!call) return refuse(404, 'call_not_found', 'No such call');
       if (!call.bdaEmail) return refuse(409, 'no_bda', 'This call has no assigned BDA');
-      const eligible = checkEligible(call);
+      const eligible = checkEligible(call, Date.now(), { admin });
       if (!eligible.ok) return refuse(eligible.status, eligible.code, eligible.message);
 
       const profile = await getBdaProfile(call.bdaEmail);
@@ -249,7 +255,8 @@ export function registerAbsenceRoutes(app) {
       // Admin: mark absent now. A pending report from the BDA for the same call is settled by this action.
       if (open?.status === 'approved') return refuse(409, 'already_reported', 'This call was already marked absent');
       const reportId = open?.reportId || `abs_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-      const result = await applyAbsence(call, { actor, reason, requestId: reportId });
+      // `force` is the admin's deliberate "fine anyway" when attendance shows the BDA joined. Never honoured for a BDA.
+      const result = await applyAbsence(call, { actor, reason, requestId: reportId, force: input.force === true });
       if (!result.ok) return refuse(result.status, result.code, result.message);
       const decided = { status: 'approved', decidedBy: actor.email || 'admin', decidedByName: actor.name || null, decidedAt: new Date(), decisionNote: reason, deductionId: result.deduction.deductionId };
       let report;
@@ -285,7 +292,7 @@ export function registerAbsenceRoutes(app) {
     const items = Array.isArray(req.body?.items) ? req.body.items : null;
     if (!items || items.length === 0) return fail(res, 422, 'no_items', 'Choose at least one call');
     if (items.length > BATCH_MAX) return fail(res, 422, 'too_many_items', `Choose at most ${BATCH_MAX} calls at a time`);
-    const checked = cleanReason(req.body?.reason);
+    const checked = cleanAbsenceReason(req.body?.reason);
     if (checked.error) return fail(res, checked.error.status, checked.error.code, checked.error.message);
 
     const seen = new Set();
@@ -306,7 +313,7 @@ export function registerAbsenceRoutes(app) {
     const results = [];
     const notices = [];
     for (const it of order) {
-      const done = await processOne(req, admin, actor, { ...it, reason: checked.reason });
+      const done = await processOne(req, admin, actor, { ...it, reason: checked.reason, force: req.body?.force === true });
       if (done.notice) notices.push(done.notice);
       results.push(done.json.success
         ? { kind: it.kind, refId: it.refId, ok: true, report: done.json.report }
@@ -331,12 +338,12 @@ export function registerAbsenceRoutes(app) {
 
       const call = await loadCall(report.kind, report.refId);
       if (!call) return fail(res, 404, 'call_not_found', 'The call behind this report no longer exists');
-      const eligible = checkEligible(call);
+      const eligible = checkEligible(call, Date.now(), { admin: true });
       if (!eligible.ok) return fail(res, eligible.status, eligible.code, `${eligible.message}. Reject this report instead.`);
       if (call.bdaEmail !== report.bdaEmail) return fail(res, 409, 'bda_changed', 'The call was reassigned since this report, reject it instead');
 
       const actor = actorOf(req);
-      const result = await applyAbsence(call, { actor, reason: report.reason, requestId: report.reportId });
+      const result = await applyAbsence(call, { actor, reason: report.reason, requestId: report.reportId, force: req.body?.force === true });
       if (!result.ok) return fail(res, result.status, result.code, result.message);
       const updated = await BdaAbsenceReportModel.findOneAndUpdate(
         { reportId: report.reportId, status: 'pending' },

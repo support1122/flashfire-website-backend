@@ -8,6 +8,8 @@ import { ABSENCE_KINDS } from '../Schema_Models/BdaAbsenceReport.js';
 // and the database pieces are injectable, so the rules can be tested without a database.
 
 export const LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
+// An admin can mark a call absent in advance, for example when a BDA has said they cannot take today's meetings.
+export const UPCOMING_MS = 7 * 24 * 60 * 60 * 1000;
 // A meeting in one of these states never happened, so nobody can be absent from it.
 const DEAD_BOOKING_STATUSES = new Set(['canceled', 'rescheduled', 'not-scheduled']);
 
@@ -25,6 +27,21 @@ export function cleanReason(raw) {
   return { reason };
 }
 
+/**
+ * The reason for marking a call absent. On top of the 5 to 500 character rule it has to say something: at least 10
+ * characters, 8 letters and 2 words, so "Yeah -" is refused. A fine is written from this text and the BDA reads it.
+ */
+export function cleanAbsenceReason(raw) {
+  const checked = cleanReason(raw);
+  if (checked.error) return checked;
+  const letters = (checked.reason.match(/\p{L}/gu) || []).length;
+  const words = checked.reason.split(/\s+/).filter((w) => /\p{L}/u.test(w)).length;
+  if (checked.reason.length < 10 || letters < 8 || words < 2) {
+    return { error: { status: 422, code: 'reason_too_vague', message: 'Say what happened in a sentence of at least 10 characters, for example "Did not join and did not call the client"' } };
+  }
+  return checked;
+}
+
 /** Validate the create body. Returns { value: { kind, refId, reason } } or { error: { status, code, message } }. */
 export function validateReportInput(body) {
   const b = body && typeof body === 'object' ? body : {};
@@ -36,19 +53,23 @@ export function validateReportInput(body) {
   if (!refId || refId.length > 200) {
     return { error: { status: 422, code: 'invalid_ref', message: 'refId is required' } };
   }
-  const checked = cleanReason(b.reason);
+  const checked = cleanAbsenceReason(b.reason);
   if (checked.error) return checked;
   return { value: { kind, refId, reason: checked.reason } };
 }
 
 /**
- * Can this call be marked absent right now? Pure. `call` is { kind, startMs, state } where state is the allocation
+ * Can this call be marked absent right now? Pure. `admin` lets the call still be ahead (within a week). `call` is { kind, startMs, state } where state is the allocation
  * status or the booking status. Returns { ok: true } or { ok: false, status, code, message }.
  */
-export function checkEligible(call, nowMs = Date.now()) {
+export function checkEligible(call, nowMs = Date.now(), { admin = false } = {}) {
   const no = (status, code, message) => ({ ok: false, status, code, message });
   if (!Number.isFinite(call.startMs)) return no(422, 'no_start_time', 'This call has no start time');
-  if (call.startMs > nowMs) return no(409, 'call_not_over', 'The call has not started yet');
+  if (call.startMs > nowMs) {
+    // A BDA reports calls that already happened. Only an admin may mark one that is still ahead, up to a week out.
+    if (!admin) return no(409, 'call_not_over', 'The call has not started yet');
+    if (call.startMs - nowMs > UPCOMING_MS) return no(409, 'too_far_ahead', 'Only calls in the next 7 days can be marked absent in advance');
+  }
   if (nowMs - call.startMs > LOOKBACK_MS) return no(409, 'too_old', 'Only calls from the last 30 days can be marked absent');
   if (call.kind === 'allocation' && call.state !== 'scheduled') {
     return no(409, 'not_scheduled', `This call is already ${call.state}, so it cannot be marked absent`);
@@ -82,9 +103,9 @@ export async function loadCall(kind, refId, deps = {}) {
 /**
  * Turn an absence into a fine. For a Lead Allocation call the row is flipped scheduled -> absent first, in one
  * conditional update, so a BDA closing the call at the same moment cannot also be fined. If the fine is refused
- * (fines off, already fined...) the call is put back to scheduled. Returns { ok: true, deduction } or { ok: false, ... }.
+ * (fines off, already fined, attendance shows the BDA joined...) the call is put back to scheduled. `force` is an admin's deliberate override of the attendance check. Returns { ok: true, deduction } or { ok: false, ... }.
  */
-export async function applyAbsence(call, { actor, reason, requestId = null }, deps = {}) {
+export async function applyAbsence(call, { actor, reason, requestId = null, force = false }, deps = {}) {
   const Allocation = deps.Allocation ?? SalesLeadAllocationModel;
   const fine = deps.createManualMiss ?? createManualMiss;
 
@@ -108,6 +129,7 @@ export async function applyAbsence(call, { actor, reason, requestId = null }, de
       actor,
       reason,
       requestId,
+      force,
     });
   } catch (err) {
     result = { ok: false, status: 500, code: 'internal_error', message: err?.message || 'Could not write the fine' };

@@ -14,6 +14,11 @@ const EvidenceSchema = new mongoose.Schema(
     clientName: { type: String, default: null },
     // Extras beyond plan 8.1, kept inside the frozen snapshot:
     healthy: { type: Boolean, default: null }, // false when a source was unhealthy (plan 2.7), also on shadow rows
+    // Colleagues the attendance record shows in the meeting while the assigned BDA was not: [{ bdaEmail, bdaName, joinedAt, minutes }].
+    // Non-empty means the row was written as needs_review. This schema is strict, so a field left out here is silently dropped.
+    coveredBy: { type: Array, default: [] },
+    // Other meetings at the same time and whether the BDA was in one: [{ bookingId, clientName, attended }].
+    doubleBookedWith: { type: Array, default: [] },
     // Set when a person wrote the fine: an admin marked a call absent, or approved a BDA's own report.
     manualAbsent: { type: mongoose.Schema.Types.Mixed, default: null },
     convertedFromFlag: {

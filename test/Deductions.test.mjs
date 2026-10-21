@@ -140,6 +140,62 @@ beforeEach(async () => {
   summaries = {};
 });
 
+describe('a colleague covered the meeting', () => {
+  const START = '2026-10-05T10:00:00Z';
+  const coverRow = (bookingId, over = {}) =>
+    BdaAttendanceModel.create({
+      bookingId,
+      bdaEmail: KAL,
+      bdaName: 'Kal',
+      meetingScheduledStart: startOf(START),
+      status: 'present',
+      verdict: 'present',
+      source: 'meet_api',
+      firstJoinedAt: plusMin(START, -2),
+      durationMs: 20 * 60000,
+      signals: [{ kind: 'extension_join', eventAt: plusMin(START, -2) }],
+      ...over,
+    });
+
+  it('holds the fine for review, names who covered, and does not count it', async () => {
+    const id = await mkBooking('cov1', START);
+    await coverRow(id);
+    await handleVerdict(absentEvent(id, START), opts());
+    const [row] = await rowsOf(SID);
+    assert.equal(row.status, 'needs_review');
+    assert.equal(row.tierIndex, null, 'a held row is not part of the tiers');
+    assert.equal(row.evidence.coveredBy.length, 1);
+    assert.equal(row.evidence.coveredBy[0].bdaEmail, KAL);
+    assert.equal(row.evidence.coveredBy[0].bdaName, 'Kal');
+    assert.equal(row.evidence.coveredBy[0].minutes, 20);
+  });
+
+  it('fines normally when nobody covered it, or the colleague row shows nobody in the call', async () => {
+    const none = await mkBooking('cov2', START);
+    const empty = await mkBooking('cov3', '2026-10-06T10:00:00Z');
+    await coverRow(empty, { status: 'unmarked', verdict: 'absent', firstJoinedAt: null, durationMs: 0, signals: [] });
+    await handleVerdict(absentEvent(none, START), opts());
+    await handleVerdict(absentEvent(empty, '2026-10-06T10:00:00Z'), opts());
+    const rows = await rowsOf(SID);
+    assert.deepEqual(rows.map((r) => r.status), ['active', 'active']);
+    assert.deepEqual(rows.map((r) => r.evidence.coveredBy), [[], []]);
+  });
+
+  it('still fines when the cover lookup fails, and a held row is not re-priced into the tiers', async () => {
+    const id = await mkBooking('cov4', START);
+    await handleVerdict(absentEvent(id, START), opts({ loadCover: async () => { throw new Error('db down'); } }));
+    assert.equal((await rowsOf(SID))[0].status, 'active');
+
+    const covered = await mkBooking('cov5', '2026-10-07T10:00:00Z');
+    await coverRow(covered, { meetingScheduledStart: startOf('2026-10-07T10:00:00Z') });
+    await handleVerdict(absentEvent(covered, '2026-10-07T10:00:00Z'), opts());
+    const rows = await rowsOf(SID);
+    assert.deepEqual(rows.map((r) => r.status), ['active', 'needs_review']);
+    assert.deepEqual(rows.map((r) => r.amountInr), [500, 500]);
+    assert.equal(rows.find((r) => r.status === 'active').tierIndex, 1);
+  });
+});
+
 describe('missed_meeting tiers (plan 2.5 and 8.5)', () => {
   it('7 misses in a month cost 500 x 5 + 1000 x 2 = 4500, however they arrive', async () => {
     const days = [2, 3, 4, 5, 6, 7, 8];
