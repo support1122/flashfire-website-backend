@@ -27,6 +27,21 @@ export function cleanReason(raw) {
   return { reason };
 }
 
+/**
+ * The reason for marking a call absent. On top of the 5 to 500 character rule it has to say something: at least 10
+ * characters, 8 letters and 2 words, so "Yeah -" is refused. A fine is written from this text and the BDA reads it.
+ */
+export function cleanAbsenceReason(raw) {
+  const checked = cleanReason(raw);
+  if (checked.error) return checked;
+  const letters = (checked.reason.match(/\p{L}/gu) || []).length;
+  const words = checked.reason.split(/\s+/).filter((w) => /\p{L}/u.test(w)).length;
+  if (checked.reason.length < 10 || letters < 8 || words < 2) {
+    return { error: { status: 422, code: 'reason_too_vague', message: 'Say what happened in a sentence of at least 10 characters, for example "Did not join and did not call the client"' } };
+  }
+  return checked;
+}
+
 /** Validate the create body. Returns { value: { kind, refId, reason } } or { error: { status, code, message } }. */
 export function validateReportInput(body) {
   const b = body && typeof body === 'object' ? body : {};
@@ -38,7 +53,7 @@ export function validateReportInput(body) {
   if (!refId || refId.length > 200) {
     return { error: { status: 422, code: 'invalid_ref', message: 'refId is required' } };
   }
-  const checked = cleanReason(b.reason);
+  const checked = cleanAbsenceReason(b.reason);
   if (checked.error) return checked;
   return { value: { kind, refId, reason: checked.reason } };
 }
@@ -88,9 +103,9 @@ export async function loadCall(kind, refId, deps = {}) {
 /**
  * Turn an absence into a fine. For a Lead Allocation call the row is flipped scheduled -> absent first, in one
  * conditional update, so a BDA closing the call at the same moment cannot also be fined. If the fine is refused
- * (fines off, already fined...) the call is put back to scheduled. Returns { ok: true, deduction } or { ok: false, ... }.
+ * (fines off, already fined, attendance shows the BDA joined...) the call is put back to scheduled. `force` is an admin's deliberate override of the attendance check. Returns { ok: true, deduction } or { ok: false, ... }.
  */
-export async function applyAbsence(call, { actor, reason, requestId = null }, deps = {}) {
+export async function applyAbsence(call, { actor, reason, requestId = null, force = false }, deps = {}) {
   const Allocation = deps.Allocation ?? SalesLeadAllocationModel;
   const fine = deps.createManualMiss ?? createManualMiss;
 
@@ -114,6 +129,7 @@ export async function applyAbsence(call, { actor, reason, requestId = null }, de
       actor,
       reason,
       requestId,
+      force,
     });
   } catch (err) {
     result = { ok: false, status: 500, code: 'internal_error', message: err?.message || 'Could not write the fine' };
