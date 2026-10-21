@@ -8,6 +8,8 @@ import { ABSENCE_KINDS } from '../Schema_Models/BdaAbsenceReport.js';
 // and the database pieces are injectable, so the rules can be tested without a database.
 
 export const LOOKBACK_MS = 30 * 24 * 60 * 60 * 1000;
+// An admin can mark a call absent in advance, for example when a BDA has said they cannot take today's meetings.
+export const UPCOMING_MS = 7 * 24 * 60 * 60 * 1000;
 // A meeting in one of these states never happened, so nobody can be absent from it.
 const DEAD_BOOKING_STATUSES = new Set(['canceled', 'rescheduled', 'not-scheduled']);
 
@@ -42,13 +44,17 @@ export function validateReportInput(body) {
 }
 
 /**
- * Can this call be marked absent right now? Pure. `call` is { kind, startMs, state } where state is the allocation
+ * Can this call be marked absent right now? Pure. `admin` lets the call still be ahead (within a week). `call` is { kind, startMs, state } where state is the allocation
  * status or the booking status. Returns { ok: true } or { ok: false, status, code, message }.
  */
-export function checkEligible(call, nowMs = Date.now()) {
+export function checkEligible(call, nowMs = Date.now(), { admin = false } = {}) {
   const no = (status, code, message) => ({ ok: false, status, code, message });
   if (!Number.isFinite(call.startMs)) return no(422, 'no_start_time', 'This call has no start time');
-  if (call.startMs > nowMs) return no(409, 'call_not_over', 'The call has not started yet');
+  if (call.startMs > nowMs) {
+    // A BDA reports calls that already happened. Only an admin may mark one that is still ahead, up to a week out.
+    if (!admin) return no(409, 'call_not_over', 'The call has not started yet');
+    if (call.startMs - nowMs > UPCOMING_MS) return no(409, 'too_far_ahead', 'Only calls in the next 7 days can be marked absent in advance');
+  }
   if (nowMs - call.startMs > LOOKBACK_MS) return no(409, 'too_old', 'Only calls from the last 30 days can be marked absent');
   if (call.kind === 'allocation' && call.state !== 'scheduled') {
     return no(409, 'not_scheduled', `This call is already ${call.state}, so it cannot be marked absent`);

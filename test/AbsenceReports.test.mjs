@@ -37,6 +37,12 @@ describe('checkEligible', () => {
   it('refuses a call that has not started', () => {
     assert.equal(checkEligible(alloc({ startMs: NOW + HOUR }), NOW).code, 'call_not_over');
   });
+  it('lets an admin mark a call that is still ahead, up to a week out, and no further', () => {
+    assert.equal(checkEligible(alloc({ startMs: NOW + HOUR }), NOW, { admin: true }).ok, true);
+    assert.equal(checkEligible(alloc({ startMs: NOW + 7 * 24 * HOUR }), NOW, { admin: true }).ok, true);
+    assert.equal(checkEligible(alloc({ startMs: NOW + 7 * 24 * HOUR + 1 }), NOW, { admin: true }).code, 'too_far_ahead');
+    assert.equal(checkEligible(alloc({ startMs: NOW + HOUR }), NOW, { admin: false }).code, 'call_not_over');
+  });
   it('refuses a call older than 30 days', () => {
     assert.equal(checkEligible(alloc({ startMs: NOW - LOOKBACK_MS - 1 }), NOW).code, 'too_old');
   });

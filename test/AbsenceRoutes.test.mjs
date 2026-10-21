@@ -285,7 +285,8 @@ describe('lists and candidates', () => {
 
   it('candidates are past, scheduled, unfined calls, scoped to the caller', async () => {
     const past = await makeAllocation();
-    await makeAllocation({ callAt: new Date(Date.now() + HOUR) }); // future
+    const soon = await makeAllocation({ callAt: new Date(Date.now() + 30 * 1000) }); // still ahead, an admin may mark it in advance
+    await makeAllocation({ callAt: new Date(Date.now() + 3 * 24 * HOUR) }); // beyond today, only with a date range
     await makeAllocation({ status: 'completed' });
     const fined = await makeAllocation();
     await call('POST', BASE, { body: { kind: 'allocation', refId: fined.allocationId, reason: 'Never called the client' } });
@@ -294,9 +295,41 @@ describe('lists and candidates', () => {
     const mine = await call('GET', `${BASE}/candidates?kind=allocation`, { token: bdaToken() });
     assert.deepEqual(mine.body.candidates.map((c) => c.refId), [past.allocationId]);
     const admin = await call('GET', `${BASE}/candidates?kind=allocation`);
-    assert.equal(admin.body.candidates.length, 2, 'both BDAs, minus fined, completed and future');
+    assert.equal(admin.body.candidates.length, 3, 'both BDAs plus the call about to start, minus fined, completed and days ahead');
+    assert.deepEqual(admin.body.candidates.filter((c) => c.upcoming).map((c) => c.refId), [soon.allocationId]);
+    assert.ok(mine.body.candidates.every((c) => c.upcoming === false));
     assert.equal((await call('GET', `${BASE}/candidates?kind=allocation&bdaEmail=${OTHER}`, { token: bdaToken() })).status, 403);
     assert.equal((await call('GET', `${BASE}/candidates?kind=nope`)).status, 422);
+  });
+});
+
+describe('marking a call that has not happened yet (admin only)', () => {
+  it('an admin can mark a call later today or up to a week ahead, a BDA cannot, and a month ahead is refused', async () => {
+    const later = await makeAllocation({ callAt: new Date(Date.now() + 2 * HOUR) });
+    const mark = (a, token) => call('POST', BASE, { token, body: { kind: 'allocation', refId: a.allocationId, reason: 'Said they cannot attend' } });
+    assert.equal((await mark(later, bdaToken())).body.error.code, 'call_not_over');
+    const done = await mark(later);
+    assert.equal(done.status, 201);
+    assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA, status: 'active' }), 1);
+
+    const week = await makeAllocation({ callAt: new Date(Date.now() + 6 * 24 * HOUR) });
+    assert.equal((await mark(week)).status, 201);
+    const month = await makeAllocation({ callAt: new Date(Date.now() + 30 * 24 * HOUR) });
+    const far = await mark(month);
+    assert.equal(far.status, 409);
+    assert.equal(far.body.error.code, 'too_far_ahead');
+    assert.equal((await SalesLeadAllocationModel.findOne({ allocationId: month.allocationId }).lean()).status, 'scheduled');
+  });
+
+  it('the picker shows an admin upcoming calls inside a date range, flagged, and a BDA never sees them', async () => {
+    const tomorrow = await makeAllocation({ callAt: new Date(Date.now() + 26 * HOUR) });
+    const day = (ms) => new Date(ms + 5.5 * HOUR).toISOString().slice(0, 10);
+    const range = `from=${day(Date.now())}&to=${day(Date.now() + 2 * 24 * HOUR)}`;
+    const admin = await call('GET', `${BASE}/candidates?kind=allocation&${range}`);
+    const hit = admin.body.candidates.find((c) => c.refId === tomorrow.allocationId);
+    assert.equal(hit?.upcoming, true);
+    const bda = await call('GET', `${BASE}/candidates?kind=allocation&${range}`, { token: bdaToken() });
+    assert.equal(bda.body.candidates.some((c) => c.refId === tomorrow.allocationId), false);
   });
 });
 
@@ -320,7 +353,7 @@ describe('several calls at once', () => {
     const good = await makeAllocation();
     const done = await makeAllocation();
     await call('POST', BASE, { body: { kind: 'allocation', refId: done.allocationId, reason: 'Already handled earlier' } });
-    const future = await makeAllocation({ callAt: new Date(Date.now() + HOUR) });
+    const future = await makeAllocation({ callAt: new Date(Date.now() + 30 * 24 * HOUR) }); // an hour ahead is now allowed for an admin
     const r = await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: done.allocationId }, { kind: 'allocation', refId: future.allocationId }, { kind: 'allocation', refId: good.allocationId }, { kind: 'allocation', refId: 'nope' }], reason: 'Missed all of these' } });
     assert.equal(r.status, 200);
     assert.equal(r.body.succeeded, 1);
@@ -328,7 +361,7 @@ describe('several calls at once', () => {
     const byRef = Object.fromEntries(r.body.results.map((x) => [x.refId, x]));
     assert.equal(byRef[good.allocationId].ok, true);
     assert.equal(byRef[done.allocationId].error.code, 'not_scheduled');
-    assert.equal(byRef[future.allocationId].error.code, 'call_not_over');
+    assert.equal(byRef[future.allocationId].error.code, 'too_far_ahead');
     assert.equal(byRef.nope.error.code, 'call_not_found');
   });
 
