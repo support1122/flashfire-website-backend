@@ -6,7 +6,9 @@ import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { BdaExtensionHeartbeatModel } from '../Schema_Models/BdaExtensionHeartbeat.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { findMeetingsOnLeave } from '../Utils/AttendanceVerdictJob.js';
-import { countableReason, getAssignedBdaEmail } from '../Utils/BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail, istDate } from '../Utils/BdaAssignment.js';
+import { loadTakenSlots, reassignBooking } from '../Utils/BookingReassign.js';
+import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import { getBdaProfile, getTrackedBdas } from '../Utils/BdaRegistry.js';
 import { getCallSummariesSafe } from '../Utils/BookingCallSummary.js';
 import { SYNC_LIMITS_MS, getAllSyncHealth } from '../Utils/SyncHealth.js';
@@ -302,83 +304,168 @@ async function myMonth(req, res) {
 
 async function reassign(req, res) {
   try {
-    const bookingId = String(req.params.bookingId || '');
     const rawEmail = req.body?.email;
     const clearing = rawEmail === null || rawEmail === '';
-    const email = clearing ? null : normEmail(rawEmail);
-    if (!clearing && (typeof rawEmail !== 'string' || !email)) {
+    if (!clearing && typeof rawEmail !== 'string') {
       return fail(res, 400, 'invalid_body', 'Send { "email": "<tracked BDA email>" }, or null to hand the meeting back');
     }
-
-    const booking = await CampaignBookingModel.findOne({ bookingId })
-      .select('bookingId scheduledEventStartTime calendlyHost claimedBy attendanceAssignee')
-      .lean();
-    if (!booking) return fail(res, 404, 'booking_not_found', 'Booking not found');
-
-    const startMs = booking.scheduledEventStartTime ? new Date(booking.scheduledEventStartTime).getTime() : NaN;
-    if (!Number.isFinite(startMs)) return fail(res, 422, 'no_start_time', 'This booking has no scheduled start time');
-    const now = new Date();
-    const lockedMsg = 'The mark window has opened, so this meeting can no longer be reassigned';
-    if (now.getTime() >= startMs - WINDOW_OPENS_BEFORE_MS) return fail(res, 409, 'window_open', lockedMsg);
-
-    let profile = null;
-    if (!clearing) {
-      profile = await getBdaProfile(email);
-      if (!profile || profile.active === false || profile.tracked !== true) {
-        return fail(res, 422, 'not_tracked_bda', 'The new assignee must be an active, tracked BDA');
-      }
-    }
-
-    const previousEmail = getAssignedBdaEmail(booking);
-    const actor = req.attendanceActor || {};
-    const entry = {
-      email,
-      name: profile?.displayName || null,
-      previousEmail,
-      setBy: actor.email || null,
-      setAt: now,
-    };
-    // The filter repeats the window rule so a click that races the window opening cannot slip through.
-    // findOneAndUpdate skips the booking's save hooks, so the history entry is pushed here.
-    const updated = await CampaignBookingModel.findOneAndUpdate(
-      { bookingId, scheduledEventStartTime: { $gt: new Date(now.getTime() + WINDOW_OPENS_BEFORE_MS) } },
-      {
-        $set: {
-          'attendanceAssignee.email': email,
-          'attendanceAssignee.name': entry.name,
-          'attendanceAssignee.setBy': entry.setBy,
-          'attendanceAssignee.setAt': now,
-        },
-        $push: { attendanceAssigneeHistory: entry },
-      },
-      { new: true }
-    )
-      .select('bookingId attendanceAssignee calendlyHost claimedBy')
-      .lean();
-    if (!updated) return fail(res, 409, 'window_open', lockedMsg);
-
-    // A "your extension is offline" placeholder left for the old assignee would read as a missed meeting. Remove only that.
-    if (previousEmail && previousEmail !== email) {
-      await BdaAttendanceModel.deleteMany({
-        bookingId,
-        bdaEmail: previousEmail,
-        source: 'scheduler',
-        status: 'unmarked',
-        verdict: null,
-        'signals.0': { $exists: false },
-      });
-    }
-
+    const out = await reassignBooking({
+      bookingId: String(req.params.bookingId || ''),
+      email: clearing ? null : rawEmail,
+      actor: req.attendanceActor || {},
+    });
+    if (!out.ok) return fail(res, out.status, out.code, out.message);
     return res.status(200).json({
       success: true,
-      booking: {
-        bookingId,
-        assignedBdaEmail: getAssignedBdaEmail(updated),
-        attendanceAssignee: updated.attendanceAssignee,
-      },
+      booking: { bookingId: String(req.params.bookingId), assignedBdaEmail: out.assignedBdaEmail, attendanceAssignee: out.attendanceAssignee },
+      warnings: out.warnings,
     });
   } catch (err) {
     return internal(res, 'reassign', err);
+  }
+}
+
+const TRANSFER_MAX = 50;
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Batch transfer: { items: [{ bookingId, email }] }, at most 50. One action is one call. Every meeting gets its own
+ * result, so one refusal (window open, target on leave) never blocks the rest. One summary goes to the admin channel.
+ */
+async function reassignBatch(req, res) {
+  try {
+    const items = req.body?.items;
+    if (!Array.isArray(items) || items.length === 0) return fail(res, 422, 'invalid_items', 'Send { "items": [{ "bookingId", "email" }] }');
+    if (items.length > TRANSFER_MAX) return fail(res, 422, 'too_many_items', `Move at most ${TRANSFER_MAX} meetings at a time`);
+    const cleaned = [];
+    for (const it of items) {
+      const bookingId = typeof it?.bookingId === 'string' ? it.bookingId.trim() : '';
+      const email = typeof it?.email === 'string' ? normEmail(it.email) : '';
+      if (!bookingId || bookingId.length > 200 || !email) return fail(res, 422, 'invalid_items', 'Every item needs a bookingId and an email');
+      cleaned.push({ bookingId, email });
+    }
+    if (new Set(cleaned.map((i) => i.bookingId)).size !== cleaned.length) {
+      return fail(res, 422, 'duplicate_booking', 'A meeting can appear only once in a batch');
+    }
+
+    // Two queries for the whole batch: the start times, then who is already booked at those instants.
+    const starts = await CampaignBookingModel.find({ bookingId: { $in: cleaned.map((i) => i.bookingId) } })
+      .select('bookingId clientName scheduledEventStartTime')
+      .lean();
+    const infoOf = new Map(starts.map((b) => [b.bookingId, { clientName: b.clientName || '', startMs: new Date(b.scheduledEventStartTime).getTime() }]));
+    const taken = await loadTakenSlots([...infoOf.values()].map((v) => v.startMs));
+
+    const actor = req.attendanceActor || {};
+    const results = [];
+    for (const { bookingId, email } of cleaned) {
+      const out = await reassignBooking({ bookingId, email, actor, taken });
+      const info = infoOf.get(bookingId);
+      if (out.ok) {
+        // Meetings later in this batch see this one as taken.
+        if (info && Number.isFinite(info.startMs)) taken.set(`${email}|${info.startMs}`, info.clientName || 'another meeting');
+        results.push({ bookingId, ok: true, clientName: info?.clientName ?? '', assignedBdaEmail: out.assignedBdaEmail, previousEmail: out.previousEmail, warnings: out.warnings });
+      } else {
+        results.push({ bookingId, ok: false, clientName: info?.clientName ?? '', error: { code: out.code, message: out.message } });
+      }
+    }
+
+    const moved = results.filter((r) => r.ok);
+    if (moved.length > 0) {
+      const when = (id) => {
+        const ms = infoOf.get(id)?.startMs;
+        return Number.isFinite(ms) ? new Date(ms).toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) : '';
+      };
+      const nameOf = async (email) => (email ? (await getBdaProfile(email))?.displayName || email : 'the Calendly host');
+      const lines = [];
+      for (const r of moved.slice(0, 10)) lines.push(`• ${r.clientName || r.bookingId}, ${when(r.bookingId)} IST: ${await nameOf(r.previousEmail)} → ${await nameOf(r.assignedBdaEmail)}`);
+      const more = moved.length > 10 ? `\n…and ${moved.length - 10} more` : '';
+      postAdminChannel(`🔁 **${moved.length} meeting${moved.length === 1 ? '' : 's'} reassigned** by ${actor.email || 'an admin'}\n${lines.join('\n')}${more}`).catch((err) =>
+        console.warn('[attendanceRoutes] reassign notice failed:', err?.message)
+      );
+    }
+    return res.status(200).json({ success: true, results, summary: { moved: moved.length, failed: results.length - moved.length } });
+  } catch (err) {
+    return internal(res, 'reassign-batch', err);
+  }
+}
+
+/**
+ * Everything the Transfer dialog needs in one call: the BDA's meetings in a date range (each flagged as movable or
+ * already inside the mark window), and every tracked BDA with their leave days and meeting count per day, so the
+ * dialog can show who is free.
+ */
+async function transferCandidates(req, res) {
+  try {
+    const bdaEmail = normEmail(req.query.bdaEmail);
+    if (!bdaEmail) return fail(res, 422, 'invalid_bda', 'bdaEmail is required');
+    const today = DateTime.now().setZone('Asia/Kolkata').startOf('day');
+    const fromDay = req.query.from ? String(req.query.from) : today.toFormat('yyyy-LL-dd');
+    const toDay = req.query.to ? String(req.query.to) : today.plus({ days: 14 }).toFormat('yyyy-LL-dd');
+    if (!DAY_RE.test(fromDay) || !DAY_RE.test(toDay) || toDay < fromDay) {
+      return fail(res, 422, 'invalid_range', 'from and to must be days like 2026-10-25, with to on or after from');
+    }
+    const from = DateTime.fromISO(fromDay, { zone: 'Asia/Kolkata' }).startOf('day');
+    const to = DateTime.fromISO(toDay, { zone: 'Asia/Kolkata' }).endOf('day');
+    if (!from.isValid || !to.isValid || to.diff(from, 'days').days > 31) {
+      return fail(res, 422, 'invalid_range', 'Pick a range of at most 31 days');
+    }
+    const nowMs = Date.now();
+    const range = { $gte: from.toJSDate(), $lte: to.toJSDate() };
+    const live = { $nin: ['canceled', 'rescheduled', 'not-scheduled'] };
+
+    const [mine, everyone, tracked] = await Promise.all([
+      CampaignBookingModel.find({
+        scheduledEventStartTime: range,
+        bookingStatus: live,
+        $or: [{ 'attendanceAssignee.email': bdaEmail }, { 'calendlyHost.email': bdaEmail }, { 'claimedBy.email': bdaEmail }],
+      })
+        .select('bookingId clientName bookingStatus scheduledEventStartTime calendlyHost claimedBy attendanceAssignee')
+        .sort({ scheduledEventStartTime: 1 })
+        .limit(200)
+        .lean(),
+      CampaignBookingModel.find({ scheduledEventStartTime: range, bookingStatus: live })
+        .select('scheduledEventStartTime calendlyHost claimedBy attendanceAssignee')
+        .limit(2000)
+        .lean(),
+      getTrackedBdas(),
+    ]);
+
+    const meetings = mine
+      .filter((b) => getAssignedBdaEmail(b) === bdaEmail)
+      .map((b) => {
+        const startMs = new Date(b.scheduledEventStartTime).getTime();
+        return {
+          bookingId: b.bookingId,
+          clientName: b.clientName || '',
+          bookingStatus: b.bookingStatus ?? null,
+          scheduledStart: iso(b.scheduledEventStartTime),
+          day: istDate(startMs),
+          canMove: nowMs < startMs - WINDOW_OPENS_BEFORE_MS,
+        };
+      });
+
+    const loadOf = new Map();
+    for (const b of everyone) {
+      const email = getAssignedBdaEmail(b);
+      if (!email) continue;
+      const day = istDate(new Date(b.scheduledEventStartTime).getTime());
+      const days = loadOf.get(email) ?? {};
+      days[day] = (days[day] ?? 0) + 1;
+      loadOf.set(email, days);
+    }
+    const bdas = tracked
+      .filter((p) => p.active !== false)
+      .map((p) => ({
+        email: p.email,
+        displayName: p.displayName || p.email.split('@')[0],
+        leaveDays: (p.leaveDays || []).filter((d) => d >= fromDay && d <= toDay),
+        loadByDay: loadOf.get(p.email) ?? {},
+      }))
+      .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+    return res.status(200).json({ success: true, bdaEmail, from: fromDay, to: toDay, meetings, bdas });
+  } catch (err) {
+    return internal(res, 'transfer-candidates', err);
   }
 }
 
@@ -590,6 +677,8 @@ export function registerAttendanceRoutes(app) {
 
   // CRM, admins (crm_admin token or an admin crm_user)
   app.put('/api/crm/admin/bookings/:bookingId/attendance-assignee', requireAttendanceAdmin, reassign);
+  app.post('/api/crm/admin/bookings/reassign', requireAttendanceAdmin, reassignBatch);
+  app.get('/api/crm/admin/transfer-meetings', requireAttendanceAdmin, transferCandidates);
   app.get('/api/crm/admin/attendance/health', requireAttendanceAdmin, health);
   app.get('/api/crm/admin/attendance/review-queues', requireAttendanceAdmin, reviewQueues);
   app.post('/api/crm/admin/attendance/:bookingId/dismiss-integrity-flag', requireAttendanceAdmin, dismissIntegrityFlag);

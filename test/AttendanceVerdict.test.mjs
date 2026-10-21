@@ -1061,6 +1061,106 @@ describe('admin: reassign', () => {
     await call('PUT', `/api/crm/admin/bookings/${bookingId}/attendance-assignee`, { token: adminToken(), body: { email: KAL } });
     assert.equal(await rowOf(bookingId, SID), null);
   });
+
+  it('409 target_on_leave when the new BDA is off that day, and 409 already_assigned for the same BDA', async () => {
+    const start = Date.now() + 3 * 60 * MIN;
+    const bookingId = await mkBooking({ start });
+    await BdaProfileModel.updateOne({ email: KAL }, { $set: { leaveDays: [istDay(start)] } });
+    invalidateRegistryCache();
+    const url = `/api/crm/admin/bookings/${bookingId}/attendance-assignee`;
+    const leave = await call('PUT', url, { token: adminToken(), body: { email: KAL } });
+    assert.equal(leave.status, 409);
+    assert.equal(leave.body.error.code, 'target_on_leave');
+    const same = await call('PUT', url, { token: adminToken(), body: { email: SID } });
+    assert.equal(same.status, 409);
+    assert.equal(same.body.error.code, 'already_assigned');
+    assert.equal((await CampaignBookingModel.findOne({ bookingId }).lean()).attendanceAssignee?.email ?? null, null);
+  });
+
+  it('warns, but still moves the meeting, when the new BDA is already in a meeting at that time', async () => {
+    const start = Date.now() + 4 * 60 * MIN;
+    const mine = await mkBooking({ start, host: SID });
+    await mkBooking({ start, host: KAL });
+    const r = await call('PUT', `/api/crm/admin/bookings/${mine}/attendance-assignee`, { token: adminToken(), body: { email: KAL } });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.booking.assignedBdaEmail, KAL);
+    assert.match(r.body.warnings[0], /^double_booked:/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('admin: transfer meetings in one call', () => {
+  const BATCH = '/api/crm/admin/bookings/reassign';
+
+  it('moves each meeting and reports every one on its own, so a locked meeting does not block the rest', async () => {
+    const a = await mkBooking({ start: Date.now() + 2 * 60 * MIN });
+    const b = await mkBooking({ start: Date.now() + 3 * 60 * MIN });
+    const locked = await mkBooking({ start: Date.now() + 2 * MIN });
+    const r = await call('POST', BATCH, {
+      token: adminToken(),
+      body: { items: [a, locked, b].map((bookingId) => ({ bookingId, email: KAL.toUpperCase() })) },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.summary, { moved: 2, failed: 1 });
+    assert.deepEqual(r.body.results.map((x) => x.ok), [true, false, true]);
+    assert.equal(r.body.results[1].error.code, 'window_open');
+    assert.equal(r.body.results[0].assignedBdaEmail, KAL);
+    assert.equal(r.body.results[0].previousEmail, SID);
+    assert.equal((await CampaignBookingModel.findOne({ bookingId: a }).lean()).attendanceAssignee.email, KAL);
+    assert.equal((await CampaignBookingModel.findOne({ bookingId: locked }).lean()).attendanceAssignee?.email ?? null, null);
+  });
+
+  it('refuses a target on leave per item and warns when two meetings in the batch land on one BDA at one time', async () => {
+    const start = Date.now() + 5 * 60 * MIN;
+    const x = await mkBooking({ start, host: SID });
+    const y = await mkBooking({ start, host: PLAIN });
+    const off = await mkBooking({ start: start + 24 * 60 * MIN, host: SID });
+    await BdaProfileModel.updateOne({ email: KAL }, { $set: { leaveDays: [istDay(start + 24 * 60 * MIN)] } });
+    invalidateRegistryCache();
+    const r = await call('POST', BATCH, {
+      token: adminToken(),
+      body: { items: [{ bookingId: x, email: KAL }, { bookingId: y, email: KAL }, { bookingId: off, email: KAL }] },
+    });
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body.results.map((i) => i.ok), [true, true, false]);
+    assert.equal(r.body.results[0].warnings.length, 0);
+    assert.match(r.body.results[1].warnings[0], /^double_booked:/);
+    assert.equal(r.body.results[2].error.code, 'target_on_leave');
+  });
+
+  it('validates the body: 422 for no items, too many, a duplicate or a missing email; 403 for a non-admin', async () => {
+    const t = adminToken();
+    assert.equal((await call('POST', BATCH, { token: t, body: {} })).body.error.code, 'invalid_items');
+    assert.equal((await call('POST', BATCH, { token: t, body: { items: [{ bookingId: 'x' }] } })).body.error.code, 'invalid_items');
+    const many = Array.from({ length: 51 }, (_, i) => ({ bookingId: `${PREFIX}m${i}`, email: KAL }));
+    assert.equal((await call('POST', BATCH, { token: t, body: { items: many } })).body.error.code, 'too_many_items');
+    const dup = [{ bookingId: `${PREFIX}d`, email: KAL }, { bookingId: `${PREFIX}d`, email: KAL }];
+    assert.equal((await call('POST', BATCH, { token: t, body: { items: dup } })).body.error.code, 'duplicate_booking');
+    assert.equal((await call('POST', BATCH, { token: crmToken(PLAIN), body: { items: dup } })).status, 403);
+    const unknown = await call('POST', BATCH, { token: t, body: { items: [{ bookingId: `${PREFIX}nope`, email: KAL }] } });
+    assert.equal(unknown.body.results[0].error.code, 'booking_not_found');
+  });
+
+  it('the dialog call lists a BDA meetings with canMove, and every tracked BDA with leave days and load', async () => {
+    const day = Date.now() + 26 * 60 * MIN;
+    const soon = await mkBooking({ start: Date.now() + 2 * MIN, host: SID });
+    const later = await mkBooking({ start: day, host: SID });
+    await mkBooking({ start: day, host: KAL });
+    await BdaProfileModel.updateOne({ email: KAL }, { $set: { leaveDays: [istDay(day)] } });
+    invalidateRegistryCache();
+    const to = istDay(day + 24 * 60 * MIN);
+    const r = await call('GET', `/api/crm/admin/transfer-meetings?bdaEmail=${SID}&from=${istDay(Date.now())}&to=${to}`, { token: adminToken() });
+    assert.equal(r.status, 200);
+    const mine = Object.fromEntries(r.body.meetings.map((m) => [m.bookingId, m]));
+    assert.equal(mine[soon].canMove, false);
+    assert.equal(mine[later].canMove, true);
+    assert.equal(mine[later].day, istDay(day));
+    const kal = r.body.bdas.find((x) => x.email === KAL);
+    assert.deepEqual(kal.leaveDays, [istDay(day)]);
+    assert.ok(kal.loadByDay[istDay(day)] >= 1);
+    assert.equal((await call('GET', '/api/crm/admin/transfer-meetings', { token: adminToken() })).body.error.code, 'invalid_bda');
+    assert.equal((await call('GET', `/api/crm/admin/transfer-meetings?bdaEmail=${SID}&from=2026-13-99`, { token: adminToken() })).body.error.code, 'invalid_range');
+  });
 });
 
 // ---------------------------------------------------------------------------
