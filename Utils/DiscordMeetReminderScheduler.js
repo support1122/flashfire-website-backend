@@ -4,6 +4,7 @@ import { DiscordConnect } from './DiscordConnect.js';
 import { ScheduledDiscordMeetReminderModel } from '../Schema_Models/ScheduledDiscordMeetReminder.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { resolveMeetLinkForBooking } from './CalendlyAPIHelper.js';
+import { getAssignedBdaLabel } from './BdaAssignment.js';
 import { parseMeetingStartToDate, logReminderDrift } from './MeetingReminderUtils.js';
 
 dotenv.config();
@@ -422,14 +423,8 @@ export async function processDueDiscordMeetReminders() {
               ? rawStart
               : null;
         const headline = headlineForSendTime(headlineStart);
-        // Prefer the Calendly round-robin host (who the meeting is assigned to);
-        // fall back to a manual claim if a BDA has claimed it in the CRM.
-        const claimedBda =
-          booking?.calendlyHost?.name ||
-          booking?.calendlyHost?.email ||
-          booking?.claimedBy?.name ||
-          booking?.claimedBy?.email ||
-          null;
+        // Who the meeting belongs to now: an admin transfer wins, then the Calendly round-robin host, then a CRM claim.
+        const claimedBda = getAssignedBdaLabel(booking);
 
         // Heal a link that was empty at booking time (host added Google Meet to Calendly later).
         const liveMeetingLink = await resolveMeetLinkForBooking(booking, reminder.meetingLink).catch(() => reminder.meetingLink);

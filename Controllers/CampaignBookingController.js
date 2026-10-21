@@ -33,16 +33,28 @@ import { crmUserMetaLeadsOnly, crmUserBdaOwnEmailScope } from '../Middlewares/Cr
  * as a Meta lead that never got a host resolved).
  * No-op (returns matchQuery unchanged) for admins.
  */
-function applyBdaOwnLeadScope(matchQuery, req) {
+export function applyBdaOwnLeadScope(matchQuery, req) {
   const ownEmail = crmUserBdaOwnEmailScope(req);
   if (!ownEmail) return matchQuery;
 
   matchQuery.$and = matchQuery.$and || [];
+  // An admin transfer (attendanceAssignee) decides first: the new BDA sees the meeting and the old one stops seeing
+  // it. With no transfer, the Calendly host rule below is unchanged.
   matchQuery.$and.push({
     $or: [
-      { 'calendlyHost.email': caseInsensitiveExact(ownEmail) },
-      { 'calendlyHost.email': { $in: [null, ''] } },
-      { calendlyHost: { $exists: false } },
+      { 'attendanceAssignee.email': caseInsensitiveExact(ownEmail) },
+      {
+        $and: [
+          { 'attendanceAssignee.email': { $in: [null, ''] } },
+          {
+            $or: [
+              { 'calendlyHost.email': caseInsensitiveExact(ownEmail) },
+              { 'calendlyHost.email': { $in: [null, ''] } },
+              { calendlyHost: { $exists: false } },
+            ],
+          },
+        ],
+      },
     ],
   });
   return matchQuery;
