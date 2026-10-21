@@ -23,6 +23,19 @@ export function getAssignedBdaEmail(booking) {
   return null;
 }
 
+/**
+ * A name to show for the assigned BDA, in the same order as getAssignedBdaEmail: an admin reassignment first, then
+ * the Calendly host, then a CRM claim. Name when known, else the email. Null when nobody is assigned. Used where a
+ * reminder or a recap names the BDA, so a transferred meeting names the new BDA and not the old host.
+ */
+export function getAssignedBdaLabel(booking) {
+  for (const who of [booking?.attendanceAssignee, booking?.calendlyHost, booking?.claimedBy]) {
+    const label = String(who?.name || who?.email || '').trim();
+    if (label) return label;
+  }
+  return null;
+}
+
 /** True when `email` is the one assigned BDA. A colleague who merely joined is not assigned. */
 export function isBookingAssignedTo(booking, email) {
   const me = normEmail(email);

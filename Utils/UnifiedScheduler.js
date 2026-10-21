@@ -24,6 +24,7 @@ import { normalizeTimezoneLabel, buildMeetingDisplay } from './MeetingReminderUt
 import { formatMeetingWallTime, headlineForSendTime, scheduleDiscordMeetReminder } from './DiscordMeetReminderScheduler.js';
 import { resolveCalendlyHostByEventUri } from './CalendlyAPIHelper.js';
 import { normalizePhoneForReminders } from './MeetingReminderUtils.js';
+import { getAssignedBdaLabel } from './BdaAssignment.js';
 import { DateTime } from 'luxon';
 
 dotenv.config();
@@ -343,7 +344,7 @@ export class UnifiedScheduler {
       .sort({ bookingCreatedAt: -1 })
       // calendlyHost + claimedBy are needed to route Kalpataru-assigned meetings
       // to their dedicated Discord channel in _processOneDiscord.
-      .select('bookingId clientEmail bookingStatus statusChangeSource statusChangedAt scheduledEventStartTime calendlyHost claimedBy')
+      .select('bookingId clientEmail bookingStatus statusChangeSource statusChangedAt scheduledEventStartTime calendlyHost claimedBy attendanceAssignee')
       .lean();
 
     const byId = new Map();
@@ -643,16 +644,8 @@ export class UnifiedScheduler {
         (bIdDisc && bookingMap.byId.get(bIdDisc)) ||
         ((reminder.clientEmail || '') && bookingMap.byEmail.get(String(reminder.clientEmail).toLowerCase().trim())) ||
         null;
-      const assignedBdaName = (
-        bookingForRoute?.calendlyHost?.name ||
-        bookingForRoute?.claimedBy?.name ||
-        ''
-      ).trim();
-      const assignedBdaLabel =
-        assignedBdaName ||
-        bookingForRoute?.calendlyHost?.email ||
-        bookingForRoute?.claimedBy?.email ||
-        'Not assigned';
+      // An admin transfer (attendanceAssignee) wins over the Calendly host and a CRM claim.
+      const assignedBdaLabel = getAssignedBdaLabel(bookingForRoute) || 'Not assigned';
       const targetWebhook = DISCORD_MEET_WEBHOOK;
 
       const content = [

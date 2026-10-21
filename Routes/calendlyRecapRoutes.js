@@ -7,7 +7,7 @@ import { CalendlyRecapModel } from '../Schema_Models/CalendlyRecap.js';
 import { IntegrationKeyModel } from '../Schema_Models/IntegrationKey.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { DiscordConnect } from '../Utils/DiscordConnect.js';
-import { getAssignedBdaEmail } from '../Utils/BdaAssignment.js';
+import { getAssignedBdaEmail, getAssignedBdaLabel } from '../Utils/BdaAssignment.js';
 import { parseRecapEmail } from '../Utils/CalendlyRecapParser.js';
 import { matchRecapToBooking } from '../Utils/CalendlyRecapMatcher.js';
 import { requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
@@ -89,7 +89,7 @@ async function postRecapToDiscord(recap, booking) {
   const when = booking?.scheduledEventStartTime
     ? DateTime.fromJSDate(new Date(booking.scheduledEventStartTime), { zone: 'Asia/Kolkata' }).toFormat('dd MMM, hh:mm a')
     : null;
-  const bda = booking ? booking.calendlyHost?.name || getAssignedBdaEmail(booking) : null;
+  const bda = booking ? getAssignedBdaLabel(booking) : null;
   const header =
     `📅 **${recap.subject || 'Calendly meeting summary'}**\n` +
     (booking ? `**Client:** ${booking.clientName || '-'}${when ? ` · ${when} IST` : ''}${bda ? ` · **BDA:** ${bda}` : ''}\n` : `_Not linked to a booking yet (${recap.matchStatus})._\n`) +
