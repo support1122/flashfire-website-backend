@@ -1,5 +1,6 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { UserModel } from '../Schema_Models/User.js';
+import { getPaidPlanPayments } from './StripeDataController.js';
 
 /**
  * Sales funnel table for the CRM Analytics tab.
@@ -17,7 +18,12 @@ import { UserModel } from '../Schema_Models/User.js';
  *   completed  = attended but not (yet) paid, i.e. a 'completed' booking and no 'paid' one
  *   no-show    = never attended and has a 'no-show' booking
  *   canceled   = scheduled, never attended / no-show, latest live booking is 'canceled'
- *   paid       = a booking is 'paid'
+
+ * Paid / Revenue come from Stripe, NOT from booking status, and are bucketed by the ET day
+ * of the payment (same data as the Stripe Data tab: succeeded charges + manual payments,
+ * add-ons and upgrades excluded). Paid = number of payments; Revenue = USD payments only
+ * (other currencies are counted in Paid and returned per currency in `otherRevenue`).
+ *
  * People whose every booking is 'ignored' (duplicates / junk) are dropped.
  *
  * Day/month/quarter boundaries are in ET, like the rest of the graphs.
@@ -101,16 +107,8 @@ function buildRows(view, fromQ, toQ) {
 }
 
 const emptyBucket = () => ({
-  forms: 0, scheduled: 0, canceled: 0, attended: 0, completed: 0, noShow: 0, paid: 0, revenue: 0,
+  forms: 0, scheduled: 0, canceled: 0, attended: 0, completed: 0, noShow: 0, paid: 0, paidUsd: 0, revenue: 0, otherRevenue: {},
 });
-
-/** Revenue of one paid booking: the breakdown lines when present, else the plan price. */
-function bookingRevenue(b) {
-  if (Array.isArray(b.paymentBreakdown) && b.paymentBreakdown.length > 0) {
-    return b.paymentBreakdown.reduce((s, l) => s + (Number(l.amount) || 0), 0);
-  }
-  return Number(b.paymentPlan?.price) || 0;
-}
 
 export const getFunnelAnalytics = async (req, res) => {
   try {
@@ -172,10 +170,9 @@ export const getFunnelAnalytics = async (req, res) => {
 
       const statuses = live.map((b) => b.bookingStatus);
       const scheduled = statuses.some((s) => s && s !== 'not-scheduled');
-      const paidBookings = live.filter((b) => b.bookingStatus === 'paid');
-      const paid = paidBookings.length > 0;
-      const attended = paid || statuses.includes('completed');
-      const completed = !paid && statuses.includes('completed');
+      const paidStatus = statuses.includes('paid');
+      const attended = paidStatus || statuses.includes('completed');
+      const completed = !paidStatus && statuses.includes('completed');
       const noShow = !attended && statuses.includes('no-show');
       let canceled = false;
       if (scheduled && !attended && !noShow) {
@@ -185,7 +182,6 @@ export const getFunnelAnalytics = async (req, res) => {
         canceled = latest?.bookingStatus === 'canceled';
       }
 
-      const revenue = paidBookings.reduce((s, b) => s + bookingRevenue(b), 0);
       [buckets.get(key), total].forEach((t) => {
         t.forms += 1;
         if (scheduled) t.scheduled += 1;
@@ -193,14 +189,37 @@ export const getFunnelAnalytics = async (req, res) => {
         if (attended) t.attended += 1;
         if (completed) t.completed += 1;
         if (noShow) t.noShow += 1;
-        if (paid) t.paid += 1;
-        t.revenue += revenue;
       });
     });
+
+    // Paid / revenue straight from Stripe, by payment day. A Stripe outage must not take
+    // the rest of the table down, so report it and leave those two columns at 0.
+    let stripeError = null;
+    try {
+      const payments = await getPaidPlanPayments();
+      payments.forEach((pay) => {
+        const key = keyOf(etDay(pay.date));
+        const bucket = buckets.get(key);
+        if (!bucket) return;
+        [bucket, total].forEach((t) => {
+          t.paid += 1;
+          if (pay.currency === 'USD') {
+            t.paidUsd += 1;
+            t.revenue += pay.amount;
+          } else {
+            t.otherRevenue[pay.currency] = (t.otherRevenue[pay.currency] || 0) + pay.amount;
+          }
+        });
+      });
+    } catch (err) {
+      console.error('Funnel: Stripe payments unavailable:', err.message);
+      stripeError = err.message || 'Stripe payments unavailable';
+    }
 
     return res.json({
       success: true,
       data: {
+        stripeError,
         view,
         timezone: TZ,
         from: from || null,
