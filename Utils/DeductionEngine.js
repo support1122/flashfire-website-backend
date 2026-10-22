@@ -6,6 +6,7 @@ import { DateTime } from 'luxon';
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { BdaDeductionDigestModel } from '../Schema_Models/BdaDeductionDigest.js';
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
+import { BdaHeartbeatLogModel } from '../Schema_Models/BdaHeartbeatLog.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { attendanceEvents, EVENTS } from './attendanceEvents.js';
 import { countableReason, getAssignedBdaEmail, isAfterGoLive, istDate, statusAtStart } from './BdaAssignment.js';
@@ -53,7 +54,7 @@ const istDay = (ms) => DateTime.fromMillis(ms, { zone: IST_ZONE }).toFormat('yyy
 
 const BOOKING_FIELDS = [
   'bookingId', 'clientName', 'clientPhone', 'normalizedClientPhone', 'bookingStatus', 'statusHistory',
-  'statusChangedAt', 'scheduledEventStartTime', 'attendanceAssignee', 'calendlyHost', 'claimedBy',
+  'statusChangedAt', 'scheduledEventStartTime', 'attendanceAssignee', 'calendlyHost', 'claimedBy', 'googleMeetCode',
 ].join(' ');
 
 // ---------------------------------------------------------------------------------------------------------
@@ -112,7 +113,22 @@ export function makeContext(opts = {}) {
     loadAttendance:
       opts.loadAttendance ??
       (async (bookingId, bdaEmail) =>
-        BdaAttendanceModel.findOne({ bookingId, bdaEmail }).select('verdict verdictAt verdictCorrectedAt signals sessions joinedAt leftAt').lean()),
+        BdaAttendanceModel.findOne({ bookingId, bdaEmail }).select('verdict verdictAt verdictCorrectedAt signals sessions joinedAt leftAt participantsAtJoin').lean()),
+    // Did the BDA's own extension report them in THIS meeting's call around the start? Returns { firstAt, lastAt } or null.
+    loadInCall:
+      opts.loadInCall ??
+      (async (bdaEmail, meetCode, startMs) => {
+        if (!meetCode) return null;
+        const rows = await BdaHeartbeatLogModel.find({
+          bdaEmail,
+          at: { $gte: new Date(startMs - 5 * 60_000), $lte: new Date(startMs + 35 * 60_000) },
+          meetTabs: { $elemMatch: { code: meetCode, inCall: true } },
+        })
+          .select('at')
+          .sort({ at: 1 })
+          .lean();
+        return rows.length ? { firstAt: rows[0].at, lastAt: rows[rows.length - 1].at } : null;
+      }),
     // Attendance rows of OTHER BDAs for the same meeting, to see whether a colleague covered it.
     loadCover:
       opts.loadCover ??
@@ -215,7 +231,8 @@ export function judgeStatusNotUpdated({ booking, profile, nowMs, deadlineMs }) {
 
 /**
  * Pure. Given the month's missed_meeting rows, returns the target tierIndex and amount for each.
- * `active` rows are ordered by scheduledStart and priced 1..N. `shadow` rows are ordered among themselves only,
+ * `active` rows are ordered by scheduledStart and numbered 1..N. A meeting from the flat-rate date on costs the base
+ * amount whatever its number; an earlier one keeps the old tiers (see missedMeetingAmount). `shadow` rows are ordered among themselves only,
  * a projection for the shadow-week review that never mixes with real tiers. Other statuses are ignored.
  */
 export function planTiers(rows) {
@@ -225,9 +242,9 @@ export function planTiers(rows) {
       .filter((r) => r.status === status)
       .map((r) => ({ r, key: toMs(r.evidence?.scheduledStart) ?? toMs(r.createdAt) ?? 0 }))
       .sort((a, b) => a.key - b.key || String(a.r.deductionId).localeCompare(String(b.r.deductionId)));
-    group.forEach(({ r }, i) => {
+    group.forEach(({ r, key }, i) => {
       const tierIndex = i + 1;
-      const amountInr = missedMeetingAmount(tierIndex);
+      const amountInr = missedMeetingAmount(tierIndex, key);
       plan.push({
         deductionId: r.deductionId,
         status,
@@ -415,8 +432,30 @@ async function coverFor(ctx, bookingId, email) {
 }
 
 /**
- * Create the missed_meeting row for one absent verdict. `healthy` false, or a colleague who covered the meeting,
- * makes it needs_review: it is written but does not count until an admin decides.
+ * Signed-in participants in the Meet roster whose name is a shared team account (for example "FLASHFIRE"). Someone
+ * from the team was in the call, but not as a BDA the roster could match, so the engine saw nobody.
+ */
+export function sharedAccountsIn(roster) {
+  const names = DEDUCTION_POLICY.sharedStaffAccountNames;
+  return (roster ?? [])
+    .filter((p) => p?.kind === 'signedin' && names.some((n) => String(p.displayName ?? '').toLowerCase().includes(n)))
+    .map((p) => ({ displayName: p.displayName }));
+}
+
+/** The BDA's own extension reported them in this meeting's call. A failed lookup is "no evidence", never a block. */
+async function inCallFor(ctx, bdaEmail, booking, startMs) {
+  try {
+    return (await ctx.loadInCall(bdaEmail, booking.googleMeetCode ?? null, startMs)) ?? null;
+  } catch (err) {
+    console.warn('[DeductionEngine] in-call check failed:', err?.message);
+    return null;
+  }
+}
+
+/**
+ * Create the missed_meeting row for one absent verdict. `healthy` false makes it needs_review. So does evidence that
+ * the meeting was attended after all: a colleague in the call, a shared team account in the roster, or the BDA's own
+ * extension reporting them in the call. A held row is written but does not count until an admin decides.
  * Returns { created, reason? }.
  */
 async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy }) {
@@ -436,11 +475,16 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
   if (att && countedSignals(att.signals, startMs, att).length > 0) return { created: false, reason: 'has_in_time_evidence' };
 
   const coveredBy = await coverFor(ctx, booking.bookingId, email);
+  const unattributedStaff = sharedAccountsIn(att?.participantsAtJoin);
+  const extensionInCall = await inCallFor(ctx, email, booking, startMs);
+  const heldForReview = coveredBy.length > 0 || unattributedStaff.length > 0 || Boolean(extensionInCall);
 
   const evidence = {
     scheduledStart: new Date(startMs),
     windowClosedAt: new Date(startMs + WINDOW_CLOSE_MS),
     coveredBy: plainJson(coveredBy),
+    unattributedStaff: plainJson(unattributedStaff),
+    extensionInCall: plainJson(extensionInCall),
     signals: plainJson(signals ?? att?.signals ?? []),
     bookingStatus: booking.bookingStatus ?? null,
     callSummary: plainJson(await callSummaryFor(ctx, booking)),
@@ -456,7 +500,7 @@ async function createMissedMeeting(ctx, { booking, bdaEmail, signals, healthy })
       bdaEmail: email,
       rule: 'missed_meeting',
       startMs,
-      status: statusForNew(ctx, healthy && coveredBy.length === 0),
+      status: statusForNew(ctx, healthy && !heldForReview),
       amountInr: DEDUCTION_POLICY.missedMeeting.baseAmountInr,
       evidence,
     },
@@ -654,6 +698,8 @@ export async function evaluateNoShowNotCalled(opts = {}) {
         toMs: startMs + p.noShowNotCalled.healthWindowMs,
         maxAgeMs: SYNC_LIMITS_MS.zoom_phone,
       });
+      // A colleague covered the meeting, so ringing the no-show client was theirs to do: hold it for review.
+      const coveredBy = await coverFor(ctx, booking.bookingId, email);
       const row = await createAndAnnounce(
         ctx,
         {
@@ -661,7 +707,7 @@ export async function evaluateNoShowNotCalled(opts = {}) {
           bdaEmail: email,
           rule: 'no_show_not_called',
           startMs,
-          status: statusForNew(ctx, healthy),
+          status: statusForNew(ctx, healthy && coveredBy.length === 0),
           evidence: {
             scheduledStart: new Date(startMs),
             windowClosedAt: new Date(startMs + p.noShowNotCalled.callWindowMs),
@@ -670,6 +716,7 @@ export async function evaluateNoShowNotCalled(opts = {}) {
             callSummary: plainJson(summary),
             clientName: booking.clientName ?? null,
             healthy,
+            coveredBy: plainJson(coveredBy),
           },
         },
         profile,
@@ -717,6 +764,8 @@ export async function evaluateStatusNotUpdated(opts = {}) {
       // so a sample near the deadline proves it.
       const at = startMs + deadlineMs;
       const healthy = await ctx.syncRanBetween('verdict_job', at - 10 * MIN, at);
+      // A colleague covered the meeting, so updating its status was theirs to do: hold it for review.
+      const coveredBy = await coverFor(ctx, booking.bookingId, email);
       const row = await createAndAnnounce(
         ctx,
         {
@@ -724,7 +773,7 @@ export async function evaluateStatusNotUpdated(opts = {}) {
           bdaEmail: email,
           rule: 'status_not_updated',
           startMs,
-          status: statusForNew(ctx, healthy),
+          status: statusForNew(ctx, healthy && coveredBy.length === 0),
           evidence: {
             scheduledStart: new Date(startMs),
             windowClosedAt: new Date(at),
@@ -733,6 +782,7 @@ export async function evaluateStatusNotUpdated(opts = {}) {
             callSummary: null,
             clientName: booking.clientName ?? null,
             healthy,
+            coveredBy: plainJson(coveredBy),
           },
         },
         profile,

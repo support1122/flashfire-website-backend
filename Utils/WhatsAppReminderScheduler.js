@@ -310,6 +310,7 @@ export async function scheduleAllWhatsAppReminders({
 }) {
   const results = {
     'immediate': { success: false, skipped: false },
+    '24h': { success: false, skipped: true },
     '3h': { success: false, skipped: false },
     '1h': { success: false, skipped: false },
     '5min': { success: false, skipped: false }
@@ -318,12 +319,12 @@ export async function scheduleAllWhatsAppReminders({
   const meetingStart = parseMeetingStartToDate(meetingStartISO);
   if (!meetingStart) {
     const e = { success: false, skipped: false, error: 'Invalid meeting start' };
-    return { immediate: e, '3h': e, '1h': e, '5min': e };
+    return { immediate: e, '24h': e, '3h': e, '1h': e, '5min': e };
   }
   const normalizedPhone = normalizePhoneForReminders(phoneNumber);
   if (!normalizedPhone || !/^\+?[1-9]\d{9,14}$/.test(normalizedPhone)) {
     const e = { success: false, skipped: false, error: 'Invalid phone' };
-    return { immediate: e, '3h': e, '1h': e, '5min': e };
+    return { immediate: e, '24h': e, '3h': e, '1h': e, '5min': e };
   }
   phoneNumber = normalizedPhone;
 
@@ -428,6 +429,29 @@ export async function scheduleAllWhatsAppReminders({
     results['immediate'] = { success: false, error: error.message };
   }
 
+  // 24h reminder. Skipped silently when the meeting is under 24h away (the 24h mark is
+  // already past, and a "tomorrow" message sent late would be wrong), so no Discord
+  // "skipped" noise for the many same-day bookings.
+  const has24h = hoursUntilMeeting > 24;
+  if (has24h) {
+    results['24h'] = await scheduleWhatsAppReminder({
+      phoneNumber,
+      meetingStartISO,
+      meetingTime,
+      meetingDate,
+      clientName,
+      clientEmail,
+      meetingLink,
+      rescheduleLink,
+      cancelLink,
+      source,
+      metadata,
+      timezone,
+      reminderOffsetMinutes: 24 * 60,
+      reminderType: '24h'
+    });
+  }
+
   if (hoursUntilMeeting > 3) {
     const result3h = await scheduleWhatsAppReminder({
       phoneNumber,
@@ -530,14 +554,16 @@ export async function scheduleAllWhatsAppReminders({
   if (DISCORD_WEBHOOK) {
     const scheduledCount = Object.values(results).filter(r => r.success).length;
     const skippedCount = Object.values(results).filter(r => r.skipped).length;
+    const totalCount = has24h ? 5 : 4;
     
     await DiscordConnect(DISCORD_WEBHOOK,
       `📋 WA Reminders Summary (${source})\n` +
       `📞 ${phoneNumber} • ${clientName || 'Unknown'}\n` +
       `📧 ${clientEmail || 'Unknown'}\n` +
       `🗓️ ${meetingDate} @ ${meetingTime}\n` +
-      `✅ Scheduled: ${scheduledCount}/4\n` +
+      `✅ Scheduled: ${scheduledCount}/${totalCount}\n` +
       `   • Immediate: ${results['immediate'].success ? '✅' : (results['immediate'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
+      (has24h ? `   • 24h: ${results['24h'].success ? '✅' : '❌ Failed'}\n` : '') +
       `   • 3h: ${results['3h'].success ? '✅' : (results['3h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
       `   • 1h: ${results['1h'].success ? '✅' : (results['1h'].skipped ? '⏭️ Skipped' : '❌ Failed')}\n` +
       `   • 5min: ${results['5min'].success ? '✅' : (results['5min'].skipped ? '⏭️ Skipped' : '❌ Failed')}`
@@ -599,7 +625,7 @@ export async function cancelWhatsAppReminder({ phoneNumber, meetingStartISO }) {
       return { success: false, error: 'Invalid meeting start time' };
     }
 
-    const reminderTypes = ['immediate', '3h', '1h', '5min'];
+    const reminderTypes = ['immediate', '24h', '3h', '1h', '5min'];
     const cancelledReminders = [];
 
     for (const reminderType of reminderTypes) {
@@ -755,7 +781,7 @@ export function resolveUnknownWhatsAppMeetingDisplay(scheduledReminder) {
 
   // Fallback: reverse from scheduledFor + offset stored at schedule time
   if (scheduledReminder.scheduledFor) {
-    const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '2hour': 120, '24hour': 1440 };
+    const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '24h': 1440, '2hour': 120, '24hour': 1440 };
     const reminderType = meta.reminderType ?? scheduledReminder.reminderType;
     const offsetMin =
       Number.isFinite(meta.reminderOffsetMinutes) && meta.reminderOffsetMinutes > 0
@@ -869,7 +895,7 @@ export async function sendWhatsAppMessage(scheduledReminder) {
       if (startFromIso) {
         resolvedMeetingDate = DateTime.fromJSDate(startFromIso, { zone: 'utc' }).setZone(displayZone).toFormat('EEEE MMM d, yyyy');
       } else if (scheduledReminder.scheduledFor) {
-        const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '2hour': 120, '24hour': 1440 };
+        const offsetMap = { immediate: 1, '5min': 5, '1h': 60, '3h': 180, '24h': 1440, '2hour': 120, '24hour': 1440 };
         const reminderType = meta.reminderType ?? scheduledReminder.reminderType;
         const offsetMin = offsetMap[reminderType] ?? 5;
         const derived = new Date(new Date(scheduledReminder.scheduledFor).getTime() + offsetMin * 60 * 1000);

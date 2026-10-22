@@ -142,6 +142,42 @@ describe('planTiers', () => {
   });
 });
 
+describe('flat 500 per missed meeting from 22 Oct 2026', () => {
+  const FLAT = DEDUCTION_POLICY.missedMeeting.flatFromMs;
+  const row = (id, startMs, status = 'active') => ({ deductionId: id, status, tierIndex: null, amountInr: 500, evidence: { scheduledStart: new Date(startMs) } });
+
+  it('starts at midnight IST on 22 Oct and the amount for a meeting uses its own start', () => {
+    assert.equal(new Date(FLAT).toISOString(), '2026-10-21T18:30:00.000Z');
+    assert.equal(missedMeetingAmount(7), 1000, 'no start given: the old tiers');
+    assert.equal(missedMeetingAmount(7, FLAT - 1), 1000, 'the last millisecond before the date keeps the old tiers');
+    assert.equal(missedMeetingAmount(7, FLAT), 500);
+    assert.equal(missedMeetingAmount(30, FLAT + 86_400_000), 500, 'never escalates after that');
+    assert.equal(missedMeetingAmount(6, Date.UTC(2026, 9, 1)), 1000);
+  });
+
+  it('a month of only flat meetings is 500 each, however many', () => {
+    const plan = planTiers(Array.from({ length: 9 }, (_, i) => row(`f${i}`, FLAT + i * 3_600_000)));
+    assert.ok(plan.every((p) => p.amountInr === 500));
+    assert.deepEqual(plan.map((p) => p.tierIndex), [1, 2, 3, 4, 5, 6, 7, 8, 9], 'the count is still shown');
+    assert.equal(total(plan), 4500);
+  });
+
+  it('a month that crosses the date keeps the old charges before it and is flat after it', () => {
+    const before = Array.from({ length: 7 }, (_, i) => row(`b${i}`, FLAT - (8 - i) * 86_400_000));
+    const after = Array.from({ length: 3 }, (_, i) => row(`a${i}`, FLAT + i * 3_600_000));
+    const plan = planTiers([...after, ...before]);
+    assert.deepEqual(plan.map((p) => p.amountInr), [500, 500, 500, 500, 500, 1000, 1000, 500, 500, 500]);
+    assert.equal(total(plan), 6000, '5 x 500 + 2 x 1000 + 3 x 500');
+  });
+
+  it('waiving an earlier meeting never changes a flat one', () => {
+    const rows = [row('b1', FLAT - 3 * 86_400_000), row('b2', FLAT - 2 * 86_400_000, 'waived'), row('a1', FLAT + 1000)];
+    assert.deepEqual(planTiers(rows).map((p) => p.amountInr), [500, 500]);
+  });
+
+  function total(plan) { return plan.reduce((sum, p) => sum + p.amountInr, 0); }
+});
+
 describe('buildTotals', () => {
   it('counts active rows only, per rule', () => {
     const t = buildTotals([

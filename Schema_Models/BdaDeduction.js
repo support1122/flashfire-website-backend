@@ -17,6 +17,10 @@ const EvidenceSchema = new mongoose.Schema(
     // Colleagues the attendance record shows in the meeting while the assigned BDA was not: [{ bdaEmail, bdaName, joinedAt, minutes }].
     // Non-empty means the row was written as needs_review. This schema is strict, so a field left out here is silently dropped.
     coveredBy: { type: Array, default: [] },
+    // Shared team accounts (e.g. "FLASHFIRE") that were in the Meet roster: [{ displayName }]. Also holds the row for review.
+    unattributedStaff: { type: Array, default: [] },
+    // { firstAt, lastAt } when the BDA's own extension reported them in this meeting's call. Also holds the row for review.
+    extensionInCall: { type: mongoose.Schema.Types.Mixed, default: null },
     // Other meetings at the same time and whether the BDA was in one: [{ bookingId, clientName, attended }].
     doubleBookedWith: { type: Array, default: [] },
     // Set when a person wrote the fine: an admin marked a call absent, or approved a BDA's own report.
