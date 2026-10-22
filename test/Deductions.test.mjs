@@ -196,6 +196,49 @@ describe('a colleague covered the meeting', () => {
   });
 });
 
+describe('other signs the meeting was attended hold the fine for review', () => {
+  const START = '2026-10-05T10:00:00Z';
+  const ownRow = (bookingId, participantsAtJoin) =>
+    BdaAttendanceModel.create({
+      bookingId, bdaEmail: SID, bdaName: 'Sid', meetingScheduledStart: startOf(START),
+      status: 'unmarked', verdict: 'absent', source: 'meet_api', signals: [], participantsAtJoin,
+    });
+
+  it('a shared team account (FLASHFIRE) in the roster holds it and records the account', async () => {
+    const id = await mkBooking('stf1', START);
+    await ownRow(id, [{ displayName: 'FLASHFIRE', kind: 'signedin' }, { displayName: 'Calendly Notetaker', kind: 'anonymous' }]);
+    await handleVerdict(absentEvent(id, START), opts());
+    const [row] = await rowsOf(SID);
+    assert.equal(row.status, 'needs_review');
+    assert.deepEqual(row.evidence.unattributedStaff.map((p) => p.displayName), ['FLASHFIRE']);
+  });
+
+  it('only the notetaker and the client in the roster is a real miss and stays active', async () => {
+    const id = await mkBooking('stf2', START);
+    await ownRow(id, [{ displayName: 'Calendly Notetaker', kind: 'anonymous' }, { displayName: 'A Client', kind: 'anonymous' }]);
+    await handleVerdict(absentEvent(id, START), opts());
+    const [row] = await rowsOf(SID);
+    assert.equal(row.status, 'active');
+    assert.deepEqual(row.evidence.unattributedStaff, []);
+    assert.equal(row.evidence.extensionInCall, null);
+  });
+
+  it('the BDA own extension reporting them in this call holds it, with when; a failed lookup does not block the fine', async () => {
+    const held = await mkBooking('ext1', START);
+    const calls = [];
+    await handleVerdict(absentEvent(held, START), opts({ loadInCall: async (email, code, startMs) => { calls.push({ email, code, startMs }); return { firstAt: plusMin(START, 2), lastAt: plusMin(START, 20) }; } }));
+    const [row] = await rowsOf(SID);
+    assert.equal(row.status, 'needs_review');
+    assert.equal(new Date(row.evidence.extensionInCall.firstAt).toISOString(), plusMin(START, 2).toISOString());
+    assert.equal(calls[0].email, SID);
+    assert.equal(calls[0].startMs, startOf(START).getTime());
+
+    const broken = await mkBooking('ext2', '2026-10-06T10:00:00Z');
+    await handleVerdict(absentEvent(broken, '2026-10-06T10:00:00Z'), opts({ loadInCall: async () => { throw new Error('db down'); } }));
+    assert.equal((await rowsOf(SID)).find((r) => r.bookingId === broken).status, 'active');
+  });
+});
+
 describe('missed_meeting tiers (plan 2.5 and 8.5)', () => {
   it('7 misses in a month cost 500 x 5 + 1000 x 2 = 4500, however they arrive', async () => {
     const days = [2, 3, 4, 5, 6, 7, 8];
@@ -210,6 +253,22 @@ describe('missed_meeting tiers (plan 2.5 and 8.5)', () => {
     assert.ok(rows.every((r) => r.status === 'active'));
     assert.equal(rows.reduce((s, r) => s + r.amountInr, 0), 4500);
     assert.equal(posts.length, 7);
+  });
+
+  it('from 22 Oct a miss is a flat 500 even as the 7th and 8th of the month, and earlier ones keep their old charge', async () => {
+    const later = new Date('2026-10-30T00:00:00Z');
+    const old = {};
+    for (const d of [2, 3, 4, 5, 6, 7]) old[d] = await mkBooking(`f${d}`, `2026-10-0${d}T10:00:00Z`);
+    const a = await mkBooking('f22', '2026-10-22T10:00:00Z');
+    const b = await mkBooking('f23', '2026-10-23T10:00:00Z');
+    for (const d of [2, 3, 4, 5, 6, 7]) await handleVerdict(absentEvent(old[d], `2026-10-0${d}T10:00:00Z`), opts({ now: later }));
+    await handleVerdict(absentEvent(b, '2026-10-23T10:00:00Z'), opts({ now: later }));
+    await handleVerdict(absentEvent(a, '2026-10-22T10:00:00Z'), opts({ now: later }));
+
+    const rows = await rowsOf(SID, '2026-10');
+    assert.deepEqual(rows.map((r) => r.tierIndex), [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(rows.map((r) => r.amountInr), [500, 500, 500, 500, 500, 1000, 500, 500]);
+    assert.equal(rows.reduce((sum, r) => sum + r.amountInr, 0), 4500);
   });
 
   it('waiving the 2nd re-prices the rest to 3500 and keeps the waived row with who, when and why', async () => {
@@ -565,6 +624,21 @@ describe('no_show_not_called (plan 2.5, D1)', () => {
     assert.match(posts[0].content, /^<@111111111111111111> ₹100 deduction, Sid: no-show Client ns-late at 3:30 PM IST, no call within 30 min\.$/);
   });
 
+  it('holds the fine for review when a colleague covered the no-show meeting, and still fines when nobody did', async () => {
+    const cover = (bookingId, startIso) => BdaAttendanceModel.create({
+      bookingId, bdaEmail: KAL, bdaName: 'Kal', meetingScheduledStart: startOf(startIso), status: 'present', verdict: 'present',
+      source: 'meet_api', firstJoinedAt: plusMin(startIso, -1), durationMs: 25 * 60000, signals: [{ kind: 'extension_join', eventAt: plusMin(startIso, -1) }],
+    });
+    const covered = await noShow('ns-cov');
+    await cover(covered, START);
+    const alone = await noShow('ns-alone', { phone: `+1 ${digits(10)}` });
+    await evaluateNoShowNotCalled(at(60));
+    const rows = await rowsOf(SID, undefined, 'no_show_not_called');
+    assert.equal(rows.find((r) => r.bookingId === covered).status, 'needs_review');
+    assert.equal(rows.find((r) => r.bookingId === covered).evidence.coveredBy[0].bdaEmail, KAL);
+    assert.equal(rows.find((r) => r.bookingId === alone).status, 'active');
+  });
+
   it('waits for the health window: nothing is judged before start + 40 min', async () => {
     await noShow('ns-wait');
     await evaluateNoShowNotCalled(at(35));
@@ -653,6 +727,21 @@ describe('status_not_updated (plan 2.5, D2)', () => {
     assert.equal(rows.length, 1, 'updating later does not fine again or undo the first fine');
     assert.equal(rows[0].amountInr, 50);
     assert.equal(posts.length, 1);
+  });
+
+  it('holds the fine for review when a colleague covered the meeting, and still fines when nobody did', async () => {
+    const cover = (bookingId, startIso) => BdaAttendanceModel.create({
+      bookingId, bdaEmail: KAL, bdaName: 'Kal', meetingScheduledStart: startOf(startIso), status: 'present', verdict: 'present',
+      source: 'meet_api', firstJoinedAt: plusMin(startIso, -1), durationMs: 25 * 60000, signals: [{ kind: 'extension_join', eventAt: plusMin(startIso, -1) }],
+    });
+    const covered = await mkBooking('st-cov', START);
+    await cover(covered, START);
+    const alone = await mkBooking('st-alone', '2026-10-11T10:00:00Z');
+    await evaluateStatusNotUpdated(opts({ now: plusMin('2026-10-11T10:00:00Z', 125) }));
+    const rows = await rowsOf(SID, undefined, 'status_not_updated');
+    assert.equal(rows.find((r) => r.bookingId === covered).status, 'needs_review');
+    assert.equal(rows.find((r) => r.bookingId === covered).evidence.coveredBy[0].bdaName, 'Kal');
+    assert.equal(rows.find((r) => r.bookingId === alone).status, 'active');
   });
 
   it('a change before the deadline satisfies the rule', async () => {

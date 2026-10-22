@@ -137,6 +137,8 @@ function toRow(d, nameByEmail, attendanceByBooking = new Map()) {
       healthy: ev.healthy ?? null,
       convertedFromFlag: ev.convertedFromFlag ?? null,
       coveredBy: ev.coveredBy ?? [],
+      unattributedStaff: ev.unattributedStaff ?? [],
+      extensionInCall: ev.extensionInCall ?? null,
     },
     waivedBy: d.waivedBy ?? null,
     waivedByName: d.waivedByName ?? null,

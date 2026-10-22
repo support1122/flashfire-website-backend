@@ -13,8 +13,14 @@ export const DEDUCTION_POLICY = Object.freeze({
   missedMeeting: Object.freeze({
     tierSize: 5, // 1st to 5th active miss in an IST month costs baseAmountInr
     baseAmountInr: 500,
-    escalatedAmountInr: 1000, // 6th miss onward
+    escalatedAmountInr: 1000, // 6th miss onward, for meetings before flatFromMs only
+    // From this instant a missed meeting is a flat baseAmountInr however many came before it in the month. Meetings
+    // that started earlier keep the old tiers (5 x 500, then 1000), so nothing already charged is rewritten.
+    flatFromMs: Date.parse('2026-10-22T00:00:00+05:30'),
   }),
+  // Google accounts the whole team signs in with. Someone from one of these was in the call but cannot be tied to a
+  // single BDA, so a missed meeting with one in the roster is held for review instead of charged (lowercase fragments).
+  sharedStaffAccountNames: Object.freeze(['flashfire']),
   noShowNotCalled: Object.freeze({
     amountInr: 100,
     callWindowMs: 30 * MIN, // a counted call from start to start + 30 min satisfies the rule (plan D1)
@@ -99,9 +105,13 @@ export function monthBoundsIST(month) {
   return { start: start.toJSDate(), end: start.plus({ months: 1 }).toJSDate() };
 }
 
-/** Amount for the nth (1-based) active missed meeting of a month. */
-export function missedMeetingAmount(tierIndex) {
+/**
+ * Amount for the nth (1-based) active missed meeting of a month. Pass the meeting's start (ms) so the flat rate that
+ * applies from flatFromMs is used; without it the old tiers apply.
+ */
+export function missedMeetingAmount(tierIndex, startMs = null) {
   const p = DEDUCTION_POLICY.missedMeeting;
+  if (Number.isFinite(startMs) && startMs >= p.flatFromMs) return p.baseAmountInr;
   return tierIndex > p.tierSize ? p.escalatedAmountInr : p.baseAmountInr;
 }
 
