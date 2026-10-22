@@ -802,10 +802,11 @@ export class UnifiedScheduler {
         if (t && (!waByType[t] || active(r.status))) waByType[t] = r;
       }
       const missingImmediate = !waByType.immediate || !active(waByType.immediate.status);
+      const missing24h = (!waByType['24h'] || !active(waByType['24h'].status)) && minUntil > 24 * 60;
       const missing3h = (!waByType['3h'] || !active(waByType['3h'].status)) && minUntil > 180;
       const missing1h = (!waByType['1h'] || !active(waByType['1h'].status)) && minUntil > 60;
       const missing5min = (!waByType['5min'] || !active(waByType['5min'].status)) && minUntil > 5;
-      const needsWa = missingImmediate || missing3h || missing1h || missing5min;
+      const needsWa = missingImmediate || missing24h || missing3h || missing1h || missing5min;
 
       if (needsWa && phoneOk) {
         const disp = this._buildDisplay(booking);
