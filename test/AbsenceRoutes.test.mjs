@@ -20,6 +20,7 @@ import { istDate } from '../Utils/BdaAssignment.js';
 import { registerAbsenceRoutes } from '../Routes/absenceRoutes.js';
 import { registerSalesAllocationRoutes } from '../Routes/salesAllocationRoutes.js';
 import { CallLogModel } from '../Schema_Models/CallLog.js';
+import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 
 const BDA = 'absent-bda@test.local';
 const OTHER = 'absent-other@test.local';
@@ -64,6 +65,7 @@ const wipe = async () => {
   await BdaDeductionModel.deleteMany({ bdaEmail: { $in: [BDA, OTHER] } });
   await BdaAbsenceReportModel.deleteMany({ bdaEmail: { $in: [BDA, OTHER] } });
   await CallLogModel.deleteMany({ callId: /^abs_call_/ });
+  await CampaignBookingModel.deleteMany({ bookingId: /^abs_bk_/ });
   invalidateRegistryCache();
 };
 
@@ -184,7 +186,7 @@ describe('BDA reports a missed call', () => {
     assert.equal((await SalesLeadAllocationModel.findOne({ allocationId: a.allocationId }).lean()).status, 'scheduled', 'the call was not closed');
 
     const list = await call('GET', `${BASE}/candidates?kind=allocation`);
-    assert.equal(list.body.candidates.some((c) => c.refId === a.allocationId), false, 'a leave day is not offered');
+    assert.equal(list.body.candidates.find((c) => c.refId === a.allocationId)?.blockedReason, 'leave', 'a leave day is listed but cannot be picked');
 
     // The engine refuses it too, so a future route that skips the checks above is still safe.
     const { createManualMiss } = await import('../Utils/DeductionEngine.js');
@@ -236,13 +238,13 @@ describe('admin marks a call absent', () => {
     assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA }), 1);
   });
 
-  it('uses the monthly tiers: the 6th miss costs 1000', async () => {
+  it('charges the flat rate: the 6th miss still costs 500 (tiers apply only before the flat-rate date)', async () => {
     for (let i = 0; i < 6; i += 1) {
       const a = await makeAllocation({ callAt: new Date(Date.now() - (i + 2) * HOUR) });
       assert.equal((await call('POST', BASE, { body: { kind: 'allocation', refId: a.allocationId, reason: `miss number ${i + 1}` } })).status, 201);
     }
     const rows = await BdaDeductionModel.find({ bdaEmail: BDA, status: 'active' }).sort({ 'evidence.scheduledStart': 1 }).lean();
-    assert.deepEqual(rows.map((r) => r.amountInr), [500, 500, 500, 500, 500, 1000]);
+    assert.deepEqual(rows.map((r) => r.amountInr), [500, 500, 500, 500, 500, 500]);
   });
 
   it('puts the call back to scheduled when fines are off', async () => {
@@ -267,6 +269,29 @@ describe('admin marks a call absent', () => {
 });
 
 describe('lists and candidates', () => {
+  it('lists canceled and already-fined Calendly meetings with a reason instead of hiding them', async () => {
+    const mk = (bookingId, over = {}) =>
+      CampaignBookingModel.create({
+        bookingId,
+        clientName: bookingId,
+        clientEmail: `${bookingId}@x.test`,
+        scheduledEventStartTime: new Date(Date.now() - 3 * HOUR),
+        bookingStatus: 'scheduled',
+        utmSource: 'direct',
+        scheduledEventEndTime: new Date(Date.now() - 2.5 * HOUR),
+        bookingCreatedAt: new Date(),
+        attendanceAssignee: { email: BDA },
+        ...over,
+      });
+    await mk('abs_bk_open');
+    await mk('abs_bk_cx', { bookingStatus: 'canceled' });
+    await mk('abs_bk_fined');
+    await BdaDeductionModel.create({ bdaEmail: BDA, bookingId: 'abs_bk_fined', rule: 'missed_meeting', amountInr: 500, status: 'active', month: istDate(Date.now()).slice(0, 7) });
+    const list = await call('GET', `${BASE}/candidates?kind=booking`);
+    const by = Object.fromEntries(list.body.candidates.filter((c) => c.refId.startsWith('abs_bk_')).map((c) => [c.refId, c.blockedReason]));
+    assert.deepEqual(by, { abs_bk_open: null, abs_bk_cx: 'canceled', abs_bk_fined: 'fined' });
+  });
+
   it('a BDA sees only their own reports; an admin sees all and a pending count', async () => {
     const a = await makeAllocation();
     const b = await makeAllocation({ bdaEmail: OTHER, bdaName: 'Other Bda' });
@@ -283,7 +308,7 @@ describe('lists and candidates', () => {
     assert.equal((await call('GET', `${BASE}?status=pending&bdaEmail=${OTHER}`)).body.reports.length, 1);
   });
 
-  it('candidates are past, scheduled, unfined calls, scoped to the caller', async () => {
+  it('candidates are past or same-day scheduled calls, scoped to the caller; fined ones are flagged', async () => {
     const past = await makeAllocation();
     const soon = await makeAllocation({ callAt: new Date(Date.now() + 30 * 1000) }); // still ahead, an admin may mark it in advance
     await makeAllocation({ callAt: new Date(Date.now() + 3 * 24 * HOUR) }); // beyond today, only with a date range
@@ -293,9 +318,11 @@ describe('lists and candidates', () => {
     await makeAllocation({ bdaEmail: OTHER, bdaName: 'Other Bda' });
 
     const mine = await call('GET', `${BASE}/candidates?kind=allocation`, { token: bdaToken() });
-    assert.deepEqual(mine.body.candidates.map((c) => c.refId), [past.allocationId]);
+    assert.deepEqual(mine.body.candidates.filter((c) => !c.blockedReason).map((c) => c.refId), [past.allocationId]);
+    assert.equal(mine.body.candidates.some((c) => c.refId === fined.allocationId), false, 'marking closes an allocation call, so it leaves the scheduled list');
     const admin = await call('GET', `${BASE}/candidates?kind=allocation`);
-    assert.equal(admin.body.candidates.length, 3, 'both BDAs plus the call about to start, minus fined, completed and days ahead');
+    assert.equal(admin.body.candidates.filter((c) => !c.blockedReason).length, 3, 'both BDAs plus the call about to start, minus completed and days ahead');
+    assert.ok(admin.body.candidates.every((c) => !c.blockedReason));
     assert.deepEqual(admin.body.candidates.filter((c) => c.upcoming).map((c) => c.refId), [soon.allocationId]);
     assert.ok(mine.body.candidates.every((c) => c.upcoming === false));
     assert.equal((await call('GET', `${BASE}/candidates?kind=allocation&bdaEmail=${OTHER}`, { token: bdaToken() })).status, 403);
