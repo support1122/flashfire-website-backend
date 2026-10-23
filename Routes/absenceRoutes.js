@@ -120,7 +120,7 @@ export function registerAbsenceRoutes(app) {
         const checks = await getAllocationCallChecksSafe(docs, undefined, nowMs);
         calls = docs.map((a) => ({ kind, refId: a.allocationId, bdaEmail: a.bdaEmail, bdaName: a.bdaName, clientName: a.clientName, callStart: a.callAt, detail: [a.phone, a.email].filter(Boolean).join(' · '), callCheck: checks.get(a.allocationId) ?? null }));
       } else {
-        const filter = { scheduledEventStartTime: { $lt: until, $gte: since }, bookingStatus: { $nin: ['canceled', 'rescheduled', 'not-scheduled'] } };
+        const filter = { scheduledEventStartTime: { $lt: until, $gte: since }, bookingStatus: { $ne: 'not-scheduled' } };
         if (bdaEmail) {
           filter.$or = [{ 'attendanceAssignee.email': bdaEmail }, { 'calendlyHost.email': bdaEmail }, { 'claimedBy.email': bdaEmail }];
         }
@@ -129,7 +129,7 @@ export function registerAbsenceRoutes(app) {
           filter.$and = [{ $or: [{ clientName: rx }, { clientEmail: rx }, { clientPhone: rx }, { bookingId: rx }] }];
         }
         const docs = await CampaignBookingModel.find(filter)
-          .select('bookingId clientName clientEmail clientPhone scheduledEventStartTime attendanceAssignee calendlyHost claimedBy')
+          .select('bookingId bookingStatus clientName clientEmail clientPhone scheduledEventStartTime attendanceAssignee calendlyHost claimedBy')
           .sort({ scheduledEventStartTime: -1 })
           .limit(CANDIDATE_CAP * 3)
           .lean();
@@ -138,28 +138,39 @@ export function registerAbsenceRoutes(app) {
           .map((b) => ({ b, assigned: getAssignedBdaEmail(b) }))
           .filter(({ assigned }) => assigned && tracked.has(assigned) && (!bdaEmail || assigned === bdaEmail))
           .slice(0, CANDIDATE_CAP)
-          .map(({ b, assigned }) => ({ kind, refId: b.bookingId, bdaEmail: assigned, bdaName: null, clientName: b.clientName, callStart: b.scheduledEventStartTime, detail: [b.clientPhone, b.clientEmail].filter(Boolean).join(' · ') }));
+          .map(({ b, assigned }) => ({ kind, refId: b.bookingId, bdaEmail: assigned, bdaName: null, clientName: b.clientName, callStart: b.scheduledEventStartTime, detail: [b.clientPhone, b.clientEmail].filter(Boolean).join(' · '), dead: ['canceled', 'rescheduled'].includes(b.bookingStatus) ? b.bookingStatus : null }));
       }
 
-      // Hide calls that already carry a fine or an open/approved report, since a second one would be refused.
+      // Calls that already carry a fine or an open/approved report cannot be marked again.
       const refs = calls.map((c) => c.refId);
       const [fined, reported, profiles] = await Promise.all([
         refs.length ? BdaDeductionModel.find({ bookingId: { $in: refs }, rule: 'missed_meeting' }).select('bookingId bdaEmail').lean() : [],
         refs.length ? BdaAbsenceReportModel.find({ kind, refId: { $in: refs }, status: { $in: ['pending', 'approved'] } }).select('refId bdaEmail').lean() : [],
         getAllBdaProfiles(),
       ]);
+      const finedKeys = new Set(fined.map((d) => `${d.bookingId}|${d.bdaEmail}`));
       const taken = new Set([...fined.map((d) => `${d.bookingId}|${d.bdaEmail}`), ...reported.map((r) => `${r.refId}|${r.bdaEmail}`)]);
       const names = new Map(profiles.map((p) => [p.email, p.displayName]));
       const leaveOf = new Map(profiles.map((p) => [p.email, new Set(p.leaveDays || [])]));
-      const out = calls
-        .filter((c) => !taken.has(`${c.refId}|${c.bdaEmail}`))
-        .filter((c) => !leaveOf.get(c.bdaEmail)?.has(istDate(new Date(c.callStart).getTime()))) // a leave day can never be marked
-        .map((c) => ({
+      // Every call in the range is listed so the admin sees the whole picture. A call that cannot be marked carries
+      // blockedReason (the mark route refuses these too) and the dialog shows it greyed out with the reason.
+      const out = calls.map(({ dead, ...c }) => {
+        const day = istDate(new Date(c.callStart).getTime());
+        const blockedReason = dead
+          ? dead
+          : taken.has(`${c.refId}|${c.bdaEmail}`)
+            ? (finedKeys.has(`${c.refId}|${c.bdaEmail}`) ? 'fined' : 'reported')
+            : leaveOf.get(c.bdaEmail)?.has(day)
+              ? 'leave'
+              : null;
+        return {
           ...c,
           bdaName: c.bdaName || names.get(c.bdaEmail) || c.bdaEmail.split('@')[0],
           upcoming: new Date(c.callStart).getTime() > nowMs,
+          blockedReason,
           callStart: iso(c.callStart),
-        }));
+        };
+      });
       return res.status(200).json({ success: true, kind, candidates: out });
     } catch (err) {
       console.error('[absenceRoutes] candidates failed:', err?.message);
