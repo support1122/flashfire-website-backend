@@ -258,17 +258,25 @@ export async function executeWorkflowLog(log) {
 
       console.log(`✅ Workflow email sent: ${log.logId} to ${booking.clientEmail}`);
     } else if (log.step.channel === 'whatsapp') {
-      if (!booking.clientPhone) {
+      // A truthy phone is not a usable one: Meta lead rows can hold a country code like "CA"
+      // or "Not Provided". WATI strips non-digits, gets an empty number and rejects it with
+      // "Either whatsappNumber or target must be provided", so every retry fails the same way
+      // and fires a Discord alert. Fail once, quietly, before calling WATI.
+      const phoneDigits = String(booking.clientPhone || '').replace(/\D/g, '');
+      if (phoneDigits.length < 7 || phoneDigits.length > 15) {
         await WorkflowLogModel.updateOne(
           { logId: log.logId },
           {
             $set: {
               status: 'failed',
-              error: 'Client phone number not available',
+              error: booking.clientPhone
+                ? `Client phone number is not valid: ${JSON.stringify(String(booking.clientPhone).slice(0, 30))}`
+                : 'Client phone number not available',
               executedAt: new Date()
             }
           }
         );
+        console.warn(`⏭️ Skipped WhatsApp workflow log ${log.logId}: no usable phone on booking ${booking.bookingId}`);
         return;
       }
 
