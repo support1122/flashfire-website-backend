@@ -9,7 +9,8 @@ import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { BdaHeartbeatLogModel } from '../Schema_Models/BdaHeartbeatLog.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { attendanceEvents, EVENTS } from './attendanceEvents.js';
-import { countableReason, getAssignedBdaEmail, isAfterGoLive, istDate, statusAtStart } from './BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail, isAfterGoLive, statusAtStart } from './BdaAssignment.js';
+import { isLeaveDayFor, workDayOf, workMonthOf } from './WorkDay.js';
 import { getBdaProfile, getTrackedBdas } from './BdaRegistry.js';
 import { getCallSummaries } from './BookingCallSummary.js';
 import { SYNC_LIMITS_MS, syncOkBetween, wasSourceHealthy } from './SyncHealth.js';
@@ -23,7 +24,6 @@ import {
   getLiveFrom,
   getStatusDeadlineMs,
   missedMeetingAmount,
-  monthKeyIST,
 } from './deductionPolicy.js';
 
 export { buildTotals }; // lives in deductionPolicy.js so light importers (payroll) skip this module's imports
@@ -292,7 +292,7 @@ export async function repriceMonth(bdaEmail, month, { maxPasses = 4 } = {}) {
 // ---------------------------------------------------------------------------------------------------------
 
 /** Upsert keyed by {bookingId, bdaEmail, rule}. A second call, or a second instance, never adds a duplicate. */
-async function insertDeduction({ bookingId, bdaEmail, rule, startMs, status, amountInr, evidence }) {
+async function insertDeduction({ bookingId, bdaEmail, rule, startMs, status, amountInr, evidence }, profile = null) {
   const filter = { bookingId, bdaEmail, rule };
   try {
     const res = await BdaDeductionModel.updateOne(
@@ -300,7 +300,7 @@ async function insertDeduction({ bookingId, bdaEmail, rule, startMs, status, amo
       {
         $setOnInsert: {
           deductionId: newDeductionId(),
-          month: monthKeyIST(startMs),
+          month: workMonthOf(startMs, profile),
           amountInr: amountInr ?? baseAmountFor(rule),
           tierIndex: null,
           status,
@@ -360,12 +360,13 @@ async function announce(ctx, row, profile, booking) {
 }
 
 /** Insert, reprice the month if it is a miss, then post once. Returns the final row or null when nothing new. */
-async function createAndAnnounce(ctx, args, profile, booking) {
+async function createAndAnnounce(ctx, args, profile, booking, { ignoreTracking = false } = {}) {
   // Never fine a meeting from before this BDA was tracked (the status and no-show rules ignored trackedSince).
-  if (profile && !isAfterGoLive(profile, args.startMs)) return null;
-  const { created } = await insertDeduction(args);
+  // An admin marking by hand can override this on purpose.
+  if (!ignoreTracking && profile && !isAfterGoLive(profile, args.startMs)) return null;
+  const { created } = await insertDeduction(args, profile);
   if (!created) return null;
-  if (args.rule === 'missed_meeting') await repriceMonth(args.bdaEmail, monthKeyIST(args.startMs));
+  if (args.rule === 'missed_meeting') await repriceMonth(args.bdaEmail, workMonthOf(args.startMs, profile));
   const row = await BdaDeductionModel.findOne({ bookingId: args.bookingId, bdaEmail: args.bdaEmail, rule: args.rule }).lean();
   if (row) await announce(ctx, row, profile, booking);
   return row;
@@ -820,7 +821,7 @@ export async function runDeductionEvaluators(now = new Date(), opts = {}) {
   await step('statusNotUpdated', () => evaluateStatusNotUpdated(ctxOpts));
   // Self-heal: recompute the current and previous IST month for every BDA that has a miss row.
   await step('repriced', async () => {
-    const months = [monthKeyIST(ctx.nowMs), monthKeyIST(ctx.nowMs - 31 * 24 * 60 * MIN)];
+    const months = [workMonthOf(ctx.nowMs), workMonthOf(ctx.nowMs - 31 * 24 * 60 * MIN)];
     const pairs = await BdaDeductionModel.aggregate([
       { $match: { rule: 'missed_meeting', month: { $in: months }, status: { $in: ['active', 'shadow'] } } },
       { $group: { _id: { bdaEmail: '$bdaEmail', month: '$month' } } },
@@ -888,21 +889,22 @@ export function attendanceShowsPresent(row) {
  * `refId` is the booking id for a Calendly meeting or the allocation id for a Lead Allocation call; the unique
  * {bookingId, bdaEmail, rule} index makes a second mark of the same call a no-op that reports `already_fined`.
  */
-export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientName = null, actor, reason, requestId = null, force = false }, opts = {}) {
+export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientName = null, actor, reason, requestId = null, force = false, ignoreStartGates = false }, opts = {}) {
   const ctx = makeContext(opts);
   const email = norm(bdaEmail);
   if (ctx.mode === 'off') return fail(409, 'fines_off', 'Fines are switched off, so nothing can be recorded');
   if (!canWrite(ctx)) return fail(409, 'fines_not_started', 'Fines have no go-live date yet, so nothing can be recorded');
   if (!Number.isFinite(startMs)) return fail(422, 'no_start_time', 'This call has no start time');
-  if (!startAllowed(ctx, startMs)) return fail(409, 'before_live_from', 'This call started before fines went live');
+  // `ignoreStartGates` is an admin's deliberate mark: the go-live date and the tracked-since date do not stop it.
+  if (!ignoreStartGates && !startAllowed(ctx, startMs)) return fail(409, 'before_live_from', 'This call started before fines went live');
   const profile = await profileOf(ctx, email);
   if (!profile || profile.active === false || profile.tracked !== true) {
     return fail(409, 'not_tracked', 'This person is not a tracked BDA');
   }
-  if (!isAfterGoLive(profile, startMs)) return fail(409, 'before_tracking', 'This call started before the BDA was tracked');
+  if (!ignoreStartGates && !isAfterGoLive(profile, startMs)) return fail(409, 'before_tracking', 'This call started before the BDA was tracked');
   // The automatic rules skip approved leave days, so a person marking by hand must not fine one either.
-  if ((profile.leaveDays || []).includes(istDate(startMs))) {
-    return fail(409, 'on_leave', `This call is on ${istDate(startMs)}, an approved leave day, so it cannot be marked absent`);
+  if (isLeaveDayFor(profile, startMs)) {
+    return fail(409, 'on_leave', `This call is in the ${workDayOf(startMs, profile)} working day, an approved leave day, so it cannot be marked absent`);
   }
 
   const existing = await BdaDeductionModel.findOne({ bookingId: refId, bdaEmail: email, rule: 'missed_meeting' }).select('status').lean();
@@ -959,7 +961,8 @@ export async function createManualMiss({ kind, refId, bdaEmail, startMs, clientN
       },
     },
     profile,
-    null
+    null,
+    { ignoreTracking: ignoreStartGates }
   );
   if (!row) return fail(409, 'already_fined', 'This call already has a fine');
   return { ok: true, deduction: row };

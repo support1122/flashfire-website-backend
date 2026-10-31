@@ -1,3 +1,4 @@
+import { DEFAULT_WORK_DAY_START_HOUR, workDayOf } from './WorkDay.js';
 import { DateTime, IANAZone } from 'luxon';
 
 // Pure helpers for Sales Lead Allocation: no database, no network, so they are unit tested directly.
@@ -97,9 +98,10 @@ export function istDayBounds(day) {
   return { start: start.toJSDate(), end: start.plus({ days: 1 }).toJSDate() };
 }
 
-/** True when the BDA's profile lists the IST day of `callAt` as an approved leave day. */
-export function isOnLeaveAt(leaveDays, callAt) {
-  const day = istDayOf(callAt);
+/** True when the BDA's profile lists the work day of `callAt` as an approved leave day. `startHour` is the BDA's workDayStartHour. */
+export function isOnLeaveAt(leaveDays, callAt, startHour = DEFAULT_WORK_DAY_START_HOUR) {
+  const ms = callAt instanceof Date ? callAt.getTime() : new Date(callAt).getTime();
+  const day = Number.isFinite(ms) ? workDayOf(ms, startHour) : null;
   return Boolean(day && Array.isArray(leaveDays) && leaveDays.includes(day));
 }
 

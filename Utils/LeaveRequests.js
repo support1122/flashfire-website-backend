@@ -4,7 +4,7 @@ import { BdaProfileModel } from '../Schema_Models/BdaProfile.js';
 import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { waiveDeduction } from './DeductionEngine.js';
 import { invalidateRegistryCache } from './BdaRegistry.js';
-import { istDate } from './BdaAssignment.js';
+import { workDayOf } from './WorkDay.js';
 import { IST_ZONE } from './deductionPolicy.js';
 
 // Leave requests: a BDA asks, an admin decides, approval waives that day's deductions.
@@ -59,7 +59,9 @@ export function expandDays(from, to) {
 export async function findDeductionsOnDays(bdaEmail, days) {
   const set = new Set(days);
   if (set.size === 0) return [];
+  // Leave days are work days, and a fine's month is its work day's month, so the months come straight from the days.
   const months = [...new Set(days.map((d) => d.slice(0, 7)))];
+  const profile = await BdaProfileModel.findOne({ email: norm(bdaEmail) }).select('workDayStartHour').lean();
   const rows = await BdaDeductionModel.find({
     bdaEmail: norm(bdaEmail),
     month: { $in: months },
@@ -70,7 +72,7 @@ export async function findDeductionsOnDays(bdaEmail, days) {
   return rows.filter((r) => {
     const start = r?.evidence?.scheduledStart;
     if (!start) return false;
-    return set.has(istDate(new Date(start).getTime()));
+    return set.has(workDayOf(new Date(start).getTime(), profile));
   });
 }
 

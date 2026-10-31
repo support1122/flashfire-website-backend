@@ -3,7 +3,8 @@ import { BdaDeductionModel } from '../Schema_Models/BdaDeduction.js';
 import { SalesLeadAllocationModel } from '../Schema_Models/SalesLeadAllocation.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { getAllBdaProfiles, getBdaProfile, getTrackedBdas } from '../Utils/BdaRegistry.js';
-import { getAssignedBdaEmail, istDate } from '../Utils/BdaAssignment.js';
+import { getAssignedBdaEmail } from '../Utils/BdaAssignment.js';
+import { isLeaveDayFor, workDayBounds, workDayOf } from '../Utils/WorkDay.js';
 import { getDeductionsMode, monthBoundsIST } from '../Utils/deductionPolicy.js';
 import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
@@ -96,13 +97,13 @@ export function registerAbsenceRoutes(app) {
       const nowMs = Date.now();
       const now = new Date(nowMs);
       let since = new Date(nowMs - LOOKBACK_MS);
-      // An admin also sees the rest of today (calls not started yet) so they can be marked in advance.
-      let until = admin ? istDay(istDate(nowMs)).end : now;
-      // Optional day range (YYYY-MM-DD, IST), inside the 30 day window. A BDA never sees the future; an admin sees up to a week ahead.
+      // An admin also sees the rest of the current working day (calls not started yet) so they can be marked in advance.
+      let until = admin ? workDayBounds(workDayOf(nowMs)).end : now;
+      // Optional range of working days (YYYY-MM-DD), inside the 30 day window. A BDA never sees the future; an admin sees up to a week ahead.
       for (const [name, edge] of [['from', 'start'], ['to', 'end']]) {
         const raw = String(req.query[name] ?? '').trim();
         if (!raw) continue;
-        const day = istDay(raw);
+        const day = istDay(raw) && workDayBounds(raw);
         if (!day) return fail(res, 422, 'invalid_date', `${name} must look like 2026-10-17`);
         if (edge === 'start') since = new Date(Math.max(since.getTime(), day.start.getTime()));
         else until = new Date(Math.min(admin ? nowMs + UPCOMING_MS : nowMs, day.end.getTime()));
@@ -151,16 +152,16 @@ export function registerAbsenceRoutes(app) {
       const finedKeys = new Set(fined.map((d) => `${d.bookingId}|${d.bdaEmail}`));
       const taken = new Set([...fined.map((d) => `${d.bookingId}|${d.bdaEmail}`), ...reported.map((r) => `${r.refId}|${r.bdaEmail}`)]);
       const names = new Map(profiles.map((p) => [p.email, p.displayName]));
-      const leaveOf = new Map(profiles.map((p) => [p.email, new Set(p.leaveDays || [])]));
+      const profileOf = new Map(profiles.map((p) => [p.email, p]));
       // Every call in the range is listed so the admin sees the whole picture. A call that cannot be marked carries
       // blockedReason (the mark route refuses these too) and the dialog shows it greyed out with the reason.
       const out = calls.map(({ dead, ...c }) => {
-        const day = istDate(new Date(c.callStart).getTime());
+        const workDay = workDayOf(new Date(c.callStart).getTime(), profileOf.get(c.bdaEmail) ?? null);
         const blockedReason = dead
           ? dead
           : taken.has(`${c.refId}|${c.bdaEmail}`)
             ? (finedKeys.has(`${c.refId}|${c.bdaEmail}`) ? 'fined' : 'reported')
-            : leaveOf.get(c.bdaEmail)?.has(day)
+            : (profileOf.get(c.bdaEmail)?.leaveDays || []).includes(workDay)
               ? 'leave'
               : null;
         return {
@@ -168,6 +169,7 @@ export function registerAbsenceRoutes(app) {
           bdaName: c.bdaName || names.get(c.bdaEmail) || c.bdaEmail.split('@')[0],
           upcoming: new Date(c.callStart).getTime() > nowMs,
           blockedReason,
+          workDay,
           callStart: iso(c.callStart),
         };
       });
@@ -226,7 +228,7 @@ export function registerAbsenceRoutes(app) {
    */
   async function processOne(req, admin, actor, input) {
     try {
-      const parsed = validateReportInput(input);
+      const parsed = validateReportInput(input, { admin });
       if (parsed.error) return refuse(parsed.error.status, parsed.error.code, parsed.error.message);
       const { kind, refId, reason } = parsed.value;
 
@@ -242,8 +244,8 @@ export function registerAbsenceRoutes(app) {
         return refuse(409, 'not_tracked', `${bdaName} is not a tracked BDA`);
       }
 
-      if ((profile.leaveDays || []).includes(istDate(call.startMs))) {
-        return refuse(409, 'on_leave', `${bdaName} is on approved leave on ${istDate(call.startMs)}, so this call cannot be marked absent`);
+      if (isLeaveDayFor(profile, call.startMs)) {
+        return refuse(409, 'on_leave', `${bdaName} is on approved leave for the ${workDayOf(call.startMs, profile)} working day, so this call cannot be marked absent`);
       }
 
       const open = await BdaAbsenceReportModel.findOne({ kind, refId, bdaEmail: call.bdaEmail, status: { $in: ['pending', 'approved'] } }).lean();
@@ -266,8 +268,9 @@ export function registerAbsenceRoutes(app) {
       // Admin: mark absent now. A pending report from the BDA for the same call is settled by this action.
       if (open?.status === 'approved') return refuse(409, 'already_reported', 'This call was already marked absent');
       const reportId = open?.reportId || `abs_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-      // `force` is the admin's deliberate "fine anyway" when attendance shows the BDA joined. Never honoured for a BDA.
-      const result = await applyAbsence(call, { actor, reason, requestId: reportId, force: input.force === true });
+      // An admin's mark always goes through: attendance showing a join, a call from before fines went live or before the
+      // BDA was tracked do not stop it. Never honoured for a BDA (the branch above returns first).
+      const result = await applyAbsence(call, { actor, reason, requestId: reportId, force: true, ignoreStartGates: true });
       if (!result.ok) return refuse(result.status, result.code, result.message);
       const decided = { status: 'approved', decidedBy: actor.email || 'admin', decidedByName: actor.name || null, decidedAt: new Date(), decisionNote: reason, deductionId: result.deduction.deductionId };
       let report;
@@ -303,7 +306,8 @@ export function registerAbsenceRoutes(app) {
     const items = Array.isArray(req.body?.items) ? req.body.items : null;
     if (!items || items.length === 0) return fail(res, 422, 'no_items', 'Choose at least one call');
     if (items.length > BATCH_MAX) return fail(res, 422, 'too_many_items', `Choose at most ${BATCH_MAX} calls at a time`);
-    const checked = cleanAbsenceReason(req.body?.reason);
+    const batchAdmin = await requestIsAdmin(req);
+    const checked = cleanAbsenceReason(req.body?.reason, { admin: batchAdmin });
     if (checked.error) return fail(res, checked.error.status, checked.error.code, checked.error.message);
 
     const seen = new Set();
@@ -319,7 +323,7 @@ export function registerAbsenceRoutes(app) {
     const starts = await Promise.all(unique.map(async (it) => ((await loadCall(it?.kind, String(it?.refId ?? '')).catch(() => null))?.startMs ?? Infinity)));
     const order = unique.map((it, i) => ({ it, at: starts[i] })).sort((a, b) => (a.at === b.at ? 0 : a.at < b.at ? -1 : 1)).map((x) => x.it);
 
-    const admin = await requestIsAdmin(req);
+    const admin = batchAdmin;
     const actor = actorOf(req);
     const results = [];
     const notices = [];

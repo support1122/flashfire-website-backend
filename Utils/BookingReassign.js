@@ -1,6 +1,7 @@
 import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
-import { getAssignedBdaEmail, istDate } from './BdaAssignment.js';
+import { getAssignedBdaEmail } from './BdaAssignment.js';
+import { workDayOf } from './WorkDay.js';
 import { getBdaProfile } from './BdaRegistry.js';
 import { WINDOW_OPENS_BEFORE_MS } from './recordPresentSignal.js';
 
@@ -68,7 +69,7 @@ export async function reassignBooking({ bookingId, email, actor = {}, now = new 
       return no(422, 'not_tracked_bda', 'The new assignee must be an active, tracked BDA');
     }
     // Handing a meeting to someone who is off that day would just move the problem.
-    const day = istDate(startMs);
+    const day = workDayOf(startMs, profile);
     if ((profile.leaveDays || []).includes(day)) {
       return no(409, 'target_on_leave', `${profile.displayName || target} is on approved leave on ${day}`);
     }

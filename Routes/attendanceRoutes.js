@@ -6,7 +6,8 @@ import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { BdaExtensionHeartbeatModel } from '../Schema_Models/BdaExtensionHeartbeat.js';
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { findMeetingsOnLeave } from '../Utils/AttendanceVerdictJob.js';
-import { countableReason, getAssignedBdaEmail, istDate } from '../Utils/BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail } from '../Utils/BdaAssignment.js';
+import { workDayBounds, workDayOf, workDayStartHour } from '../Utils/WorkDay.js';
 import { loadTakenSlots, reassignBooking } from '../Utils/BookingReassign.js';
 import { postAdminChannel } from '../Utils/attendanceDiscord.js';
 import { getBdaProfile, getTrackedBdas } from '../Utils/BdaRegistry.js';
@@ -404,13 +405,15 @@ async function transferCandidates(req, res) {
     if (!DAY_RE.test(fromDay) || !DAY_RE.test(toDay) || toDay < fromDay) {
       return fail(res, 422, 'invalid_range', 'from and to must be days like 2026-10-25, with to on or after from');
     }
-    const from = DateTime.fromISO(fromDay, { zone: 'Asia/Kolkata' }).startOf('day');
-    const to = DateTime.fromISO(toDay, { zone: 'Asia/Kolkata' }).endOf('day');
-    if (!from.isValid || !to.isValid || to.diff(from, 'days').days > 31) {
+    // The range is in working days (a shift that crosses midnight is one day), so it runs from the day boundary
+    // of `from` to the day boundary after `to`.
+    const fromBounds = workDayBounds(fromDay);
+    const toBounds = workDayBounds(toDay);
+    if (!fromBounds || !toBounds || (toBounds.end - fromBounds.start) / 86_400_000 > 32) {
       return fail(res, 422, 'invalid_range', 'Pick a range of at most 31 days');
     }
     const nowMs = Date.now();
-    const range = { $gte: from.toJSDate(), $lte: to.toJSDate() };
+    const range = { $gte: fromBounds.start, $lt: toBounds.end };
     const live = { $nin: ['canceled', 'rescheduled', 'not-scheduled'] };
 
     const [mine, everyone, tracked] = await Promise.all([
@@ -430,6 +433,7 @@ async function transferCandidates(req, res) {
       getTrackedBdas(),
     ]);
 
+    const hourOf = new Map(tracked.map((p) => [p.email, workDayStartHour(p)]));
     const meetings = mine
       .filter((b) => getAssignedBdaEmail(b) === bdaEmail)
       .map((b) => {
@@ -439,7 +443,7 @@ async function transferCandidates(req, res) {
           clientName: b.clientName || '',
           bookingStatus: b.bookingStatus ?? null,
           scheduledStart: iso(b.scheduledEventStartTime),
-          day: istDate(startMs),
+          day: workDayOf(startMs, hourOf.get(bdaEmail) ?? null),
           canMove: nowMs < startMs - WINDOW_OPENS_BEFORE_MS,
         };
       });
@@ -448,7 +452,7 @@ async function transferCandidates(req, res) {
     for (const b of everyone) {
       const email = getAssignedBdaEmail(b);
       if (!email) continue;
-      const day = istDate(new Date(b.scheduledEventStartTime).getTime());
+      const day = workDayOf(new Date(b.scheduledEventStartTime).getTime(), hourOf.get(email) ?? null);
       const days = loadOf.get(email) ?? {};
       days[day] = (days[day] ?? 0) + 1;
       loadOf.set(email, days);

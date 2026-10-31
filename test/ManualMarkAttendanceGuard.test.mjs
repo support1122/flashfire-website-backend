@@ -111,15 +111,14 @@ describe('attendanceShowsPresent', () => {
 });
 
 describe('manual mark against the attendance record', () => {
-  it('refuses a meeting the BDA joined, writes no fine and says when they joined', async () => {
+  it('an admin mark goes through even when the BDA joined, and the fine keeps what the record showed', async () => {
     const id = await meeting(PRESENT());
     const r = await mark(id);
-    assert.equal(r.status, 409);
-    assert.equal(r.body.error.code, 'attendance_present');
-    assert.match(r.body.error.message, /joined this meeting/);
-    assert.match(r.body.error.message, /24 minutes/);
-    assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA }), 0);
-    assert.equal(await BdaAbsenceReportModel.countDocuments({ bdaEmail: BDA }), 0);
+    assert.equal(r.status, 201);
+    const d = await BdaDeductionModel.findOne({ bookingId: id }).lean();
+    assert.equal(d.evidence.manualAbsent.forced, true);
+    assert.equal(d.evidence.manualAbsent.attendance.minutes, 24);
+    assert.equal(d.evidence.manualAbsent.attendance.joinDevice, 'pc');
   });
 
   it('fines a meeting with no attendance row, and one with an absent row and no signals', async () => {
@@ -133,41 +132,46 @@ describe('manual mark against the attendance record', () => {
     assert.equal(d.evidence.manualAbsent.attendance, null);
   });
 
-  it('an admin can override on purpose, and the fine keeps what the record showed', async () => {
-    const id = await meeting(PRESENT());
-    const r = await mark(id, { force: true });
-    assert.equal(r.status, 201);
-    const d = await BdaDeductionModel.findOne({ bookingId: id }).lean();
-    assert.equal(d.evidence.manualAbsent.forced, true);
-    assert.equal(d.evidence.manualAbsent.attendance.minutes, 24);
-    assert.equal(d.evidence.manualAbsent.attendance.joinDevice, 'pc');
-  });
-
-  it('a batch refuses only the meetings the BDA joined and fines the rest, and "force" overrides all of them', async () => {
+  it('a batch marks every meeting for an admin, joined or not', async () => {
     const joined = await meeting(PRESENT());
     const missed = await meeting(null);
     const items = [joined, missed].map((refId) => ({ kind: 'booking', refId }));
-    const first = await call('POST', `${BASE}/batch`, { body: { items, reason: 'Did not join and did not call the client' } });
-    assert.equal(first.status, 200);
-    assert.deepEqual(first.body.results.map((x) => x.ok), [false, true]);
-    assert.equal(first.body.results[0].error.code, 'attendance_present');
-    assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA }), 1);
-
-    const forced = await call('POST', `${BASE}/batch`, { body: { items: [{ kind: 'booking', refId: joined }], reason: 'Left after one minute, never spoke', force: true } });
-    assert.equal(forced.body.succeeded, 1);
+    const res = await call('POST', `${BASE}/batch`, { body: { items, reason: 'Did not join and did not call the client' } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.body.results.map((x) => x.ok), [true, true]);
+    assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA }), 2);
   });
 
-  it('refuses a throwaway reason on a single mark and on a batch', async () => {
+  it('an admin needs no reason: blank gets a default and short text is kept as typed', async () => {
+    const [a, b, c] = [await meeting(null), await meeting(null), await meeting(null)];
+    assert.equal((await call('POST', BASE, { body: { kind: 'booking', refId: a } })).status, 201, 'no reason at all');
+    assert.equal((await call('POST', BASE, { body: { kind: 'booking', refId: b, reason: 'Yeah -' } })).status, 201, 'a short reason');
+    const batch = await call('POST', `${BASE}/batch`, { body: { items: [{ kind: 'booking', refId: c }] } });
+    assert.equal(batch.body.succeeded, 1, 'a batch with no reason');
+    const reasons = Object.fromEntries((await BdaDeductionModel.find({ bdaEmail: BDA }).lean()).map((d) => [d.bookingId, d.evidence.manualAbsent.reason]));
+    assert.equal(reasons[a], 'Marked absent by an admin');
+    assert.equal(reasons[b], 'Yeah -');
+    assert.equal(reasons[c], 'Marked absent by an admin');
+    const long = await call('POST', BASE, { body: { kind: 'booking', refId: await meeting(null), reason: 'x'.repeat(501) } });
+    assert.equal(long.status, 422, 'still capped at 500 characters');
+  });
+
+  it('a BDA still has to give a real reason', async () => {
     const id = await meeting(null);
-    for (const reason of ['Yeah -', 'ok', '??????????']) {
-      const single = await call('POST', BASE, { body: { kind: 'booking', refId: id, reason } });
-      assert.equal(single.status, 422, reason);
-      assert.ok(['reason_too_vague', 'reason_required'].includes(single.body.error.code), reason);
-      const batch = await call('POST', `${BASE}/batch`, { body: { items: [{ kind: 'booking', refId: id }], reason } });
-      assert.equal(batch.status, 422, reason);
+    for (const reason of ['Yeah -', 'ok', '??????????', undefined]) {
+      const single = await call('POST', BASE, { token: sign('crm_user', BDA), body: { kind: 'booking', refId: id, reason } });
+      assert.equal(single.status, 422, String(reason));
     }
     assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA }), 0);
-    assert.equal((await call('POST', BASE, { body: { kind: 'booking', refId: id, reason: 'He was absent' } })).status, 201, 'a short but real sentence still passes');
+  });
+
+  it('an admin can mark a meeting from before fines went live or before the BDA was tracked', async () => {
+    await BdaProfileModel.updateOne({ email: BDA }, { $set: { trackedSince: new Date(Date.now() + 24 * HOUR) } });
+    invalidateRegistryCache();
+    const id = await meeting(null);
+    const r = await mark(id);
+    assert.equal(r.status, 201, JSON.stringify(r.body));
+    assert.equal(await BdaDeductionModel.countDocuments({ bdaEmail: BDA, status: 'active' }), 1);
   });
 
   it('a BDA cannot force: approving their own report stops on attendance until an admin forces it', async () => {
