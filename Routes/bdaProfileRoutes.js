@@ -9,7 +9,7 @@ import { requireAdminLive, requireCrmUserOrAdmin } from './deductionRoutes.js';
 // Admin screen backend for the BDA registry (plan 2.8). Errors use the shared contract shape:
 // { success: false, error: { code, message } }.
 
-const EDITABLE_FIELDS = ['aliases', 'discordUserId', 'leaveDays', 'tracked', 'active'];
+const EDITABLE_FIELDS = ['aliases', 'discordUserId', 'leaveDays', 'workDayStartHour', 'tracked', 'active'];
 // Atomic list edits ($addToSet / $pull). Sending a whole list from a cached screen let two admins overwrite each
 // other: the second save dropped the first admin's leave day, and a meeting on that day was fined.
 const LIST_OPS = ['addAliases', 'removeAliases', 'addLeaveDays', 'removeLeaveDays'];
@@ -115,6 +115,15 @@ function validateUpdate(body) {
       return { status: 422, error: { code: 'invalid_leave_days', message: 'leaveDays must be an array of real YYYY-MM-DD dates' } };
     }
     update.leaveDays = [...new Set(days)].sort();
+  }
+
+  // The IST hour this BDA's working day starts (a whole hour 0 to 23), or null for the team default.
+  if ('workDayStartHour' in body) {
+    const h = body.workDayStartHour;
+    if (h !== null && !(Number.isInteger(h) && h >= 0 && h <= 23)) {
+      return { status: 422, error: { code: 'invalid_work_day_start_hour', message: 'workDayStartHour must be a whole hour from 0 to 23, or null for the default' } };
+    }
+    update.workDayStartHour = h;
   }
 
   for (const flag of ['tracked', 'active']) {

@@ -261,10 +261,13 @@ describe('admin marks a call absent', () => {
     assert.equal(await BdaAbsenceReportModel.countDocuments({ refId: a.allocationId }), 0);
   });
 
-  it('refuses an unknown call and a missing reason', async () => {
+  it('refuses an unknown call, and a BDA with no reason; an admin needs none', async () => {
     assert.equal((await call('POST', BASE, { body: { kind: 'allocation', refId: 'nope', reason: 'does not exist' } })).status, 404);
     const a = await makeAllocation();
-    assert.equal((await call('POST', BASE, { body: { kind: 'allocation', refId: a.allocationId, reason: '' } })).body.error.code, 'reason_required');
+    assert.equal((await call('POST', BASE, { token: bdaToken(), body: { kind: 'allocation', refId: a.allocationId, reason: '' } })).body.error.code, 'reason_required');
+    const marked = await call('POST', BASE, { body: { kind: 'allocation', refId: a.allocationId, reason: '' } });
+    assert.equal(marked.status, 201, 'an admin can mark with no reason');
+    assert.equal(marked.body.report.reason, 'Marked absent by an admin');
   });
 });
 
@@ -407,7 +410,9 @@ describe('several calls at once', () => {
   it('validates the request and ignores duplicates', async () => {
     const a = await makeAllocation();
     assert.equal((await call('POST', BATCH, { body: { items: [], reason: 'Some reason' } })).body.error.code, 'no_items');
-    assert.equal((await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: a.allocationId }] } })).body.error.code, 'reason_required');
+    assert.equal((await call('POST', BATCH, { token: bdaToken(), body: { items: [{ kind: 'allocation', refId: a.allocationId }] } })).body.error.code, 'reason_required', 'a BDA needs a reason');
+    const b = await makeAllocation();
+    assert.equal((await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: b.allocationId }] } })).body.succeeded, 1, 'an admin does not');
     const many = Array.from({ length: 51 }, (_, i) => ({ kind: 'allocation', refId: `x${i}` }));
     assert.equal((await call('POST', BATCH, { body: { items: many, reason: 'Some reason' } })).body.error.code, 'too_many_items');
     const dup = await call('POST', BATCH, { body: { items: [{ kind: 'allocation', refId: a.allocationId }, { kind: 'allocation', refId: a.allocationId }], reason: 'Some reason' } });

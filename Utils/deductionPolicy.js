@@ -92,7 +92,7 @@ export function getLiveFrom() {
   return parsed.isValid ? parsed.toJSDate() : null;
 }
 
-/** 'YYYY-MM' of an instant in IST. The missed-meeting counter resets at 00:00 IST on the 1st. */
+/** 'YYYY-MM' of an instant in IST (calendar month). Fines use workMonthOf in Utils/WorkDay.js, which follows the working day. */
 export function monthKeyIST(when) {
   const ms = when instanceof Date ? when.getTime() : new Date(when).getTime();
   return DateTime.fromMillis(ms, { zone: IST_ZONE }).toFormat('yyyy-LL');

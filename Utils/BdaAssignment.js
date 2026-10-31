@@ -1,5 +1,6 @@
 import { DateTime } from 'luxon';
 import { getBdaProfile } from './BdaRegistry.js';
+import { isLeaveDayFor } from './WorkDay.js';
 
 // Which BDA a meeting belongs to, and whether it counts (plan 2.1). Every selector and endpoint calls these
 // helpers so the order never drifts.
@@ -75,7 +76,7 @@ export function statusAtStart(booking, startMs) {
   return atStart;
 }
 
-/** IST calendar date ('YYYY-MM-DD') of an instant, the key leaveDays uses. */
+/** IST calendar date ('YYYY-MM-DD') of an instant. Leave days use the BDA's work day instead, see Utils/WorkDay.js. */
 export function istDate(ms) {
   return DateTime.fromMillis(ms, { zone: 'Asia/Kolkata' }).toFormat('yyyy-LL-dd');
 }
@@ -94,7 +95,7 @@ export function countableReason(booking, profile, nowMs = Date.now()) {
   if (!profile || profile.active === false || profile.tracked !== true) {
     return { countable: false, reason: 'not_tracked' };
   }
-  if ((profile.leaveDays || []).includes(istDate(startMs))) return { countable: false, reason: 'on_leave' };
+  if (isLeaveDayFor(profile, startMs)) return { countable: false, reason: 'on_leave' };
 
   // A start in the future has no history yet, so the live status stands in for it.
   const status = startMs > nowMs ? booking?.bookingStatus : statusAtStart(booking, startMs);

@@ -31,7 +31,15 @@ export function cleanReason(raw) {
  * The reason for marking a call absent. On top of the 5 to 500 character rule it has to say something: at least 10
  * characters, 8 letters and 2 words, so "Yeah -" is refused. A fine is written from this text and the BDA reads it.
  */
-export function cleanAbsenceReason(raw) {
+export const ADMIN_DEFAULT_REASON = 'Marked absent by an admin';
+
+export function cleanAbsenceReason(raw, { admin = false } = {}) {
+  // An admin's mark needs no explanation: blank gets a default, and whatever they write is kept as typed.
+  if (admin) {
+    const text = typeof raw === 'string' ? raw.trim() : '';
+    if (text.length > 500) return { error: { status: 422, code: 'reason_too_long', message: 'The reason can be at most 500 characters' } };
+    return { reason: text || ADMIN_DEFAULT_REASON };
+  }
   const checked = cleanReason(raw);
   if (checked.error) return checked;
   const letters = (checked.reason.match(/\p{L}/gu) || []).length;
@@ -43,7 +51,7 @@ export function cleanAbsenceReason(raw) {
 }
 
 /** Validate the create body. Returns { value: { kind, refId, reason } } or { error: { status, code, message } }. */
-export function validateReportInput(body) {
+export function validateReportInput(body, { admin = false } = {}) {
   const b = body && typeof body === 'object' ? body : {};
   const kind = String(b.kind ?? '').trim();
   if (!ABSENCE_KINDS.includes(kind)) {
@@ -53,7 +61,7 @@ export function validateReportInput(body) {
   if (!refId || refId.length > 200) {
     return { error: { status: 422, code: 'invalid_ref', message: 'refId is required' } };
   }
-  const checked = cleanAbsenceReason(b.reason);
+  const checked = cleanAbsenceReason(b.reason, { admin });
   if (checked.error) return checked;
   return { value: { kind, refId, reason: checked.reason } };
 }
@@ -105,7 +113,7 @@ export async function loadCall(kind, refId, deps = {}) {
  * conditional update, so a BDA closing the call at the same moment cannot also be fined. If the fine is refused
  * (fines off, already fined, attendance shows the BDA joined...) the call is put back to scheduled. `force` is an admin's deliberate override of the attendance check. Returns { ok: true, deduction } or { ok: false, ... }.
  */
-export async function applyAbsence(call, { actor, reason, requestId = null, force = false }, deps = {}) {
+export async function applyAbsence(call, { actor, reason, requestId = null, force = false, ignoreStartGates = false }, deps = {}) {
   const Allocation = deps.Allocation ?? SalesLeadAllocationModel;
   const fine = deps.createManualMiss ?? createManualMiss;
 
@@ -130,6 +138,7 @@ export async function applyAbsence(call, { actor, reason, requestId = null, forc
       reason,
       requestId,
       force,
+      ignoreStartGates,
     });
   } catch (err) {
     result = { ok: false, status: 500, code: 'internal_error', message: err?.message || 'Could not write the fine' };

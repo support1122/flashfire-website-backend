@@ -25,6 +25,8 @@ const BdaProfileSchema = new mongoose.Schema(
         message: 'leaveDays must be YYYY-MM-DD strings',
       },
     },
+    // The IST hour a working day starts (0 to 23). null means the default (10:00). See Utils/WorkDay.js.
+    workDayStartHour: { type: Number, default: null, min: 0, max: 23, validate: { validator: (h) => h == null || Number.isInteger(h), message: 'workDayStartHour must be a whole hour' } },
     active: { type: Boolean, default: true },
     tracked: { type: Boolean, default: false },
     // When tracking last switched on (tracked and active both true). Meetings that started before this are never

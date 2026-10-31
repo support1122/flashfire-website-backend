@@ -88,11 +88,12 @@ describe('approved leave stops new deductions', () => {
     assert.equal(out.countable, true);
   });
 
-  it('matches on the IST day, not the UTC day', () => {
-    // 2026-10-14 20:00 UTC is 2026-10-15 01:30 IST, so the IST day is the 15th.
+  it('matches on the working day (a shift that crosses midnight), not the calendar day', () => {
+    // 2026-10-14 20:00 UTC is 2026-10-15 01:30 IST. That is the tail of the shift that began on the 14th, so the
+    // working day is the 14th: leave on the 14th covers it, leave on the 15th does not.
     const lateMs = Date.UTC(2026, 9, 14, 20, 0, 0);
     const late = { ...booking, scheduledEventStartTime: new Date(lateMs) };
-    assert.equal(countableReason(late, tracked(SID, ['2026-10-14']), lateMs + 60_000).countable, true);
-    assert.equal(countableReason(late, tracked(SID, ['2026-10-15']), lateMs + 60_000).reason, 'on_leave');
+    assert.equal(countableReason(late, tracked(SID, ['2026-10-14']), lateMs + 60_000).reason, 'on_leave');
+    assert.equal(countableReason(late, tracked(SID, ['2026-10-15']), lateMs + 60_000).countable, true);
   });
 });

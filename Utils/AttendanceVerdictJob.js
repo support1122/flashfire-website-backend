@@ -5,7 +5,8 @@ import { BdaExtensionHeartbeatModel } from '../Schema_Models/BdaExtensionHeartbe
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { EVENTS, emitAttendanceEvent } from './attendanceEvents.js';
 import { postAbsentChannel, postAdminChannel, postAttendanceChannel } from './attendanceDiscord.js';
-import { countableReason, getAssignedBdaEmail, isAfterGoLive, istDate } from './BdaAssignment.js';
+import { countableReason, getAssignedBdaEmail, isAfterGoLive } from './BdaAssignment.js';
+import { isLeaveDayFor } from './WorkDay.js';
 import { getBdaProfile, getTrackedBdas } from './BdaRegistry.js';
 import { finesAreLive } from './deductionPolicy.js';
 import { doubleBookedLine, findOverlappingMeetings } from './DoubleBooking.js';
@@ -496,7 +497,7 @@ export async function findMeetingsOnLeave({ fromMs, untilMs, deps }) {
     const profile = bdaEmail ? await d.registry.getBdaProfile(bdaEmail) : null;
     if (!profile || profile.active === false || profile.tracked !== true) continue;
     const startMs = toMs(booking.scheduledEventStartTime);
-    if (!(profile.leaveDays || []).includes(istDate(startMs))) continue;
+    if (!isLeaveDayFor(profile, startMs)) continue;
     if (['canceled', 'rescheduled', 'not-scheduled'].includes(booking.bookingStatus)) continue;
     out.push({ booking, bdaEmail, profile });
   }

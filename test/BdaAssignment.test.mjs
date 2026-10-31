@@ -247,12 +247,12 @@ describe('isCountableBooking (registry from the database)', () => {
     assert.equal(await isCountableBooking(booking({ calendlyHost: { email: PRANJAL } }), NOW_AFTER), false);
   });
 
-  it('does not count a meeting on a leave day, using the IST date', async () => {
-    // 2026-10-19T19:00Z is 00:30 IST on the 20th, the BDA's leave day.
-    const lateNight = booking({ scheduledEventStartTime: new Date('2026-10-19T19:00:00Z') });
-    assert.equal(await isCountableBooking(lateNight, new Date('2026-10-21T00:00:00Z').getTime()), false);
-    const dayBefore = booking({ scheduledEventStartTime: new Date('2026-10-19T18:00:00Z') }); // 23:30 IST on the 19th
-    assert.equal(await isCountableBooking(dayBefore, new Date('2026-10-21T00:00:00Z').getTime()), true);
+  it('does not count a meeting on a leave day, using the working day (a shift that crosses midnight)', async () => {
+    // 2026-10-20T19:00Z is 00:30 IST on the 21st: the tail of the shift that began on the 20th, the BDA's leave day.
+    const lateNight = booking({ scheduledEventStartTime: new Date('2026-10-20T19:00:00Z') });
+    assert.equal(await isCountableBooking(lateNight, new Date('2026-10-22T00:00:00Z').getTime()), false);
+    const nextShift = booking({ scheduledEventStartTime: new Date('2026-10-21T05:00:00Z') }); // 10:30 IST on the 21st, a new working day
+    assert.equal(await isCountableBooking(nextShift, new Date('2026-10-22T00:00:00Z').getTime()), true);
   });
 
   it('does not count a meeting canceled before its start, per statusHistory', async () => {

@@ -183,8 +183,9 @@ describe('GET /api/crm/deductions', () => {
     assert.deepEqual(Object.keys(first).sort(), [
       'amountInr', 'attendance', 'bdaEmail', 'bdaName', 'bookingId', 'clientName', 'createdAt', 'deductionId', 'evidence', 'manualAbsent',
       'month', 'origin', 'reviewReason', 'reviewedAt', 'reviewedBy', 'reviewedByName', 'rule', 'source', 'status', 'tierIndex',
-      'voidReason', 'voidedAt', 'waivedAt', 'waivedBy', 'waivedByName', 'waiverReason',
+      'voidReason', 'voidedAt', 'waivedAt', 'waivedBy', 'waivedByName', 'waiverReason', 'workDay',
     ]);
+    assert.match(first.workDay, /^\d{4}-\d{2}-\d{2}$/, 'every row names the working day it belongs to');
     assert.equal(first.origin, 'auto', 'an engine fine is automatic');
     assert.equal(first.source, 'booking');
     assert.equal(first.manualAbsent, null);

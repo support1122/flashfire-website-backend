@@ -7,8 +7,9 @@ import { BdaAttendanceModel } from '../Schema_Models/BdaAttendance.js';
 import { pullDeductions } from '../Controllers/PayrollController.js';
 import { getAllBdaProfiles, getTrackedBdas } from '../Utils/BdaRegistry.js';
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
+import { workDayOf, workDayStartHour, workMonthOf } from '../Utils/WorkDay.js';
 import { activateDeduction, convertFlagToMiss, waiveDeduction } from '../Utils/DeductionEngine.js';
-import { DEDUCTION_RULES, buildTotals, getDeductionsMode, monthBoundsIST, monthKeyIST } from '../Utils/deductionPolicy.js';
+import { DEDUCTION_RULES, buildTotals, getDeductionsMode, monthBoundsIST } from '../Utils/deductionPolicy.js';
 
 // Deductions API (plan 8.3, api-contracts.md). Errors use the shared shape { success:false, error:{ code, message } }.
 //
@@ -123,6 +124,8 @@ function toRow(d, nameByEmail, attendanceByBooking = new Map()) {
       : null,
     rule: d.rule,
     month: d.month,
+    // The BDA's working day (a shift that crosses midnight is one day): 'YYYY-MM-DD' of the day the shift began.
+    workDay: ev.scheduledStart ? workDayOf(ev.scheduledStart, nameByEmail.hours?.get(d.bdaEmail) ?? null) : null,
     attendance: shapeAttendanceNote(attendanceByBooking.get(`${d.bookingId}|${d.bdaEmail}`)),
     amountInr: d.amountInr,
     tierIndex: d.tierIndex ?? null,
@@ -156,11 +159,14 @@ function toRow(d, nameByEmail, attendanceByBooking = new Map()) {
 
 async function nameMap() {
   const profiles = await getAllBdaProfiles();
-  return new Map(profiles.map((p) => [p.email, p.displayName || p.email.split('@')[0]]));
+  const names = new Map(profiles.map((p) => [p.email, p.displayName || p.email.split('@')[0]]));
+  // Each BDA's work-day boundary hour rides along, so a row can say which working day it belongs to.
+  names.hours = new Map(profiles.map((p) => [p.email, workDayStartHour(p)]));
+  return names;
 }
 
 function parseMonth(raw) {
-  if (raw == null || raw === '') return { month: monthKeyIST(Date.now()) };
+  if (raw == null || raw === '') return { month: workMonthOf(Date.now()) };
   const month = String(raw);
   return monthBoundsIST(month) ? { month } : { error: true };
 }

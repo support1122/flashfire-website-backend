@@ -5,14 +5,13 @@ import { actorOf, requireAdminLive, requireCrmUserOrAdmin } from './deductionRou
 import { isCrmAdmin } from '../Utils/isCrmAdmin.js';
 import { getAllocationCallChecksSafe } from '../Utils/AllocationCallCheck.js';
 import { detectTimezoneFromPhone } from '../Utils/PhoneTimezoneDetector.js';
+import { workDayBounds, workDayOf, workDayStartHour } from '../Utils/WorkDay.js';
 import {
   crmLinkFor,
   escapeRegex,
   guessTimezoneFromPhone,
   phoneBookingFilter,
   isOnLeaveAt,
-  istDayBounds,
-  istDayOf,
   parseInstant,
   validateAllocationInput,
 } from '../Utils/SalesAllocations.js';
@@ -61,12 +60,12 @@ async function checkAssignableBda(bdaEmail, callAt) {
   if (!profile || profile.active === false || profile.tracked !== true) {
     return { error: { status: 400, code: 'unknown_bda', message: 'bdaEmail is not a tracked BDA' } };
   }
-  if (isOnLeaveAt(profile.leaveDays, callAt)) {
+  if (isOnLeaveAt(profile.leaveDays, callAt, workDayStartHour(profile))) {
     return {
       error: {
         status: 409,
         code: 'bda_on_leave',
-        message: `${profile.displayName || profile.email} is on approved leave on ${istDayOf(callAt)} (IST)`,
+        message: `${profile.displayName || profile.email} is on approved leave for the ${workDayOf(callAt, profile)} working day`,
       },
     };
   }
@@ -191,8 +190,8 @@ export function registerSalesAllocationRoutes(app) {
     try {
       const callAt = parseInstant(String(req.query.callAt ?? ''));
       if (!callAt) return fail(res, 400, 'invalid_call_time', 'callAt must be an ISO timestamp with a UTC offset or Z');
-      const day = istDayOf(callAt);
-      const bounds = istDayBounds(day);
+      // "Calls that day" counts the working day the call falls in (a shift that crosses midnight is one day).
+      const bounds = workDayBounds(workDayOf(callAt));
 
       const [bdas, counts] = await Promise.all([
         getTrackedBdas(),
@@ -203,7 +202,7 @@ export function registerSalesAllocationRoutes(app) {
       ]);
       const countBy = new Map(counts.map((c) => [c._id, c.n]));
       const list = bdas.map((p) => {
-        const onLeave = isOnLeaveAt(p.leaveDays, callAt);
+        const onLeave = isOnLeaveAt(p.leaveDays, callAt, workDayStartHour(p));
         return {
           email: p.email,
           name: p.displayName || p.email.split('@')[0],

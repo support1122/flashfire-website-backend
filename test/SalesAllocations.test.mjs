@@ -89,10 +89,13 @@ describe('IST day boundary for leave', () => {
     assert.equal(istDayOf(new Date('2026-10-15T18:30:00Z')), '2026-10-16');
   });
 
-  it('checks leave against the IST day, not the UTC day', () => {
+  it('checks leave against the working day (10:00 IST to 10:00 IST), not the calendar day', () => {
     const leave = ['2026-10-16'];
-    assert.equal(isOnLeaveAt(leave, new Date('2026-10-15T18:30:00Z')), true);
-    assert.equal(isOnLeaveAt(leave, new Date('2026-10-15T18:29:00Z')), false);
+    assert.equal(isOnLeaveAt(leave, new Date('2026-10-16T04:30:00Z')), true, '10:00 IST starts the 16th');
+    assert.equal(isOnLeaveAt(leave, new Date('2026-10-16T04:29:00Z')), false, '09:59 IST is still the 15th');
+    assert.equal(isOnLeaveAt(leave, new Date('2026-10-16T20:00:00Z')), true, '01:30 IST on the 17th is the tail of the 16th shift');
+    assert.equal(isOnLeaveAt(leave, new Date('2026-10-17T04:30:00Z')), false, '10:00 IST on the 17th starts the next day');
+    assert.equal(isOnLeaveAt(leave, new Date('2026-10-16T04:30:00Z'), 12), false, 'a BDA whose day starts at 12:00 is still on the 15th');
     assert.equal(isOnLeaveAt(undefined, new Date()), false);
   });
 });
