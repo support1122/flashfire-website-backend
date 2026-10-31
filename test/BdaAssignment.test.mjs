@@ -251,7 +251,7 @@ describe('isCountableBooking (registry from the database)', () => {
     // 2026-10-20T19:00Z is 00:30 IST on the 21st: the tail of the shift that began on the 20th, the BDA's leave day.
     const lateNight = booking({ scheduledEventStartTime: new Date('2026-10-20T19:00:00Z') });
     assert.equal(await isCountableBooking(lateNight, new Date('2026-10-22T00:00:00Z').getTime()), false);
-    const nextShift = booking({ scheduledEventStartTime: new Date('2026-10-21T05:00:00Z') }); // 10:30 IST on the 21st, a new working day
+    const nextShift = booking({ scheduledEventStartTime: new Date('2026-10-21T05:00:00Z') }); // 10:30 IST on the 21st, a new working day (after 08:00)
     assert.equal(await isCountableBooking(nextShift, new Date('2026-10-22T00:00:00Z').getTime()), true);
   });
 

@@ -4,13 +4,13 @@ import { DateTime } from 'luxon';
 // from late afternoon IST to early morning IST the next day (the meetings in October start between 15:00 and 06:30).
 // A meeting at 01:00 IST on the 30th belongs to the shift that began on the 29th.
 //
-// The day boundary is an hour (IST) that falls in the quiet stretch between two shifts. It is 10:00 IST for everyone
+// The day boundary is an hour (IST) that falls in the quiet stretch between two shifts. It is 08:00 IST for everyone
 // unless the BDA's profile sets workDayStartHour. Leave days, the monthly fine counter and the day shown in the CRM all
 // use this day, so one shift is never split in two by midnight.
 
 const IST_ZONE = 'Asia/Kolkata';
 const HOUR_MS = 60 * 60 * 1000;
-export const DEFAULT_WORK_DAY_START_HOUR = 10;
+export const DEFAULT_WORK_DAY_START_HOUR = 8;
 
 /** The boundary hour for a profile: its own workDayStartHour (0 to 23), else the default. */
 export function workDayStartHour(profile) {

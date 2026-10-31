@@ -299,9 +299,9 @@ describe('missed_meeting tiers (plan 2.5 and 8.5)', () => {
     assert.equal(again.code, 'already_resolved');
   });
 
-  it('the month rolls over with the working day (10:00 IST), so a shift that crosses midnight on the 1st stays in the month it began', async () => {
-    const lateOct = '2026-11-01T04:29:00Z'; // 09:59 IST on 1 Nov, still the 31 Oct shift
-    const earlyNov = '2026-11-01T04:31:00Z'; // 10:01 IST on 1 Nov, the first November shift
+  it('the month rolls over with the working day (08:00 IST), so a shift that crosses midnight on the 1st stays in the month it began', async () => {
+    const lateOct = '2026-11-01T02:29:00Z'; // 07:59 IST on 1 Nov, still the 31 Oct shift
+    const earlyNov = '2026-11-01T02:31:00Z'; // 08:01 IST on 1 Nov, the first November shift
     const a = await mkBooking('edge-a', lateOct);
     const b = await mkBooking('edge-b', earlyNov);
     const later = opts({ now: new Date('2026-11-05T12:00:00Z') });
