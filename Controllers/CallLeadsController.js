@@ -321,11 +321,8 @@ function baseMatch() {
 /* BDA assignment                                                            */
 /* ------------------------------------------------------------------------ */
 
-// Every call lead goes to this one BDA. The round-robin across active BDAs was
-// removed on request (2026-07-29, "assign all of these calling leads to Kalpataru
-// for now") — to bring it back, restore the fewest-leads-wins loop that used to
-// live in assignUnassignedCallLeads (git history has it).
-const FIXED_ASSIGNEE_EMAIL = 'kalpataru@flashfirehq.com';
+// Call leads are split 50/50 between these two BDAs, alternating oldest-first.
+const ROUND_ROBIN_EMAILS = ['kalpataru@flashfirehq.com', 'siddhartha@flashfirehq.com'];
 
 /**
  * The active non-admin BDAs, in a stable order. Used for view scoping.
@@ -375,21 +372,19 @@ async function ownScopeEmail(req) {
  * concurrently. Oldest leads go first — they have waited longest.
  */
 export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
-  const assignee = await CrmUserModel.findOne({
-    email: FIXED_ASSIGNEE_EMAIL,
+  const assignees = await CrmUserModel.find({
+    email: { $in: ROUND_ROBIN_EMAILS },
     isActive: { $ne: false },
   })
     .select('email name')
     .lean();
 
-  if (!assignee) {
-    return { ok: true, assigned: 0, reason: `fixed assignee ${FIXED_ASSIGNEE_EMAIL} not found or inactive` };
+  if (assignees.length === 0) {
+    return { ok: true, assigned: 0, reason: 'no active assignees found' };
   }
 
-  const pick = {
-    email: String(assignee.email).toLowerCase().trim(),
-    name: assignee.name || assignee.email,
-  };
+  // Sort to match the order in ROUND_ROBIN_EMAILS so the alternation is deterministic.
+  const ordered = ROUND_ROBIN_EMAILS.map((e) => assignees.find((a) => a.email === e)).filter(Boolean);
 
   const pending = await CampaignBookingModel.find({
     ...baseMatch(),
@@ -400,21 +395,24 @@ export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
     .limit(limit)
     .lean();
 
-  if (pending.length === 0) return { ok: true, assigned: 0, assignee: pick.email };
+  if (pending.length === 0) return { ok: true, assigned: 0 };
 
   const now = new Date();
-  const ops = pending.map((lead) => ({
-    updateOne: {
-      filter: { bookingId: lead.bookingId, 'callLeadAssignee.email': { $in: [null, ''] } },
-      update: {
-        $set: {
-          'callLeadAssignee.email': pick.email,
-          'callLeadAssignee.name': pick.name,
-          'callLeadAssignee.assignedAt': now,
+  const ops = pending.map((lead, i) => {
+    const pick = ordered[i % ordered.length];
+    return {
+      updateOne: {
+        filter: { bookingId: lead.bookingId, 'callLeadAssignee.email': { $in: [null, ''] } },
+        update: {
+          $set: {
+            'callLeadAssignee.email': String(pick.email).toLowerCase().trim(),
+            'callLeadAssignee.name': pick.name || pick.email,
+            'callLeadAssignee.assignedAt': now,
+          },
         },
       },
-    },
-  }));
+    };
+  });
 
   const result = await CampaignBookingModel.bulkWrite(ops, { ordered: false });
 
@@ -422,7 +420,6 @@ export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
     ok: true,
     assigned: result.modifiedCount ?? 0,
     considered: pending.length,
-    assignee: pick.email,
   };
 }
 
@@ -957,9 +954,9 @@ function fmtISTStamp(date) {
 /**
  * Build the daily call-leads summary for the 24h window ending at `end`.
  *
- * - Only the fixed assignee's calls count: every call lead is Kalpataru's, so
- *   other people's Zoom calls (admins, other teams) are noise here, not lead
- *   calling. Internal calls are excluded for the same reason.
+ * - Only the round-robin assignees' calls count: other people's Zoom calls
+ *   (admins, other teams) are noise here, not lead calling. Internal calls
+ *   are excluded for the same reason.
  *   Both the headline and the per-BDA numbers count UNIQUE leads dialed (a
  *   redial is one lead), so the breakdown always sums to "Called".
  * - "Left to call" is the callable queue from the last 3 days: call leads
@@ -971,7 +968,7 @@ export async function buildCallLeadsDailySummary(end = new Date()) {
   const calls = await CallLogModel.find({
     startedAt: { $gte: windowStart, $lt: end },
     direction: { $ne: 'internal' },
-    salesEmail: FIXED_ASSIGNEE_EMAIL,
+    salesEmail: { $in: ROUND_ROBIN_EMAILS },
   })
     .select('salesEmail salesName leadNumberNormalized durationSec')
     .lean();
