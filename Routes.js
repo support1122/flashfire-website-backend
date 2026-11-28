@@ -161,7 +161,7 @@ import { crmAdminLogin, crmAdminRequestOtp, crmAdminVerifyOtp, listCrmUsers, cre
 import { getActivityLogs, getActivityFilters } from './Controllers/ActivityLogController.js';
 import { getPaidClientsAnalytics } from './Controllers/PaidClientsController.js';
 import { getFunnelAnalytics } from './Controllers/FunnelAnalyticsController.js';
-import { getStripePaymentsByMonth, getStripeAllMonthsSummary, getStripePaidPlanMonthlySummary } from './Controllers/StripeDataController.js';
+import { getStripePaymentsByMonth, getStripeAllMonthsSummary, getStripePaidPlanMonthlySummary, getStripeSourceBreakdown } from './Controllers/StripeDataController.js';
 import { getManualPaymentsByMonth, createManualPayment, updateManualPayment, deleteManualPayment } from './Controllers/ManualPaymentController.js';
 import { generatePaymentLink, redirectShortLink } from './Controllers/PaymentLinkController.js';
 import { getPayroll, createPayroll, updatePayroll, deletePayroll } from './Controllers/PayrollController.js';
@@ -250,6 +250,7 @@ import { registerSalesAllocationRoutes } from "./Routes/salesAllocationRoutes.js
 import { registerAbsenceRoutes } from "./Routes/absenceRoutes.js";
 import { registerWarningLetterRoutes } from "./Routes/warningLetterRoutes.js";
 import { registerSalesSheetRoutes } from "./Routes/salesSheetRoutes.js";
+import { registerUnsubscribeRoutes } from "./Routes/unsubscribeRoutes.js";
 import { registerCalendlyRecapRoutes } from "./Routes/calendlyRecapRoutes.js";
 import { registerAttendanceSetupRoutes } from "./Routes/attendanceSetupRoutes.js";
 
@@ -326,6 +327,7 @@ export default function Routes(app) {
   app.get('/api/crm/stripe/payments', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaymentsByMonth);
   app.get('/api/crm/stripe/summary', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeAllMonthsSummary);
   app.get('/api/crm/stripe/paid-plan-summary', requireCrmUser, requireCrmAnyPermission(['graphs03', 'leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripePaidPlanMonthlySummary);
+  app.get('/api/crm/stripe/source-breakdown', requireCrmUser, requireCrmAnyPermission(['leads', 'meta_leads', 'lead_analytics', 'all_data']), getStripeSourceBreakdown);
 
   // Raw Stripe webhook capture log — what Stripe is actually sending us.
   // /stats is declared before /:id so it is not read as an event id.
@@ -484,6 +486,8 @@ registerAbsenceRoutes(app);
   registerWarningLetterRoutes(app);
   // Sales Tracker sheet: the Apps Script pulls each month's hot and warm leads per executive.
   registerSalesSheetRoutes(app);
+  // Public unsubscribe page for the link in follow-up emails.
+  registerUnsubscribeRoutes(app);
   // Calendly Notetaker recaps sent by the Gmail Apps Script, and the CRM views of them.
   registerCalendlyRecapRoutes(app);
   // One-call setup (seed the registry, audit and re-link calls, status checklist). Dry run unless apply is sent.

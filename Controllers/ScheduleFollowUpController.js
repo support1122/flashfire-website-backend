@@ -4,6 +4,7 @@ import { scheduleAllWhatsAppReminders } from '../Utils/WhatsAppReminderScheduler
 import sgMail from '@sendgrid/mail';
 import { DateTime } from 'luxon';
 import { Logger } from '../Utils/Logger.js';
+import { unsubscribeParts, isUnsubscribed } from '../Utils/Unsubscribe.js';
 import { getRescheduleLinkForBooking } from '../Utils/CalendlyAPIHelper.js';
 
 sgMail.setApiKey(process.env.SENDGRID_API_KEY_1);
@@ -43,6 +44,8 @@ export default async function ScheduleFollowUp(req, res) {
       return res.status(400).json({ success: false, message: `plan must be one of ${FOLLOW_UP_PLANS.join(', ')}` });
     }
 
+    // A package is mandatory: the sales sheet and the leads table both show it. A lead that already bought a plan
+    // or already has one saved does not need it again (checked below, once the booking is loaded).
     // Validation
     if (!bookingId || !followUpDateTime) {
       return res.status(400).json({
@@ -59,6 +62,13 @@ export default async function ScheduleFollowUp(req, res) {
       return res.status(404).json({
         success: false,
         message: 'Booking not found'
+      });
+    }
+
+    if (!plan && !booking.paymentPlan?.name && !booking.followUp?.plan) {
+      return res.status(400).json({
+        success: false,
+        message: `Choose the package the lead is interested in (${FOLLOW_UP_PLANS.join(', ')})`
       });
     }
 
@@ -115,19 +125,29 @@ Best regards,
 Elizabeth
 FlashFire Team`;
 
+        if (await isUnsubscribed(booking.clientEmail)) {
+          results.email.error = 'Client has unsubscribed from emails';
+          throw new Error(results.email.error);
+        }
+        const unsub = unsubscribeParts(booking.clientEmail);
         await sgMail.send({
           to: booking.clientEmail,
           from: senderEmail,
           subject: 'Follow-up: FlashFire Consultation',
-          text: followUpMessage,
+          text: followUpMessage + unsub.text,
           html: `
             <div style="font-family: system-ui, -apple-system, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
               <p>Hi ${booking.clientName || 'there'},</p>
               <p>You asked for a follow-up regarding your consultation with FlashFire. We wanted to reach out and see how things are going.</p>
               <p>If you have any questions or would like to reschedule your meeting, please don't hesitate to reach out to us.</p>
               <p>Best regards,<br/>Elizabeth<br/>FlashFire Team</p>
+              ${unsub.html}
             </div>
-          `
+          `,
+          headers: unsub.headers,
+          // The account-wide SendGrid footer needs an unsubscribe group this message does not use, so it printed its own
+          // placeholder as text. Our link above replaces it.
+          trackingSettings: { subscriptionTracking: { enable: false } }
         });
 
         results.email.success = true;

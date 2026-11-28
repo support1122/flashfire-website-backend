@@ -1,6 +1,7 @@
 import { CampaignBookingModel } from '../Schema_Models/CampaignBooking.js';
 import { CallLogModel } from '../Schema_Models/CallLog.js';
 import { CrmUserModel } from '../Schema_Models/CrmUser.js';
+import { countryFor } from '../Utils/SalesSheetLeads.js';
 
 /**
  * Call Leads — Meta leads that filled the form but never booked a meeting.
@@ -311,8 +312,7 @@ function cutoffDate() {
 function baseMatch() {
   return {
     ...META_LEAD_MATCH,
-    bookingStatus: 'not-scheduled',
-    scheduledEventStartTime: null,
+    bookingStatus: { $in: ['not-scheduled', 'no-show'] },
     bookingCreatedAt: { $lte: cutoffDate() },
   };
 }
@@ -321,8 +321,8 @@ function baseMatch() {
 /* BDA assignment                                                            */
 /* ------------------------------------------------------------------------ */
 
-// Call leads are split 50/50 between these two BDAs, alternating oldest-first.
-const ROUND_ROBIN_EMAILS = ['kalpataru@flashfirehq.com', 'siddhartha@flashfirehq.com'];
+// Call leads are distributed round-robin between these two BDAs (oldest lead first).
+const CALL_BDA_EMAILS = ['kalpataru@flashfirehq.com', 'siddhartha@flashfirehq.com'];
 
 /**
  * The active non-admin BDAs, in a stable order. Used for view scoping.
@@ -372,19 +372,23 @@ async function ownScopeEmail(req) {
  * concurrently. Oldest leads go first — they have waited longest.
  */
 export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
-  const assignees = await CrmUserModel.find({
-    email: { $in: ROUND_ROBIN_EMAILS },
+  // Load only the BDAs in CALL_BDA_EMAILS that are active
+  const bdaDocs = await CrmUserModel.find({
+    email: { $in: CALL_BDA_EMAILS },
     isActive: { $ne: false },
   })
     .select('email name')
     .lean();
 
-  if (assignees.length === 0) {
-    return { ok: true, assigned: 0, reason: 'no active assignees found' };
+  if (bdaDocs.length === 0) {
+    return { ok: true, assigned: 0, reason: 'no active call BDAs found' };
   }
 
-  // Sort to match the order in ROUND_ROBIN_EMAILS so the alternation is deterministic.
-  const ordered = ROUND_ROBIN_EMAILS.map((e) => assignees.find((a) => a.email === e)).filter(Boolean);
+  // Keep stable order matching CALL_BDA_EMAILS
+  const assignees = CALL_BDA_EMAILS
+    .map((e) => bdaDocs.find((d) => String(d.email).toLowerCase().trim() === e))
+    .filter(Boolean)
+    .map((d) => ({ email: String(d.email).toLowerCase().trim(), name: d.name || d.email }));
 
   const pending = await CampaignBookingModel.find({
     ...baseMatch(),
@@ -399,14 +403,14 @@ export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
 
   const now = new Date();
   const ops = pending.map((lead, i) => {
-    const pick = ordered[i % ordered.length];
+    const pick = assignees[i % assignees.length];
     return {
       updateOne: {
         filter: { bookingId: lead.bookingId, 'callLeadAssignee.email': { $in: [null, ''] } },
         update: {
           $set: {
-            'callLeadAssignee.email': String(pick.email).toLowerCase().trim(),
-            'callLeadAssignee.name': pick.name || pick.email,
+            'callLeadAssignee.email': pick.email,
+            'callLeadAssignee.name': pick.name,
             'callLeadAssignee.assignedAt': now,
           },
         },
@@ -420,6 +424,7 @@ export async function assignUnassignedCallLeads({ limit = 5000 } = {}) {
     ok: true,
     assigned: result.modifiedCount ?? 0,
     considered: pending.length,
+    assignees: assignees.map((a) => a.email),
   };
 }
 
@@ -954,9 +959,9 @@ function fmtISTStamp(date) {
 /**
  * Build the daily call-leads summary for the 24h window ending at `end`.
  *
- * - Only the round-robin assignees' calls count: other people's Zoom calls
- *   (admins, other teams) are noise here, not lead calling. Internal calls
- *   are excluded for the same reason.
+ * - Only the fixed assignee's calls count: every call lead is Kalpataru's, so
+ *   other people's Zoom calls (admins, other teams) are noise here, not lead
+ *   calling. Internal calls are excluded for the same reason.
  *   Both the headline and the per-BDA numbers count UNIQUE leads dialed (a
  *   redial is one lead), so the breakdown always sums to "Called".
  * - "Left to call" is the callable queue from the last 3 days: call leads
@@ -968,7 +973,7 @@ export async function buildCallLeadsDailySummary(end = new Date()) {
   const calls = await CallLogModel.find({
     startedAt: { $gte: windowStart, $lt: end },
     direction: { $ne: 'internal' },
-    salesEmail: { $in: ROUND_ROBIN_EMAILS },
+    salesEmail: { $in: CALL_BDA_EMAILS },
   })
     .select('salesEmail salesName leadNumberNormalized durationSec')
     .lean();
@@ -1043,5 +1048,128 @@ export async function sendCallLeadsDailySummary() {
   const { DiscordConnect } = await import('../Utils/DiscordConnect.js');
   const result = await DiscordConnect(url, message, false);
   console.log(`${result.ok ? '✅' : '❌'} [CallLeads] daily summary ${result.ok ? 'sent' : 'failed'}`, stats);
+  return result;
+}
+
+/* ------------------------------------------------------------------------ */
+/* Pending leads: no-show + not-scheduled, past 3 days, per BDA              */
+/* ------------------------------------------------------------------------ */
+
+const PENDING_DAYS = 3;
+// "kalpataru@flashfirehq.com" -> "Kalpataru": the display name is not reliable ("Basaveni siddhartha").
+const shortName = (s) => {
+  const local = String(s.email || '').split('@')[0];
+  return local ? local[0].toUpperCase() + local.slice(1) : String(s.bda || 'Unassigned').trim().split(/\s+/)[0];
+};
+
+/**
+ * Every call lead from the past `days` days that is still a no-show or never scheduled,
+ * with its owner and whether the BDA has dialed it. Pure data: the 12 AM Discord message and
+ * the sheet's "Call Leads" tab both read this, so the two can never disagree.
+ *
+ * Same lead definition as the Call Leads tab (`baseMatch`: Meta lead, not-scheduled or
+ * no-show, past the 24h cool-off). "Called" means any non-internal CallLog row on the lead's
+ * number, matched on the same phone candidates the tab uses.
+ */
+export async function buildPendingCallLeads({ end = new Date(), days = PENDING_DAYS } = {}) {
+  const since = new Date(end.getTime() - days * 24 * 60 * 60 * 1000);
+  const bookings = await CampaignBookingModel.find({
+    ...baseMatch(),
+    bookingCreatedAt: { $gte: since, $lte: cutoffDate() },
+  })
+    .select('bookingId clientName clientEmail clientPhone normalizedClientPhone bookingStatus bookingCreatedAt callLeadAssignee utmCampaign leadMarket')
+    .sort({ bookingCreatedAt: -1 })
+    .lean();
+
+  const candidates = new Set();
+  for (const b of bookings) phoneCandidatesOf(b, candidates);
+  const logs = candidates.size
+    ? await CallLogModel.find({ leadNumberNormalized: { $in: [...candidates] }, direction: { $ne: 'internal' } })
+        .select('leadNumberNormalized startedAt durationSec')
+        .lean()
+    : [];
+  const byNumber = new Map();
+  for (const l of logs) {
+    const row = byNumber.get(l.leadNumberNormalized) || { count: 0, last: null, sec: 0 };
+    row.count += 1;
+    row.sec += l.durationSec || 0;
+    if (l.startedAt && (!row.last || l.startedAt > row.last)) row.last = l.startedAt;
+    byNumber.set(l.leadNumberNormalized, row);
+  }
+
+  const users = await CrmUserModel.find({ email: { $in: CALL_BDA_EMAILS } }).select('email name').lean();
+  const nameOf = new Map(users.map((u) => [String(u.email).toLowerCase(), u.name]));
+
+  const leads = bookings.map((b) => {
+    const email = String(b.callLeadAssignee?.email || '').toLowerCase();
+    let count = 0;
+    let sec = 0;
+    let last = null;
+    for (const k of phoneCandidatesOf(b, new Set())) {
+      const r = byNumber.get(k);
+      if (!r) continue;
+      count = Math.max(count, r.count);
+      sec = Math.max(sec, r.sec);
+      if (r.last && (!last || r.last > last)) last = r.last;
+    }
+    return {
+      bookingId: b.bookingId,
+      bdaEmail: email,
+      bda: b.callLeadAssignee?.name || nameOf.get(email) || (email ? email : 'Unassigned'),
+      name: b.clientName || '',
+      phone: b.clientPhone || '',
+      email: b.clientEmail || '',
+      country: countryFor({ campaign: b.utmCampaign, phone: b.clientPhone, market: b.leadMarket }),
+      status: b.bookingStatus === 'no-show' ? 'no-show' : 'not-scheduled',
+      formFilledAt: b.bookingCreatedAt ? new Date(b.bookingCreatedAt).toISOString() : null,
+      lastCalledAt: last ? new Date(last).toISOString() : null,
+      callCount: count,
+      callSec: sec,
+      called: count > 0,
+    };
+  });
+
+  const order = [...CALL_BDA_EMAILS, ''];
+  const keys = [...new Set([...order, ...leads.map((l) => l.bdaEmail)])].filter((k) => leads.some((l) => l.bdaEmail === k) || CALL_BDA_EMAILS.includes(k));
+  const summary = keys.map((k) => {
+    const mine = leads.filter((l) => l.bdaEmail === k);
+    const left = mine.filter((l) => !l.called);
+    return {
+      bda: mine[0]?.bda || nameOf.get(k) || k || 'Unassigned',
+      email: k,
+      noShow: mine.filter((l) => l.status === 'no-show').length,
+      notScheduled: mine.filter((l) => l.status === 'not-scheduled').length,
+      total: mine.length,
+      called: mine.length - left.length,
+      left: left.length,
+      leftNoShow: left.filter((l) => l.status === 'no-show').length,
+      leftNotScheduled: left.filter((l) => l.status === 'not-scheduled').length,
+      callMinutes: Math.round(mine.reduce((n, l) => n + l.callSec, 0) / 60),
+    };
+  });
+  return { generatedAt: end.toISOString(), windowDays: days, summary, leads };
+}
+
+/** The 12 AM IST Discord message: what each BDA still has to call from the past 3 days. */
+export function formatPendingCallLeadsMessage(data) {
+  const lines = [`📋 Pending call leads — past ${data.windowDays} days (no-show + not scheduled)`];
+  for (const s of data.summary) {
+    lines.push('', `**${shortName(s)}** — ${s.left} left to call (${s.leftNoShow} no-show · ${s.leftNotScheduled} not scheduled), ${s.called} already called of ${s.total}`);
+  }
+  if (data.summary.length === 0) lines.push('', 'No pending leads.');
+  return lines.join('\n');
+}
+
+/** Build the pending-leads message and post it to the call-leads Discord channel. */
+export async function sendPendingCallLeadsSummary(end = new Date()) {
+  const url = process.env.DISCORD_CALL_LEADS_SUMMARY_WEBHOOK_URL;
+  if (!url) {
+    console.warn('⚠️ [CallLeads] DISCORD_CALL_LEADS_SUMMARY_WEBHOOK_URL not configured — pending summary skipped');
+    return { ok: false, error: 'no_url' };
+  }
+  const data = await buildPendingCallLeads({ end });
+  const { DiscordConnect } = await import('../Utils/DiscordConnect.js');
+  const result = await DiscordConnect(url, formatPendingCallLeadsMessage(data), false);
+  console.log(`${result.ok ? '✅' : '❌'} [CallLeads] pending summary ${result.ok ? 'sent' : 'failed'}`, data.summary.map((s) => `${s.email}:${s.left}`).join(' '));
   return result;
 }
